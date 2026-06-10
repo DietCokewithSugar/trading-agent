@@ -6,6 +6,7 @@ import { runCycle, cycleStatus } from '../services/newsService.js';
 import { sseHandler, clientCount } from '../services/bus.js';
 import { getQuote } from '../services/fmp.js';
 import { getStats, getPerformance } from '../services/statsService.js';
+import { safeTokenEqual, createAuthRateLimiter } from '../services/authGuard.js';
 
 const router = Router();
 
@@ -177,9 +178,11 @@ let lastAnonCycleAt = 0;
 
 router.post(
   '/run-cycle',
+  createAuthRateLimiter('api'),
   asyncHandler(async (req, res) => {
     if (config.adminToken) {
-      if (req.headers['x-admin-token'] !== config.adminToken) {
+      if (!safeTokenEqual(req.headers['x-admin-token'], config.adminToken)) {
+        console.warn(`[api] x-admin-token 校验失败 ip=${req.ip} path=${req.path}`);
         return res.status(403).json({ error: '需要有效的 x-admin-token' });
       }
     } else {

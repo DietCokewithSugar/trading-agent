@@ -10,6 +10,9 @@ import { startScheduler } from './scheduler.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
+// Render 部署在单层反向代理之后:信任第一跳代理,req.ip 才是真实客户端 IP
+//(鉴权失败限流按 IP 计数,不可信任伪造的 X-Forwarded-For 链)
+app.set('trust proxy', 1);
 app.use(express.json());
 app.use('/api/admin', adminRouter);
 app.use('/api', apiRouter);
