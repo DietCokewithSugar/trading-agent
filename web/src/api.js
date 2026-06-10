@@ -16,14 +16,6 @@ export const api = {
   performance: () => get('/performance'),
   symbol: (symbol) => get(`/symbol/${encodeURIComponent(symbol)}`),
   status: () => get('/status'),
-  runCycle: async () => {
-    const res = await fetch('/api/run-cycle', { method: 'POST' });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      throw new Error(body.error || `触发失败: ${res.status}`);
-    }
-    return res.json();
-  },
 };
 
 /** 管理接口:所有请求携带 x-admin-token 请求头 */

@@ -79,8 +79,8 @@
 
 访问 `https://你的域名/#/admin` 进入隐藏管理页,输入 `ADMIN_TOKEN` 登录后可:
 
-- 查看调度运行状态(交易轮、上次运行、SSE 在线数等);
-- 手动触发一轮全源「抓取 → 分析 → 交易」;
+- 查看调度运行状态(交易轮、上次运行、SSE 在线数、模型等);
+- 手动触发一轮全源「抓取 → 分析 → 交易」(站内唯一的手动触发入口,公开页面不提供);
 - **初始化所有数据**:清空全部新闻、AI 分析、事件、交易记录、持仓与净值快照,现金恢复为 `INITIAL_CAPITAL`。适用于持仓数据已脏、想从头开始的场景。操作不可恢复,页面要求输入 `RESET` 二次确认。
 
 安全设计:管理接口(`/api/admin/*`)在服务端**强制鉴权**——未配置 `ADMIN_TOKEN` 时整组接口直接禁用(503),令牌错误返回 403;重置执行期间自动暂停新闻轮询与止损监控,并等待运行中的交易轮结束,绝不与交易并发删库。重置在数据库端通过 `admin_reset_data` 函数(005 迁移)单事务完成;尚未执行 005 迁移的库自动退回逐表删除。
@@ -112,7 +112,7 @@
    - `SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`
 4. 部署完成后访问服务 URL 即可。
 
-> ⚠️ **注意**:Render Free 计划的服务无流量时会休眠,定时抓取/交易会停摆,建议使用 Starter 及以上计划。若坚持用 Free 计划,可用外部定时服务(如 cron-job.org)定时请求一次 `POST https://你的域名/api/run-cycle` 来代替内置定时器。
+> ⚠️ **注意**:Render Free 计划的服务无流量时会休眠,定时抓取/交易会停摆,建议使用 Starter 及以上计划。若坚持用 Free 计划,可用外部定时服务(如 cron-job.org)定时请求一次 `POST https://你的域名/api/run-cycle` 来代替内置定时器(设置了 `ADMIN_TOKEN` 时需携带 `x-admin-token` 请求头)。
 
 ### 实时性说明(SSE 秒级推送)
 
@@ -175,7 +175,7 @@ cd web && npm run dev      # 终端 2:启动 Vite :5173(已配置 /api 代理)
 | `GET /api/stats` | 组合统计(今日盈亏、已实现盈亏、胜率、最大回撤) |
 | `GET /api/performance` | 业绩指标(夏普比率、累计收益率、SPY 基准对比与超额收益) |
 | `GET /api/symbol/:symbol` | 单只股票详情(报价、持仓、分析、交易历史) |
-| `GET /api/status` | 调度器状态 |
+| `GET /api/status` | 调度器状态(公开版,不含模型等内部配置) |
 | `POST /api/run-cycle` | 手动触发一轮抓取/分析/交易(未设 `ADMIN_TOKEN` 时全局 120 秒冷却,防滥用) |
 | `GET /api/health` | 健康检查 |
 | `GET /api/admin/verify` | 管理:校验令牌(以下均需 `x-admin-token` 请求头) |
