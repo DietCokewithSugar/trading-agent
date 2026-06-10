@@ -4,6 +4,7 @@ import { getStockNews, getGeneralNews, getPressReleases } from './fmp.js';
 import { getYahooNews } from './yahoo.js';
 import { analyzeArticle } from './deepseek.js';
 import { resolveEvent, markEventTraded } from './eventService.js';
+import { scoreSource, computeFinalConfidence } from './credibility.js';
 import { handleSignal } from './trader.js';
 import { getPortfolio } from './portfolio.js';
 import { broadcast } from './bus.js';
@@ -16,8 +17,14 @@ export const cycleStatus = {
   lastError: null,
 };
 
+/** 按原文 URL/发布方对"原始新闻来源"打可信度分(FMP/Yahoo 只是抓取渠道) */
+function withCredibility(article) {
+  const { domain, score } = scoreSource(article);
+  return { ...article, source_domain: domain, source_score: score };
+}
+
 function normalizeFmpItem(item, source) {
-  return {
+  return withCredibility({
     url: item.url,
     title: item.title,
     text_content: item.text || '',
@@ -26,11 +33,11 @@ function normalizeFmpItem(item, source) {
     image: item.image || null,
     symbols: item.symbol ? [String(item.symbol).toUpperCase()] : [],
     published_at: item.publishedDate ? new Date(item.publishedDate).toISOString() : null,
-  };
+  });
 }
 
 function normalizeYahooItem(item) {
-  return {
+  return withCredibility({
     url: item.url,
     title: item.title,
     text_content: item.text || '',
@@ -39,7 +46,7 @@ function normalizeYahooItem(item) {
     image: null,
     symbols: item.symbol ? [item.symbol] : [],
     published_at: item.publishedDate,
-  };
+  });
 }
 
 /**
@@ -83,10 +90,27 @@ async function fetchAndStoreNews({ fullFetch = false } = {}) {
   let inserted = [];
   if (rows.length) {
     // ignoreDuplicates: 数据库中已存在的 URL 直接跳过,返回的就是真正新增的文章
-    const { data, error } = await supabase()
+    let { data, error } = await supabase()
       .from('news_articles')
       .upsert(rows, { onConflict: 'url', ignoreDuplicates: true })
       .select();
+    // 兼容尚未执行 009 迁移的数据库:去掉来源可信度列重试
+    if (error && /source_domain|source_score/.test(error.message)) {
+      const legacyRows = rows.map(({ source_domain, source_score, ...rest }) => rest);
+      ({ data, error } = await supabase()
+        .from('news_articles')
+        .upsert(legacyRows, { onConflict: 'url', ignoreDuplicates: true })
+        .select());
+      // 评分列未入库,但本轮后续的分析/交易仍可用内存中的评分
+      if (!error) {
+        const scoreByUrl = new Map(rows.map((r) => [r.url, r]));
+        data = (data || []).map((d) => ({
+          ...d,
+          source_domain: scoreByUrl.get(d.url)?.source_domain ?? null,
+          source_score: scoreByUrl.get(d.url)?.source_score ?? null,
+        }));
+      }
+    }
     if (error) throw new Error(`新闻入库失败: ${error.message}`);
     inserted = data || [];
   }
@@ -135,6 +159,20 @@ async function analyzeAndStore(article) {
 
   if (!analysis.relevant || !analysis.symbol) return null;
 
+  // 综合置信度:来源可信度 × 分析置信度 × 时效 × 事件档位(中性/无档位不计算)
+  const sourceScore =
+    article.source_score !== null && article.source_score !== undefined
+      ? Number(article.source_score)
+      : scoreSource(article).score;
+  const finalConfidence = analysis.tier
+    ? computeFinalConfidence({
+        sourceScore,
+        confidence: analysis.confidence,
+        publishedAt: article.published_at,
+        tier: analysis.tier,
+      })
+    : null;
+
   const row = {
     news_id: article.id,
     symbol: analysis.symbol,
@@ -146,17 +184,26 @@ async function analyzeAndStore(article) {
     confidence: typeof analysis.confidence === 'number' ? analysis.confidence : null,
     reasoning: analysis.reasoning || '',
     event_summary: analysis.event_summary || null,
+    final_confidence: finalConfidence,
     model: config.deepseekModel,
   };
-  let { data, error } = await supabase().from('news_analyses').insert(row).select().single();
-  // 兼容尚未执行 003 迁移的数据库:去掉 event_summary 列重试
-  if (error && /event_summary/.test(error.message)) {
-    const { event_summary, ...legacy } = row;
-    ({ data, error } = await supabase().from('news_analyses').insert(legacy).select().single());
-    if (!error) data.event_summary = event_summary;
+  // 兼容旧库:逐个剥离尚未迁移的可选列重试(003 的 event_summary、009 的 final_confidence)
+  const payload = { ...row };
+  let { data, error } = await supabase().from('news_analyses').insert(payload).select().single();
+  while (error) {
+    const col = ['event_summary', 'final_confidence'].find(
+      (c) => c in payload && error.message.includes(c)
+    );
+    if (!col) break;
+    delete payload[col];
+    ({ data, error } = await supabase().from('news_analyses').insert(payload).select().single());
   }
   if (error) throw new Error(`分析结果入库失败: ${error.message}`);
-  return data;
+  return {
+    ...data,
+    event_summary: data.event_summary ?? row.event_summary,
+    final_confidence: data.final_confidence ?? row.final_confidence,
+  };
 }
 
 /** 完整的一轮:抓新闻 → 分析 → 交易,并通过 SSE 实时推送各环节结果 */
@@ -177,6 +224,7 @@ export async function runCycle({ fullFetch = false } = {}) {
     analyzed: 0,
     signals: 0,
     deduped: 0,
+    held: 0,
     trades: 0,
     errors: [],
   };
@@ -230,9 +278,36 @@ export async function runCycle({ fullFetch = false } = {}) {
 
         // 事件溯源去重:同一底层事件的多渠道报道只允许触发一次交易
         const dedup = await resolveEvent(article, analysisRow);
-        if (!dedup.proceed) {
+        const finalConf =
+          analysisRow.final_confidence === null || analysisRow.final_confidence === undefined
+            ? null
+            : Number(analysisRow.final_confidence);
+
+        if (!dedup.proceed && !dedup.confirmable) {
           summary.deduped += 1;
           console.log(`[cycle] ${analysisRow.symbol} 跳过交易: ${dedup.reason}`);
+          continue;
+        }
+
+        if (dedup.confirmable) {
+          // 被挂起事件的独立信源跟进报道:按本篇报道自身的综合置信度
+          // 叠加交叉确认加成(每多一个独立信源 +10%,上限 ×1.2)重新评估
+          const boost = Math.min(1 + 0.1 * Math.max((dedup.distinctSources || 2) - 1, 1), 1.2);
+          const boosted = finalConf === null ? null : Math.min(finalConf * boost, 1);
+          if (boosted !== null && boosted < config.minFinalConfidence) {
+            summary.deduped += 1;
+            console.log(
+              `[cycle] ${analysisRow.symbol} 交叉确认后综合置信度 ${boosted.toFixed(2)} 仍低于门槛 ${config.minFinalConfidence},继续观望`
+            );
+            continue;
+          }
+          console.log(`[cycle] ${analysisRow.symbol} ${dedup.reason},放行交易`);
+        } else if (finalConf !== null && finalConf < config.minFinalConfidence) {
+          // 来源可信度不足:不立即交易,事件已记录,等待独立信源交叉确认
+          summary.held += 1;
+          console.log(
+            `[cycle] ${analysisRow.symbol} 综合置信度 ${finalConf.toFixed(2)} 低于门槛 ${config.minFinalConfidence}(来源可信度/时效不足),挂起等待交叉确认`
+          );
           continue;
         }
 
@@ -253,7 +328,7 @@ export async function runCycle({ fullFetch = false } = {}) {
     cycleStatus.lastError = null;
     if (summary.newArticles || summary.analyzed) {
       console.log(
-        `[cycle] 完成: 新增${summary.newArticles} 分析${summary.analyzed} 信号${summary.signals} 去重${summary.deduped} 成交${summary.trades} 用时${summary.durationMs}ms`
+        `[cycle] 完成: 新增${summary.newArticles} 分析${summary.analyzed} 信号${summary.signals} 去重${summary.deduped} 挂起${summary.held} 成交${summary.trades} 用时${summary.durationMs}ms`
       );
     }
     broadcast('cycle', summary);

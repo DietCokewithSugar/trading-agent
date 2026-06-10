@@ -1,6 +1,7 @@
 import { supabase } from '../db.js';
 import { config } from '../config.js';
 import { matchEvent } from './deepseek.js';
+import { extractDomain } from './credibility.js';
 
 /**
  * 新闻事件溯源与去重。
@@ -9,15 +10,19 @@ import { matchEvent } from './deepseek.js';
  * 如果每条报道都独立触发交易,就会对同一利好反复加仓。处理方式:
  *  1. 每个可交易信号先在 news_events 中做事件归并(DeepSeek 判断是否为既有事件的重复报道);
  *  2. 重复报道只累计计数,不再触发交易;只有真正的新事件才放行;
- *  3. 新事件放行前再过一道同向交易冷却期,作为 LLM 误判的兜底;
- *  4. news_events 表不可用(迁移未执行)或归并失败时,退回纯冷却期判断,保证主流程不中断。
+ *  3. 例外:事件尚未交易(如首发报道来源可信度不足被挂起)时,来自"独立信源"
+ *     (此前未出现过的域名)的重复报道视为交叉确认,通过冷却期后以 confirmable
+ *     返回,由上层用加成后的综合置信度重新评估是否放行;
+ *  4. 新事件放行前再过一道同向交易冷却期,作为 LLM 误判的兜底;
+ *  5. news_events 表不可用(迁移未执行)或归并失败时,退回纯冷却期判断,保证主流程不中断。
  *
- * 返回 { proceed, eventId, reason }。
+ * 返回 { proceed, eventId, reason, confirmable?, distinctSources? }。
  */
 export async function resolveEvent(article, analysisRow) {
   const db = supabase();
   const symbol = analysisRow.symbol;
   const summary = analysisRow.event_summary || article.title;
+  const domain = extractDomain(article.url) || String(article.publisher || '').toLowerCase() || null;
 
   let eventId = null;
   try {
@@ -40,14 +45,38 @@ export async function resolveEvent(article, analysisRow) {
       });
       const event = match.duplicateOf ? events.find((e) => e.id === match.duplicateOf) : null;
       if (event) {
-        await db
-          .from('news_events')
-          .update({
-            article_count: (event.article_count || 1) + 1,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('id', event.id);
+        // 独立信源判定:仅在事件已记录过信源域名时才可能成立(009 迁移未执行时
+        // source_domains 不存在,按约定 fail-closed,不做交叉确认)
+        const knownDomains = Array.isArray(event.source_domains) ? event.source_domains : null;
+        const isNewSource =
+          Boolean(domain) && Array.isArray(knownDomains) && knownDomains.length > 0 && !knownDomains.includes(domain);
+        const nextDomains = isNewSource ? [...knownDomains, domain] : knownDomains;
+
+        const update = {
+          article_count: (event.article_count || 1) + 1,
+          updated_at: new Date().toISOString(),
+        };
+        if (isNewSource) update.source_domains = nextDomains;
+        const { error: updErr } = await db.from('news_events').update(update).eq('id', event.id);
+        if (updErr && /source_domains/.test(updErr.message)) {
+          const { source_domains, ...legacy } = update;
+          await db.from('news_events').update(legacy).eq('id', event.id);
+        }
         await linkAnalysis(db, analysisRow.id, event.id);
+
+        // 未交易事件 + 独立信源 = 交叉确认机会,仍需通过同向冷却期
+        if (!event.traded && isNewSource) {
+          const cooldown = await checkCooldown(db, analysisRow);
+          if (cooldown.ok) {
+            return {
+              proceed: false,
+              confirmable: true,
+              eventId: event.id,
+              distinctSources: nextDomains.length,
+              reason: `独立信源交叉确认(事件 #${event.id}:${event.summary},第 ${update.article_count} 篇报道,信源 ${nextDomains.length} 个)`,
+            };
+          }
+        }
         return {
           proceed: false,
           eventId: event.id,
@@ -56,16 +85,19 @@ export async function resolveEvent(article, analysisRow) {
       }
     }
 
-    const { data: created, error: insErr } = await db
-      .from('news_events')
-      .insert({
-        symbol,
-        sentiment: analysisRow.sentiment,
-        summary,
-        first_news_id: article.id,
-      })
-      .select()
-      .single();
+    const row = {
+      symbol,
+      sentiment: analysisRow.sentiment,
+      summary,
+      first_news_id: article.id,
+      source_domains: domain ? [domain] : [],
+    };
+    let { data: created, error: insErr } = await db.from('news_events').insert(row).select().single();
+    // 兼容尚未执行 009 迁移的数据库:去掉 source_domains 列重试
+    if (insErr && /source_domains/.test(insErr.message)) {
+      const { source_domains, ...legacy } = row;
+      ({ data: created, error: insErr } = await db.from('news_events').insert(legacy).select().single());
+    }
     if (insErr) throw new Error(insErr.message);
     eventId = created.id;
     await linkAnalysis(db, analysisRow.id, eventId);

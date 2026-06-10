@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { Alert, App as AntApp, Badge, Card, Col, Row, Statistic, Tabs, Tag } from 'antd';
 import { api, fmtMoney, fmtNum, fmtPercent, SESSION_LABELS } from './api.js';
 import Dashboard from './components/Dashboard.jsx';
@@ -17,6 +17,8 @@ const SESSION_TAG_COLORS = { pre: 'orange', regular: 'blue', post: 'orange', clo
 
 // SSE 断线时的兜底轮询间隔
 const FALLBACK_REFRESH_MS = 60_000;
+// 快照折线图在前端最多保留的点数(服务端采样上限同为 600),防止长期挂机内存膨胀
+const MAX_SNAPSHOT_POINTS = 600;
 
 function MainApp() {
   const { notification } = AntApp.useApp();
@@ -24,12 +26,14 @@ function MainApp() {
   const [portfolio, setPortfolio] = useState(null);
   const [snapshots, setSnapshots] = useState([]);
   const [trades, setTrades] = useState([]);
-  const [news, setNews] = useState([]);
+  // 新闻数据由新闻页自行按筛选条件拉取,这里只广播"有新内容"的版本号
+  const [newsVersion, setNewsVersion] = useState(0);
   const [stats, setStats] = useState(null);
   const [performance, setPerformance] = useState(null);
   const [status, setStatus] = useState(null);
   const [error, setError] = useState(null);
   const [live, setLive] = useState(false);
+  const liveRef = useRef(false);
   const [activeSymbol, setActiveSymbol] = useState(null);
 
   const pushToast = useCallback(
@@ -45,11 +49,10 @@ function MainApp() {
 
   const refresh = useCallback(async () => {
     try {
-      const [p, s, t, n, st, stt, perf] = await Promise.all([
+      const [p, s, t, st, stt, perf] = await Promise.all([
         api.portfolio(),
         api.snapshots(),
         api.trades(),
-        api.news(),
         api.status(),
         api.stats(),
         api.performance().catch(() => null),
@@ -57,7 +60,7 @@ function MainApp() {
       setPortfolio(p);
       setSnapshots(s);
       setTrades(t);
-      setNews(n);
+      setNewsVersion((v) => v + 1);
       setStatus(st);
       setStats(stt);
       if (perf) setPerformance(perf);
@@ -67,26 +70,42 @@ function MainApp() {
     }
   }, []);
 
+  // 兜底轮询只在 SSE 断线时工作:实时连接正常时所有数据都由推送驱动,无需整页重拉
   useEffect(() => {
     refresh();
-    const timer = setInterval(refresh, FALLBACK_REFRESH_MS);
+    const timer = setInterval(() => {
+      if (!liveRef.current) refresh();
+    }, FALLBACK_REFRESH_MS);
     return () => clearInterval(timer);
   }, [refresh]);
 
   // SSE 实时推送:报价/快照直接带数据,其余事件触发对应数据的增量拉取
   useEffect(() => {
     const es = new EventSource('/api/stream');
-    es.onopen = () => setLive(true);
-    es.onerror = () => setLive(false);
+    let wasDown = false;
+    es.onopen = () => {
+      liveRef.current = true;
+      setLive(true);
+      // 断线重连成功后整体补一次,追平断线期间漏掉的推送
+      if (wasDown) {
+        wasDown = false;
+        refresh();
+      }
+    };
+    es.onerror = () => {
+      liveRef.current = false;
+      wasDown = true;
+      setLive(false);
+    };
 
     es.addEventListener('portfolio', (e) => setPortfolio(JSON.parse(e.data)));
     es.addEventListener('snapshot', (e) => {
       const snap = JSON.parse(e.data);
-      setSnapshots((prev) => [...prev, snap]);
+      setSnapshots((prev) => [...prev.slice(-(MAX_SNAPSHOT_POINTS - 1)), snap]);
     });
-    es.addEventListener('news', () => api.news().then(setNews).catch(() => {}));
+    es.addEventListener('news', () => setNewsVersion((v) => v + 1));
     es.addEventListener('analysis', (e) => {
-      api.news().then(setNews).catch(() => {});
+      setNewsVersion((v) => v + 1);
       try {
         const a = JSON.parse(e.data);
         if (a.tier && a.tier <= 2) {
@@ -197,7 +216,7 @@ function MainApp() {
             onSymbolClick={setActiveSymbol}
           />
         )}
-        {tab === 'news' && <NewsFeed news={news} onSymbolClick={setActiveSymbol} />}
+        {tab === 'news' && <NewsFeed version={newsVersion} onSymbolClick={setActiveSymbol} />}
         {tab === 'trades' && <TradesPage trades={trades} onSymbolClick={setActiveSymbol} />}
       </main>
 

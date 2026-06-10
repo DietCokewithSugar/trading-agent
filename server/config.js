@@ -55,6 +55,9 @@ export const config = {
   minOrderAmount: 50,
   // 事件去重窗口(小时):同一事件的多渠道报道在该窗口内归并,只触发一次交易
   eventDedupHours: num(process.env.EVENT_DEDUP_HOURS, 72),
+  // 综合置信度门槛(0~1):来源可信度 × 分析置信度 × 时效 × 事件档位 低于该值的信号
+  // 不立即交易,挂起等待独立信源的交叉确认;设为 0 可关闭该门槛
+  minFinalConfidence: Math.min(num0(process.env.MIN_FINAL_CONFIDENCE, 0.35), 1),
   // 同一股票同方向新闻交易的冷却期(分钟),作为事件去重的兜底防线
   tradeCooldownMinutes: num(process.env.TRADE_COOLDOWN_MINUTES, 30),
 

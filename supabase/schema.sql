@@ -98,6 +98,13 @@ create index if not exists idx_events_symbol_created on news_events (symbol, cre
 alter table news_analyses add column if not exists event_id bigint references news_events(id) on delete set null;
 alter table news_analyses add column if not exists event_summary text;
 
+-- 新闻来源可信度(009):文章记录原始来源域名与可信度评分,
+-- 分析记录综合置信度(来源 × 置信度 × 时效 × 档位),事件记录独立信源域名用于交叉确认
+alter table news_articles add column if not exists source_domain text;
+alter table news_articles add column if not exists source_score numeric;
+alter table news_analyses add column if not exists final_confidence numeric;
+alter table news_events add column if not exists source_domains text[] not null default '{}';
+
 -- 组合净值快照(盈亏折线图)
 create table if not exists portfolio_snapshots (
   id bigint generated always as identity primary key,
