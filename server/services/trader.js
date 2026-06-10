@@ -3,6 +3,7 @@ import { config } from '../config.js';
 import { getQuote, getProfile } from './fmp.js';
 import { decideTrade } from './deepseek.js';
 import { getPortfolio, getValuation } from './portfolio.js';
+import { reflectOnClosedTrade, getMemories } from './memoryService.js';
 
 function round4(n) {
   return Math.round(n * 10000) / 10000;
@@ -57,6 +58,8 @@ export async function handleSignal(article, analysisRow) {
   const price = quote.effective_price ?? quote.price;
 
   const valuation = await getValuation();
+  // 历史教训(FinMem 式记忆):该股票及全局的平仓复盘结论,注入决策上下文
+  const memories = await getMemories(symbol);
   const decision = await decideTrade({
     analysis: analysisRow,
     article,
@@ -67,6 +70,7 @@ export async function handleSignal(article, analysisRow) {
       totalValue: valuation.total_value,
       positions: valuation.positions,
     },
+    memories,
   });
 
   if (!decision.symbolValid) {
@@ -198,7 +202,7 @@ export async function executeSellOrder({
   news_id = null,
   analysis_id = null,
 }) {
-  return withTradeLock(async () => {
+  const trade = await withTradeLock(async () => {
     // 持仓与现金以下单时刻的最新状态为准
     const val = await getValuation();
 
@@ -237,6 +241,15 @@ export async function executeSellOrder({
     console.warn('[trader] execute_trade RPC 不可用,退回非事务路径(请尽快执行 004 迁移)');
     return legacySell({ symbol, price, quantity, amount, reason, trigger, news_id, analysis_id, val, position });
   });
+
+  // 平仓复盘:在交易锁外异步执行(LLM 调用可达 90 秒,绝不阻塞下单链路),
+  // 覆盖全部卖出路径(新闻信号/自动止损/自动止盈/持仓复查)
+  if (trade && trade.realized_pnl !== null && trade.realized_pnl !== undefined) {
+    reflectOnClosedTrade(trade).catch((err) =>
+      console.warn(`[memory] ${symbol} 平仓复盘失败: ${err.message}`)
+    );
+  }
+  return trade;
 }
 
 /** 兼容尚未执行 004 迁移的数据库:旧的非事务卖出路径 */

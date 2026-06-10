@@ -52,6 +52,9 @@ export const config = {
   // 同一股票同方向新闻交易的冷却期(分钟),作为事件去重的兜底防线
   tradeCooldownMinutes: num(process.env.TRADE_COOLDOWN_MINUTES, 30),
 
+  // 平仓后是否用 DeepSeek 复盘并沉淀经验教训(注入后续交易决策)
+  enableReflection: process.env.ENABLE_REFLECTION !== 'false',
+
   // 关注列表(用于 Yahoo RSS 抓取),持仓股票会自动加入
   watchlist: (process.env.WATCHLIST || 'AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA')
     .split(',')

@@ -35,6 +35,8 @@ services:
         value: "100000"
       - key: TRADE_TIER_THRESHOLD
         value: "2"
+      - key: ENABLE_REFLECTION
+        value: "true"
       - key: WATCHLIST
         value: "AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA"
       - key: ADMIN_TOKEN
