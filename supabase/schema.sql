@@ -105,6 +105,40 @@ alter table news_articles add column if not exists source_score numeric;
 alter table news_analyses add column if not exists final_confidence numeric;
 alter table news_events add column if not exists source_domains text[] not null default '{}';
 
+-- 信号前瞻收益(011,评估层):每条非中性分析记录信号时点市场价,
+-- 后台任务回填 1 小时 / 1 交易日 / 5 交易日前瞻收益(百分比,相对 signal_price),
+-- 覆盖未实际交易的信号,用于评估分类信号本身的命中率/IC/校准(/api/signal-stats)
+alter table news_analyses add column if not exists signal_price numeric;
+alter table news_analyses add column if not exists fwd_return_1h numeric;
+alter table news_analyses add column if not exists fwd_return_1d numeric;
+alter table news_analyses add column if not exists fwd_return_5d numeric;
+create index if not exists idx_analyses_fwd_pending on news_analyses (created_at)
+  where signal_price is not null and (fwd_return_1d is null or fwd_return_5d is null);
+
+-- 开盘队列(010):休市时段产生的交易信号挂单,待下一常规时段以开盘价成交,
+-- 隔夜跳空由市场兑现而不是被模拟盘白捡
+create table if not exists pending_orders (
+  id bigint generated always as identity primary key,
+  symbol text not null,
+  side text not null check (side in ('buy', 'sell')),
+  -- buy: 动用组合总值的比例(已含档位/置信度/来源/风控官缩放);sell: 卖出持仓比例
+  fraction numeric not null,
+  ref_price numeric,                  -- 决策时参考价(休市 stale 价,仅供审计对比跳空)
+  stop_loss_percent numeric,
+  take_profit_percent numeric,
+  reason text,
+  news_id bigint references news_articles(id) on delete set null,
+  analysis_id bigint references news_analyses(id) on delete set null,
+  status text not null default 'pending'
+    check (status in ('pending', 'filled', 'cancelled', 'expired')),
+  trade_id bigint references trades(id) on delete set null,
+  note text,                          -- 终态说明(成交/作废原因)
+  created_at timestamptz not null default now(),
+  processed_at timestamptz
+);
+create index if not exists idx_pending_orders_pending on pending_orders (created_at)
+  where status = 'pending';
+
 -- 组合净值快照(盈亏折线图)
 create table if not exists portfolio_snapshots (
   id bigint generated always as identity primary key,
@@ -250,6 +284,7 @@ as $$
 declare
   v_capital numeric;
 begin
+  -- cascade 会一并清空 trade_reflections / pending_orders 等引用这些表的从表
   truncate table
     trades,
     news_events,
@@ -316,6 +351,7 @@ alter table positions enable row level security;
 alter table trades enable row level security;
 alter table portfolio_snapshots enable row level security;
 alter table news_events enable row level security;
+alter table pending_orders enable row level security;
 
 create policy "public read news_articles" on news_articles for select using (true);
 create policy "public read news_analyses" on news_analyses for select using (true);
@@ -324,3 +360,4 @@ create policy "public read positions" on positions for select using (true);
 create policy "public read trades" on trades for select using (true);
 create policy "public read portfolio_snapshots" on portfolio_snapshots for select using (true);
 create policy "public read news_events" on news_events for select using (true);
+create policy "public read pending_orders" on pending_orders for select using (true);

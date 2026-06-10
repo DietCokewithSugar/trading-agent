@@ -6,6 +6,8 @@ import { runCycle, cycleStatus } from '../services/newsService.js';
 import { sseHandler, clientCount } from '../services/bus.js';
 import { getQuote } from '../services/fmp.js';
 import { getStats, getPerformance } from '../services/statsService.js';
+import { getSignalStats } from '../services/signalStats.js';
+import { listPendingOrders } from '../services/openQueue.js';
 import { safeTokenEqual, createAuthRateLimiter } from '../services/authGuard.js';
 
 const router = Router();
@@ -77,6 +79,22 @@ router.get(
   '/performance',
   asyncHandler(async (req, res) => {
     res.json(await getPerformance());
+  })
+);
+
+/** 信号质量统计:前瞻收益的方向命中率/平均收益/IC,按档位/来源/置信度分桶 */
+router.get(
+  '/signal-stats',
+  asyncHandler(async (req, res) => {
+    res.json(await getSignalStats());
+  })
+);
+
+/** 等待开盘成交的挂单(休市时段产生的信号) */
+router.get(
+  '/pending-orders',
+  asyncHandler(async (req, res) => {
+    res.json(await listPendingOrders());
   })
 );
 

@@ -141,6 +141,22 @@ async function checkCooldown(db, analysisRow) {
         reason: `冷却期内已有同向新闻交易(${config.tradeCooldownMinutes} 分钟内,交易 #${data[0].id})`,
       };
     }
+
+    // 开盘队列里同向的待成交挂单也算占用冷却期(挂单成交前不会出现在 trades 表里,
+    // 不查会导致休市期间同一股票的多个事件各挂一单);010 迁移未执行时跳过该检查
+    const { data: pending, error: pendErr } = await db
+      .from('pending_orders')
+      .select('id')
+      .eq('symbol', analysisRow.symbol)
+      .eq('side', side)
+      .eq('status', 'pending')
+      .limit(1);
+    if (!pendErr && pending?.length) {
+      return {
+        ok: false,
+        reason: `开盘队列中已有同向挂单(#${pending[0].id})`,
+      };
+    }
     return { ok: true };
   } catch (err) {
     // 去重防线全部失效时保守跳过,宁可错过也不重复下单

@@ -4,6 +4,7 @@ import { api, fmtMoney, fmtNum, fmtPercent, SESSION_LABELS } from './api.js';
 import Dashboard from './components/Dashboard.jsx';
 import NewsFeed from './components/NewsFeed.jsx';
 import TradesPage from './components/TradesPage.jsx';
+import SignalStatsPage from './components/SignalStatsPage.jsx';
 import SymbolModal from './components/SymbolModal.jsx';
 import AdminPage from './components/AdminPage.jsx';
 
@@ -11,6 +12,7 @@ const TABS = [
   { key: 'dashboard', label: '仪表盘' },
   { key: 'news', label: '新闻分析' },
   { key: 'trades', label: '交易记录' },
+  { key: 'signals', label: '信号质量' },
 ];
 
 const SESSION_TAG_COLORS = { pre: 'orange', regular: 'blue', post: 'orange', closed: 'default' };
@@ -218,6 +220,7 @@ function MainApp() {
         )}
         {tab === 'news' && <NewsFeed version={newsVersion} onSymbolClick={setActiveSymbol} />}
         {tab === 'trades' && <TradesPage trades={trades} onSymbolClick={setActiveSymbol} />}
+        {tab === 'signals' && <SignalStatsPage />}
       </main>
 
       <footer className="footer">模拟交易,不构成投资建议</footer>

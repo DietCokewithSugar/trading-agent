@@ -21,6 +21,8 @@ export const api = {
   },
   stats: () => get('/stats'),
   performance: () => get('/performance'),
+  signalStats: () => get('/signal-stats'),
+  pendingOrders: () => get('/pending-orders'),
   symbol: (symbol) => get(`/symbol/${encodeURIComponent(symbol)}`),
   status: () => get('/status'),
 };

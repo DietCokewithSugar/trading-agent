@@ -154,6 +154,18 @@ export function scoreSource(article) {
   return { domain, score: round2(Math.max(score, MIN_SCORE)), label };
 }
 
+/**
+ * 是否为公司公告类来源(新闻稿通道 / FMP 公告端点)。
+ * 公告"真实性"高(评分 0.9)但立场天然偏多,且新闻稿通道是微盘股付费拉抬的经典渠道,
+ * 因此利好方向的公告信号在交易门槛上要额外折价(config.pressBullishPenalty)。
+ */
+export function isPressRelease(article) {
+  if (article?.source === 'fmp-press') return true;
+  const domain = article?.source_domain || extractDomain(article?.url);
+  if (!domain) return false;
+  return SOURCE_TIERS[1].domains.some((d) => domain === d || domain.endsWith(`.${d}`));
+}
+
 /** 时效分:1 小时内 1.0,随后线性衰减,24 小时以上 0.5;无发布时间按 0.7 */
 export function recencyScore(publishedAt) {
   if (!publishedAt) return 0.7;

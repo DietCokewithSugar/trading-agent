@@ -85,13 +85,31 @@
 
 - **下单时重取报价**:LLM 决策可能耗时数十秒甚至更久,买卖都在下单瞬间重新拉取最新价格成交,绝不按"消息发布瞬间的价格"成交;
 - **漂移熔断**:下单时最新价相对决策时价格偏移超过 `BUY_PRICE_DRIFT_ABORT_PERCENT`(默认 5%)即放弃买入——上漂是追高,下漂说明行情已反转;
-- **滑点模型**(`ENABLE_SLIPPAGE` 默认开):成交价在最新市场价上施加不利偏移(买更贵、卖更便宜),滑点 = 按市值分档的半点差(超大盘 1bp ~ 微盘 30bp)× 时段乘数(盘前盘后 ×3)× 当日波动乘数 + 订单冲击(按占日均美元成交额比例)+ 可选佣金(`COMMISSION_BPS`),单笔封顶 `SLIPPAGE_MAX_BPS`(默认 150bp)。每笔交易的市场参考价与实际滑点记录在 `trades.quote_price / slippage_bps`(008 迁移)。
+- **滑点模型**(`ENABLE_SLIPPAGE` 默认开):成交价在最新市场价上施加不利偏移(买更贵、卖更便宜),滑点 = 按市值分档的半点差(超大盘 1bp ~ 微盘 30bp)× 时段乘数(盘前盘后 ×3)× 当日波动乘数 + 订单冲击(按占日均美元成交额比例)+ 可选佣金(`COMMISSION_BPS`),单笔封顶 `SLIPPAGE_MAX_BPS`(默认 150bp)。每笔交易的市场参考价与实际滑点记录在 `trades.quote_price / slippage_bps`(008 迁移);
+- **开盘队列**(010 迁移):休市时段(夜间/周末/假日)产生的信号**不再按上一收盘价立即成交**——真实世界里隔夜新闻只能在次日开盘竞价成交,隔夜跳空动辄数个百分点,按 stale 价成交等于把市场兑现的跳空记成策略收益。这类信号挂入 `pending_orders` 表(交易页可见「待开盘订单」),下一个常规交易时段以**当日开盘价 + 盘中滑点**成交;超过 `PENDING_ORDER_MAX_AGE_HOURS`(默认 96 小时,覆盖周末长假)未成交自动作废。盘前盘后有真实成交价,仍按 aftermarket 价立即成交。
+
+### 标的准入门槛与公告降权
+
+FMP 全市场新闻流会带出大量微盘股,其中不少"利好"是付费拉抬;新闻稿通道(PR Newswire / GlobeNewswire 等)真实性高但立场天然偏多。两道防线:
+
+- **准入门槛**(只约束买入,卖出/止损永远放行):最小市值 `MIN_MARKET_CAP`(默认 $3 亿)、最低股价 `MIN_PRICE`(默认 $2)、最低日均美元成交额 `MIN_AVG_DOLLAR_VOLUME`(默认 $500 万),在 LLM 决策之前由服务端硬性拦截,档案数据缺失按不通过处理(fail-closed);
+- **公告利好降权**:公司公告类来源的**利好**信号在置信度门槛比较时折价 `PRESS_BULLISH_PENALTY`(默认 ×0.75),折价后多数会落入"挂起等待交叉确认"流程——只有独立媒体(非新闻稿通道)跟进报道后才解锁交易;利空公告不折价(公司主动披露利空可信度反而高)。
+
+### 信号质量评估(前瞻收益)
+
+组合盈亏混杂了仓位缩放、止损、风控官等环节,回答不了"**AI 的新闻分类本身有没有 alpha**"。系统为此单独建了一个评估层(011 迁移):
+
+- 每条非中性分析在产生时记录**信号时点市场价**(`signal_price`),**包括因事件去重、置信度不足而未实际交易的信号**;
+- 后台任务自动回填三个口径的前瞻收益:信号后 1 小时(实时价,休市窗口错过则缺省)、信号日后第 1 / 第 5 个交易日收盘价;
+- 前端「信号质量」页(`/api/signal-stats`)汇总:按**事件档位 / 来源可信度 / 分析置信度 / 已交易 vs 未交易**分桶的方向命中率与平均前瞻收益(按信号方向调整,利空跌了算命中),以及综合置信度与收益的相关系数(IC)、置信度校准(置信度分桶命中率是否单调上升)。
+
+这一层回答的是策略评估的根本问题:跑赢了,是信号好还是行情好;跑输了,是信号差还是执行差。
 
 ### 风控官(TradingAgents 式独立审批)
 
 参考 [TradingAgents](https://arxiv.org/abs/2412.20138) 的多角色协作设计:每笔**买入**在执行前,会由一个独立于交易员的"风控官"角色做最终审批(单次 DeepSeek 调用,内含多空双方论证)。风控官看到的是交易员看不到的组合全景——各持仓/行业权重、最近 5 笔卖出的盈亏(连败应降敞口)、历史复盘教训——并给出三种裁决:**放行**、**缩仓**(scale 0~1)或**否决**,还可建议更紧的止损。裁决理由会追加到交易记录的决策依据中。审批调用失败时遵循系统的 fail-closed 约定:放弃买入,宁可错过不可冒进;卖出不经风控官(卖出本身就是降风险)。`ENABLE_RISK_OFFICER=false` 可关闭。
 
-仓位最终缩放链:LLM 给出 fraction → 档位/置信度缩放 → 风控官 scale → 硬性风控帽(单股 ≤25%、单笔 ≤20%、最小订单 $50)。
+仓位最终缩放链:LLM 给出 fraction(**占组合总值的比例**,受可用现金约束——若按"占剩余现金比例"下单,先到的信号占大仓、后到的只剩零头,仓位大小会取决于新闻先后而非信号强弱)→ 档位/置信度/来源可信度缩放 → 风控官 scale → 硬性风控帽(单股 ≤25%、单笔 ≤20%、最小订单 $50)。
 
 ### 交易记忆与复盘(FinMem 式反思)
 
@@ -123,13 +141,14 @@
 - **AI**: [DeepSeek API](https://api-docs.deepseek.com/)(新闻分析 + 交易决策,模型可配置)
 - **存储**: Supabase (PostgreSQL)
 - **部署**: Render(`render.yaml` Blueprint)
+- **测试**: `node:test` 单元测试(交易日历、滑点模型、可信度评分、仓位缩放、准入门槛、前瞻收益等纯函数),GitHub Actions CI(`npm test` + 前端构建)
 
 ## 部署步骤
 
 ### 1. 初始化 Supabase
 
 1. 在 [supabase.com](https://supabase.com) 创建项目;
-2. 打开 **SQL Editor**,执行仓库中的 [`supabase/schema.sql`](supabase/schema.sql);**已有部署升级时**,改为执行 `supabase/migrations/` 下的增量脚本(如 [`002_stops_and_stats.sql`](supabase/migrations/002_stops_and_stats.sql)、[`003_news_events.sql`](supabase/migrations/003_news_events.sql)、[`004_atomic_trade.sql`](supabase/migrations/004_atomic_trade.sql)、[`005_admin_reset.sql`](supabase/migrations/005_admin_reset.sql)、[`006_trade_reflections.sql`](supabase/migrations/006_trade_reflections.sql)、[`007_position_management.sql`](supabase/migrations/007_position_management.sql)、[`008_fill_realism.sql`](supabase/migrations/008_fill_realism.sql));
+2. 打开 **SQL Editor**,执行仓库中的 [`supabase/schema.sql`](supabase/schema.sql);**已有部署升级时**,改为执行 `supabase/migrations/` 下的增量脚本(如 [`002_stops_and_stats.sql`](supabase/migrations/002_stops_and_stats.sql)、[`003_news_events.sql`](supabase/migrations/003_news_events.sql)、[`004_atomic_trade.sql`](supabase/migrations/004_atomic_trade.sql)、[`005_admin_reset.sql`](supabase/migrations/005_admin_reset.sql)、[`006_trade_reflections.sql`](supabase/migrations/006_trade_reflections.sql)、[`007_position_management.sql`](supabase/migrations/007_position_management.sql)、[`008_fill_realism.sql`](supabase/migrations/008_fill_realism.sql)、[`009_source_credibility.sql`](supabase/migrations/009_source_credibility.sql)、[`010_open_queue.sql`](supabase/migrations/010_open_queue.sql)、[`011_signal_forward_returns.sql`](supabase/migrations/011_signal_forward_returns.sql));
 3. 在 **Project Settings → API** 记下 `Project URL` 和 `service_role` key。
 
 ### 2. 部署到 Render
@@ -196,6 +215,11 @@ cd web && npm run dev      # 终端 2:启动 Vite :5173(已配置 /api 代理)
 | `SLIPPAGE_MAX_BPS` | `150` | 单笔滑点上限(基点) |
 | `COMMISSION_BPS` | `0` | 佣金(基点,折算进成交价) |
 | `BUY_PRICE_DRIFT_ABORT_PERCENT` | `5` | 买入漂移熔断:下单时价格相对决策时偏移超过该百分比即放弃 |
+| `MIN_MARKET_CAP` | `300000000` | 标的准入:最小市值(美元),只约束买入;设 0 关闭 |
+| `MIN_PRICE` | `2` | 标的准入:最低股价(美元);设 0 关闭 |
+| `MIN_AVG_DOLLAR_VOLUME` | `5000000` | 标的准入:最低日均美元成交额(日均成交量×现价);设 0 关闭 |
+| `PRESS_BULLISH_PENALTY` | `0.75` | 公司公告类来源的利好信号在置信度门槛上的折价(1=不折价) |
+| `PENDING_ORDER_MAX_AGE_HOURS` | `96` | 开盘队列挂单的最长等待时长(小时),超时作废,需执行 010 迁移 |
 | `ADMIN_TOKEN` | 空 | 设置后手动触发接口需要鉴权;同时是管理后台(`#/admin`)的登录口令,未设置时管理接口整组禁用 |
 
 ## API 一览
@@ -209,6 +233,8 @@ cd web && npm run dev      # 终端 2:启动 Vite :5173(已配置 /api 代理)
 | `GET /api/stream` | SSE 实时推送流(news / analysis / trade / portfolio / snapshot / cycle) |
 | `GET /api/stats` | 组合统计(今日盈亏、已实现盈亏、胜率、最大回撤) |
 | `GET /api/performance` | 业绩指标(夏普比率、累计收益率、SPY 基准对比与超额收益) |
+| `GET /api/signal-stats` | 信号质量统计(前瞻收益的命中率/平均收益/IC,按档位/来源/置信度分桶) |
+| `GET /api/pending-orders` | 等待开盘成交的挂单(休市时段产生的信号) |
 | `GET /api/symbol/:symbol` | 单只股票详情(报价、持仓、分析、交易历史) |
 | `GET /api/status` | 调度器状态(公开版,不含模型等内部配置) |
 | `POST /api/run-cycle` | 手动触发一轮抓取/分析/交易(未设 `ADMIN_TOKEN` 时全局 120 秒冷却,防滥用) |

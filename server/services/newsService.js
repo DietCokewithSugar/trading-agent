@@ -1,10 +1,11 @@
 import { supabase } from '../db.js';
 import { config } from '../config.js';
-import { getStockNews, getGeneralNews, getPressReleases } from './fmp.js';
+import { getStockNews, getGeneralNews, getPressReleases, getQuote } from './fmp.js';
 import { getYahooNews } from './yahoo.js';
 import { analyzeArticle } from './deepseek.js';
 import { resolveEvent, markEventTraded } from './eventService.js';
-import { scoreSource, computeFinalConfidence } from './credibility.js';
+import { scoreSource, computeFinalConfidence, isPressRelease } from './credibility.js';
+import { recordSignalPrice } from './signalReturns.js';
 import { handleSignal } from './trader.js';
 import { getPortfolio } from './portfolio.js';
 import { broadcast } from './bus.js';
@@ -225,6 +226,7 @@ export async function runCycle({ fullFetch = false } = {}) {
     signals: 0,
     deduped: 0,
     held: 0,
+    queued: 0,
     trades: 0,
     errors: [],
   };
@@ -267,6 +269,19 @@ export async function runCycle({ fullFetch = false } = {}) {
           tier: analysisRow.tier,
         });
 
+        // 信号评估层:为所有非中性信号(含后面被去重/挂起而不交易的)记录信号时点市场价,
+        // 后台任务回填 1h/1d/5d 前瞻收益,用于评估分类信号本身的质量
+        if (analysisRow.sentiment !== 'neutral' && analysisRow.tier) {
+          try {
+            const quote = await getQuote(analysisRow.symbol);
+            if (quote) {
+              await recordSignalPrice(analysisRow.id, quote.effective_price ?? quote.price);
+            }
+          } catch (err) {
+            console.warn(`[signal] ${analysisRow.symbol} 记录信号价失败: ${err.message}`);
+          }
+        }
+
         const actionable =
           analysisRow.sentiment !== 'neutral' &&
           analysisRow.tier !== null &&
@@ -278,10 +293,23 @@ export async function runCycle({ fullFetch = false } = {}) {
 
         // 事件溯源去重:同一底层事件的多渠道报道只允许触发一次交易
         const dedup = await resolveEvent(article, analysisRow);
-        const finalConf =
+        const rawConf =
           analysisRow.final_confidence === null || analysisRow.final_confidence === undefined
             ? null
             : Number(analysisRow.final_confidence);
+        // 公司公告类来源的利好信号在门槛比较时折价:公告真实性高但立场天然偏多
+        // (新闻稿通道也是微盘股付费拉抬的经典渠道),折价后多数会落入
+        // "挂起等独立媒体交叉确认"流程,由非公告信源的跟进报道解锁交易
+        const pressPenalty =
+          analysisRow.sentiment === 'bullish' && isPressRelease(article)
+            ? config.pressBullishPenalty
+            : 1;
+        const finalConf = rawConf === null ? null : Number((rawConf * pressPenalty).toFixed(3));
+        if (pressPenalty < 1 && rawConf !== null) {
+          console.log(
+            `[cycle] ${analysisRow.symbol} 公司公告类利好,门槛置信度折价 ×${pressPenalty}: ${rawConf} → ${finalConf}`
+          );
+        }
 
         if (!dedup.proceed && !dedup.confirmable) {
           summary.deduped += 1;
@@ -311,11 +339,15 @@ export async function runCycle({ fullFetch = false } = {}) {
           continue;
         }
 
-        const trade = await handleSignal(article, analysisRow);
-        if (trade) {
+        const result = await handleSignal(article, analysisRow);
+        if (result?.queued) {
+          // 休市信号已挂入开盘队列:事件视同已消费,后续重复报道不再触发
+          summary.queued += 1;
+          await markEventTraded(dedup.eventId, null);
+        } else if (result) {
           summary.trades += 1;
-          await markEventTraded(dedup.eventId, trade.id);
-          broadcast('trade', trade);
+          await markEventTraded(dedup.eventId, result.id);
+          broadcast('trade', result);
         }
       } catch (err) {
         console.error(`[cycle] 处理文章失败 (${article.url}): ${err.message}`);
@@ -328,7 +360,7 @@ export async function runCycle({ fullFetch = false } = {}) {
     cycleStatus.lastError = null;
     if (summary.newArticles || summary.analyzed) {
       console.log(
-        `[cycle] 完成: 新增${summary.newArticles} 分析${summary.analyzed} 信号${summary.signals} 去重${summary.deduped} 挂起${summary.held} 成交${summary.trades} 用时${summary.durationMs}ms`
+        `[cycle] 完成: 新增${summary.newArticles} 分析${summary.analyzed} 信号${summary.signals} 去重${summary.deduped} 挂起${summary.held} 挂单${summary.queued} 成交${summary.trades} 用时${summary.durationMs}ms`
       );
     }
     broadcast('cycle', summary);
