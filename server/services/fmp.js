@@ -1,4 +1,5 @@
 import { config } from '../config.js';
+import { isHoliday, isEarlyClose } from './marketCalendar.js';
 
 const BASE = 'https://financialmodelingprep.com/stable';
 
@@ -36,13 +37,17 @@ export async function getPressReleases(limit = 20) {
 
 /**
  * 当前美股市场时段(美东时间):
- * pre 盘前 4:00–9:30 / regular 盘中 9:30–16:00 / post 盘后 16:00–20:00 / closed 休市
- * 注:不含交易所假日判断,假日会被视为对应时段,但价格不变、无害。
+ * pre 盘前 4:00–9:30 / regular 盘中 9:30–16:00 / post 盘后 16:00–20:00 / closed 休市。
+ * 周末与交易所假日(marketCalendar.js 规则计算)直接 closed;
+ * 半日市(7/3、感恩节次日、12/24)盘中 9:30–13:00,盘后 13:00–17:00。
  */
 export function getMarketSession(date = new Date()) {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York',
     weekday: 'short',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
     hourCycle: 'h23',
@@ -50,10 +55,14 @@ export function getMarketSession(date = new Date()) {
   const get = (type) => parts.find((p) => p.type === type)?.value;
   const weekday = get('weekday');
   if (weekday === 'Sat' || weekday === 'Sun') return 'closed';
+  const dateStr = `${get('year')}-${get('month')}-${get('day')}`;
+  if (isHoliday(dateStr)) return 'closed';
   const minutes = Number(get('hour')) * 60 + Number(get('minute'));
+  const regularEnd = isEarlyClose(dateStr) ? 780 : 960; // 半日市 13:00 收盘
+  const postEnd = isEarlyClose(dateStr) ? 1020 : 1200; // 半日市盘后至 17:00
   if (minutes >= 240 && minutes < 570) return 'pre';
-  if (minutes >= 570 && minutes < 960) return 'regular';
-  if (minutes >= 960 && minutes < 1200) return 'post';
+  if (minutes >= 570 && minutes < regularEnd) return 'regular';
+  if (minutes >= regularEnd && minutes < postEnd) return 'post';
   return 'closed';
 }
 
