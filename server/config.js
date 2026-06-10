@@ -64,6 +64,8 @@ export const config = {
   enablePositionReview: process.env.ENABLE_POSITION_REVIEW !== 'false',
   // 持仓复查的触发时间(美东 24 小时制,盘中该小时之后执行,每天一次)
   positionReviewHour: num(process.env.POSITION_REVIEW_HOUR, 14),
+  // 风控官:买入执行前由独立 LLM 角色做组合级复核(放行/缩仓/否决),失败时放弃买入
+  enableRiskOfficer: process.env.ENABLE_RISK_OFFICER !== 'false',
 
   // 关注列表(用于 Yahoo RSS 抓取),持仓股票会自动加入
   watchlist: (process.env.WATCHLIST || 'AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA')

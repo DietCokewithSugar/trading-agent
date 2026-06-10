@@ -212,6 +212,84 @@ export async function decideTrade({ analysis, article, quote, profile, portfolio
   };
 }
 
+const RISK_OFFICER_SYSTEM_PROMPT = `你是一名独立于交易员的风控官,对一笔"拟执行的买入"做最终审批。交易员容易被单条新闻带节奏,你的职责是站在组合整体的角度审视风险。
+
+先各用一句话给出多方(bull_case)与空方(bear_case)论证,然后裁决:
+- 组合集中度:买入后该股票、该行业的权重是否过高?现金是否被过度消耗?
+- 近期连败:最近几笔卖出若连续亏损,说明当前判断系统性偏差,应整体降低风险敞口(缩小 scale 甚至否决);
+- 历史教训:输入中的复盘教训若与本笔信号情形相似且曾经亏损,应更保守;
+- 信号薄弱点:利好是否已被当日涨幅定价?消息源是否单一?与公司基本面是否矛盾?
+你不能改变交易方向,只有三种裁决:放行(approve=true, scale=1)、缩仓(approve=true, scale<1)、否决(approve=false)。拿不准时倾向缩仓而不是否决;只有出现明确风险(集中度过高、连败中加仓、教训直接冲突)才否决。可选地通过 adjusted_stop_loss_percent 建议更紧的止损(距成本价的百分比,必须小于交易员原方案才有意义)。
+
+必须严格返回 JSON:
+{
+  "bull_case": "多方一句话(中文)",
+  "bear_case": "空方一句话(中文)",
+  "approve": true 或 false,
+  "scale": 0.0 到 1.0,
+  "adjusted_stop_loss_percent": null 或 3 到 15 之间的数字,
+  "reason": "裁决理由(中文,60字以内)"
+}`;
+
+/** 风控官审批:对拟执行的买入做组合级风险复核(TradingAgents 式独立风控,单次调用合并多空论证) */
+export async function reviewProposedTrade({ proposal, analysis, portfolio, memories = [] }) {
+  const user = JSON.stringify(
+    {
+      拟执行买入: {
+        股票: proposal.symbol,
+        现价: proposal.price,
+        拟动用现金比例: proposal.fraction,
+        预计金额: proposal.estimatedSpend,
+        止损百分比: proposal.stopLossPercent,
+        止盈百分比: proposal.takeProfitPercent,
+        交易员理由: proposal.reason,
+      },
+      信号: {
+        方向: analysis.sentiment === 'bullish' ? '利好' : '利空',
+        档位: `第${analysis.tier}档`,
+        置信度: analysis.confidence,
+        事件: analysis.event_summary || analysis.reasoning,
+      },
+      组合状态: {
+        可用现金: portfolio.cash,
+        组合总值: portfolio.totalValue,
+        持仓权重: portfolio.positionWeights,
+        行业分布: portfolio.sectorWeights,
+        最近卖出盈亏: portfolio.recentSells,
+      },
+      历史教训: (memories || []).slice(0, 5).map((m) => ({
+        代码: m.symbol,
+        盈亏百分比:
+          m.pnl_percent !== null && m.pnl_percent !== undefined ? Number(m.pnl_percent) : null,
+        教训: String(m.lesson || '').slice(0, 60),
+      })),
+    },
+    null,
+    1
+  );
+
+  const result = await chatJSON(
+    [
+      { role: 'system', content: RISK_OFFICER_SYSTEM_PROMPT },
+      { role: 'user', content: user },
+    ],
+    { maxTokens: 600 }
+  );
+
+  const scale = Number(result.scale);
+  const adjStop = Number(result.adjusted_stop_loss_percent);
+  return {
+    bullCase: String(result.bull_case || '').slice(0, 100),
+    bearCase: String(result.bear_case || '').slice(0, 100),
+    // 字段畸形按放行处理;真正的失败(请求抛错)由调用方 fail-closed
+    approve: result.approve !== false,
+    scale: Number.isFinite(scale) ? Math.min(Math.max(scale, 0), 1) : 1,
+    adjustedStopLossPercent:
+      Number.isFinite(adjStop) && adjStop >= 3 && adjStop <= 15 ? adjStop : null,
+    reason: String(result.reason || '').slice(0, 120),
+  };
+}
+
 const REVIEW_SYSTEM_PROMPT = `你是一名美股组合管理人,每个交易日对当前全部持仓做一次例行复查。新闻驱动的买入论点有时效性,你的职责是发现"论点已失效却还躺在组合里"的持仓:
 
 - 买入论点是否仍然成立?支撑它的新闻是否已过时(事件已兑现、被反转、或多日无后续)?

@@ -1,7 +1,7 @@
 import { supabase } from '../db.js';
 import { config } from '../config.js';
 import { getQuote, getProfile } from './fmp.js';
-import { decideTrade } from './deepseek.js';
+import { decideTrade, reviewProposedTrade } from './deepseek.js';
 import { getPortfolio, getValuation } from './portfolio.js';
 import { reflectOnClosedTrade, getMemories } from './memoryService.js';
 
@@ -23,6 +23,45 @@ export function withTradeLock(fn) {
     () => {}
   );
   return run;
+}
+
+/** 风控官的组合级上下文:持仓/行业权重 + 最近卖出盈亏(在交易锁外构建) */
+async function buildRiskContext(valuation) {
+  const total = valuation.total_value;
+  const positionWeights = valuation.positions.map((p) => ({
+    代码: p.symbol,
+    权重百分比: total > 0 ? Math.round((p.market_value / total) * 1000) / 10 : 0,
+  }));
+
+  // 行业分布:公司档案缓存 24 小时,这里基本不产生额外 FMP 请求
+  const sectorValues = new Map();
+  for (const p of valuation.positions) {
+    const profile = await getProfile(p.symbol).catch(() => null);
+    const sector = profile?.sector || '未知';
+    sectorValues.set(sector, (sectorValues.get(sector) || 0) + p.market_value);
+  }
+  const sectorWeights = [...sectorValues.entries()].map(([sector, value]) => ({
+    行业: sector,
+    权重百分比: total > 0 ? Math.round((value / total) * 1000) / 10 : 0,
+  }));
+
+  // 最近 5 笔卖出盈亏:连续亏损时风控官应整体降敞口
+  let recentSells = [];
+  const { data: sells, error } = await supabase()
+    .from('trades')
+    .select('symbol, realized_pnl, created_at')
+    .eq('side', 'sell')
+    .not('realized_pnl', 'is', null)
+    .order('created_at', { ascending: false })
+    .limit(5);
+  if (!error) {
+    recentSells = (sells || []).map((t) => ({
+      代码: t.symbol,
+      盈亏: Number(t.realized_pnl),
+    }));
+  }
+
+  return { positionWeights, sectorWeights, recentSells };
 }
 
 /** execute_trade RPC 尚未部署(未执行 004 迁移)时的判定 */
@@ -104,6 +143,59 @@ export async function handleSignal(article, analysisRow) {
       );
       decision.fraction = sized;
     }
+
+    // 风控官审批(TradingAgents 式独立风控):站在组合角度复核这笔买入,
+    // 可放行/缩仓/否决。审批调用失败时 fail-closed 放弃买入(与去重失败即跳过的约定一致)。
+    if (config.enableRiskOfficer) {
+      try {
+        const context = await buildRiskContext(valuation);
+        const verdict = await reviewProposedTrade({
+          proposal: {
+            symbol,
+            price,
+            fraction: decision.fraction,
+            estimatedSpend: round2(decision.fraction * valuation.cash),
+            stopLossPercent: decision.stopLossPercent,
+            takeProfitPercent: decision.takeProfitPercent,
+            reason: decision.reason,
+          },
+          analysis: analysisRow,
+          portfolio: {
+            cash: valuation.cash,
+            totalValue: valuation.total_value,
+            positionWeights: context.positionWeights,
+            sectorWeights: context.sectorWeights,
+            recentSells: context.recentSells,
+          },
+          memories,
+        });
+        if (!verdict.approve) {
+          console.warn(`[riskofficer] 否决 ${symbol} 买入: ${verdict.reason}`);
+          return null;
+        }
+        if (verdict.scale < 1) {
+          const scaled = round4(decision.fraction * verdict.scale);
+          console.log(
+            `[riskofficer] ${symbol} 缩仓 ×${verdict.scale}: ${decision.fraction} → ${scaled}(${verdict.reason})`
+          );
+          decision.fraction = scaled;
+        }
+        // 只接受比交易员方案更紧的止损
+        if (
+          verdict.adjustedStopLossPercent !== null &&
+          verdict.adjustedStopLossPercent < decision.stopLossPercent
+        ) {
+          decision.stopLossPercent = verdict.adjustedStopLossPercent;
+        }
+        if (verdict.reason) {
+          decision.reason = `${decision.reason};风控官:${verdict.reason}`.slice(0, 300);
+        }
+      } catch (err) {
+        console.warn(`[riskofficer] ${symbol} 审批失败,放弃本次买入: ${err.message}`);
+        return null;
+      }
+    }
+    if (decision.fraction <= 0) return null;
     return executeBuy({ symbol, price, decision, analysisRow, article });
   }
   return executeSellOrder({
