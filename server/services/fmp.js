@@ -176,6 +176,38 @@ export async function getHistoricalPrices(symbol, from, to, maxAgeMs = 3600_000)
   return rows;
 }
 
+/**
+ * 股息调整后的历史日线(总回报口径,股息再投资),用于 SPY 基准——
+ * 纯价格序列会漏掉约 1.3% 的年化股息,凭空送策略超额收益。
+ * 返回 { rows: [{ date, price, volume }], adjusted };端点失败时
+ * 回退到未调整的 light 端点并标记 adjusted=false。
+ */
+export async function getHistoricalPricesAdjusted(symbol, from, to, maxAgeMs = 3600_000) {
+  const key = `${symbol.toUpperCase()}:${from}:${to}:adj`;
+  const cached = historyCache.get(key);
+  if (cached && Date.now() - cached.at < maxAgeMs) return cached.rows;
+
+  let result;
+  try {
+    const data = await fmpGet('/historical-price-eod/dividend-adjusted', {
+      symbol: symbol.toUpperCase(),
+      from,
+      to,
+    });
+    const rows = (Array.isArray(data) ? data : [])
+      .filter((r) => r && r.date && typeof r.adjClose === 'number')
+      .map((r) => ({ date: r.date, price: r.adjClose, volume: r.volume }))
+      .sort((a, b) => (a.date < b.date ? -1 : 1));
+    if (!rows.length) throw new Error('股息调整端点返回为空');
+    result = { rows, adjusted: true };
+  } catch (err) {
+    console.warn(`[fmp] ${symbol} 股息调整历史价不可用(${err.message}),回退未调整价格`);
+    result = { rows: await getHistoricalPrices(symbol, from, to, maxAgeMs), adjusted: false };
+  }
+  historyCache.set(key, { rows: result, at: Date.now() });
+  return result;
+}
+
 /** 清空进程内缓存(管理后台数据重置时调用,确保重置后拿到的都是新数据) */
 export function clearCaches() {
   quoteCache.clear();

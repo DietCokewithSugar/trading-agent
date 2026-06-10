@@ -53,9 +53,19 @@
 - **按信号质量缩放仓位**(参考 [Lopez-Lira & Tang](https://arxiv.org/abs/2304.07619):信号强度应映射到仓位):在 LLM 给出的买入比例之上,按档位(一档 ×1.0、二档 ×0.7)与置信度(0.5→×0.5,1.0→×1.0)叠加缩放,最终仍受硬性风控帽(单股 ≤25%、单笔 ≤20%)约束;
 - **每日持仓复查**(`ENABLE_POSITION_REVIEW` 默认开):新闻驱动的买入论点有时效性。每个交易日美东 `POSITION_REVIEW_HOUR`(默认 14)点后,DeepSeek 用**一次调用**整体评估全部持仓——论点已失效的主动卖出(交易标注「持仓复查」)、浮盈较大的收紧止损、健康的维持持有,防止过期论点的持仓长期滞留。
 
-### 盘前盘后价格
+### 盘前盘后价格与交易日历
 
 非盘中时段,系统通过 FMP 的 aftermarket-trade 接口获取盘前(美东 4:00–9:30)/盘后(16:00–20:00)最新成交价,用于估值、模拟成交和止损监控;页面持仓表会显示「盘前 / 盘后」徽章及相对收盘价的涨跌幅。若订阅不含该端点,自动退回收盘价。
+
+市场时段判断内置 NYSE 交易日历(按规则计算,不会过期):全天休市假日(含耶稣受难日等浮动假日与固定假日的周末观察日)直接按休市处理,7/3、感恩节次日、平安夜等半日市 13:00 提前收盘;止损监控、快照降频、报价推送在假日自动停止,夏普等日度指标也只统计实际交易日。
+
+### 模拟成交真实化(滑点 / 点差 / 漂移熔断)
+
+新闻驱动策略的真实瓶颈是执行成本:消息后往往买在 spike、盘前盘后点差大、小盘股流动性差。为避免系统性高估收益,模拟成交做了三层处理:
+
+- **下单时重取报价**:LLM 决策可能耗时数十秒甚至更久,买卖都在下单瞬间重新拉取最新价格成交,绝不按"消息发布瞬间的价格"成交;
+- **漂移熔断**:下单时最新价相对决策时价格偏移超过 `BUY_PRICE_DRIFT_ABORT_PERCENT`(默认 5%)即放弃买入——上漂是追高,下漂说明行情已反转;
+- **滑点模型**(`ENABLE_SLIPPAGE` 默认开):成交价在最新市场价上施加不利偏移(买更贵、卖更便宜),滑点 = 按市值分档的半点差(超大盘 1bp ~ 微盘 30bp)× 时段乘数(盘前盘后 ×3)× 当日波动乘数 + 订单冲击(按占日均美元成交额比例)+ 可选佣金(`COMMISSION_BPS`),单笔封顶 `SLIPPAGE_MAX_BPS`(默认 150bp)。每笔交易的市场参考价与实际滑点记录在 `trades.quote_price / slippage_bps`(008 迁移)。
 
 ### 风控官(TradingAgents 式独立审批)
 
@@ -72,8 +82,8 @@
 参考量化研究的标准评估方法(累计收益、夏普比率、最大回撤、与市场基准对比),仪表盘新增:
 
 - **累计收益率**:相对初始资金的总收益,并给出相对同期 SPY 买入持有策略的**超额收益**;
-- **年化夏普比率**:净值按美东交易日重采样(每日取最后一条快照)后,用日收益率均值/标准差 × √252 计算。账户运行不足 3 个交易日时显示「数据不足」;
-- **净值图 SPY 基准线**:虚线展示「同期把初始资金全部买入 SPY」的净值走势(数据来自 FMP 历史日线,缓存 1 小时),直观回答"AI 跑没跑赢大盘"。
+- **年化夏普比率**:净值按美东**实际交易日**重采样(每日取最后一条快照,周末与交易所假日剔除,避免 0 收益伪交易日压低波动率)后,用日收益率均值/标准差 × √252 计算。账户运行不足 3 个交易日时显示「数据不足」;
+- **净值图 SPY 基准线**:虚线展示「同期把初始资金全部买入 SPY」的净值走势,采用**股息调整后的总回报序列**(股息再投资,与策略净值口径一致;调整数据不可用时回退纯价格并在接口中以 `basis` 字段标记),直观回答"AI 跑没跑赢大盘"。
 
 ### 管理后台(#/admin)
 
@@ -83,7 +93,7 @@
 - 手动触发一轮全源「抓取 → 分析 → 交易」(站内唯一的手动触发入口,公开页面不提供);
 - **初始化所有数据**:清空全部新闻、AI 分析、事件、交易记录、持仓与净值快照,现金恢复为 `INITIAL_CAPITAL`。适用于持仓数据已脏、想从头开始的场景。操作不可恢复,页面要求输入 `RESET` 二次确认。
 
-安全设计:管理接口(`/api/admin/*`)在服务端**强制鉴权**——未配置 `ADMIN_TOKEN` 时整组接口直接禁用(503),令牌错误返回 403;重置执行期间自动暂停新闻轮询与止损监控,并等待运行中的交易轮结束,绝不与交易并发删库。重置在数据库端通过 `admin_reset_data` 函数(005 迁移)单事务完成;尚未执行 005 迁移的库自动退回逐表删除。
+安全设计:管理接口(`/api/admin/*`)在服务端**强制鉴权**——未配置 `ADMIN_TOKEN` 时整组接口直接禁用(503),令牌错误返回 403;令牌比较使用 sha256 + `timingSafeEqual` 常数时间比较,且按 IP 限制鉴权失败次数(15 分钟 10 次,失败记录日志),防在线暴力破解。重置执行期间自动暂停新闻轮询与止损监控,并等待运行中的交易轮结束,绝不与交易并发删库。重置在数据库端通过 `admin_reset_data` 函数(005 迁移)单事务完成;尚未执行 005 迁移的库自动退回逐表删除。
 
 ## 技术栈
 
@@ -99,7 +109,7 @@
 ### 1. 初始化 Supabase
 
 1. 在 [supabase.com](https://supabase.com) 创建项目;
-2. 打开 **SQL Editor**,执行仓库中的 [`supabase/schema.sql`](supabase/schema.sql);**已有部署升级时**,改为执行 `supabase/migrations/` 下的增量脚本(如 [`002_stops_and_stats.sql`](supabase/migrations/002_stops_and_stats.sql)、[`003_news_events.sql`](supabase/migrations/003_news_events.sql)、[`004_atomic_trade.sql`](supabase/migrations/004_atomic_trade.sql)、[`005_admin_reset.sql`](supabase/migrations/005_admin_reset.sql)、[`006_trade_reflections.sql`](supabase/migrations/006_trade_reflections.sql)、[`007_position_management.sql`](supabase/migrations/007_position_management.sql));
+2. 打开 **SQL Editor**,执行仓库中的 [`supabase/schema.sql`](supabase/schema.sql);**已有部署升级时**,改为执行 `supabase/migrations/` 下的增量脚本(如 [`002_stops_and_stats.sql`](supabase/migrations/002_stops_and_stats.sql)、[`003_news_events.sql`](supabase/migrations/003_news_events.sql)、[`004_atomic_trade.sql`](supabase/migrations/004_atomic_trade.sql)、[`005_admin_reset.sql`](supabase/migrations/005_admin_reset.sql)、[`006_trade_reflections.sql`](supabase/migrations/006_trade_reflections.sql)、[`007_position_management.sql`](supabase/migrations/007_position_management.sql)、[`008_fill_realism.sql`](supabase/migrations/008_fill_realism.sql));
 3. 在 **Project Settings → API** 记下 `Project URL` 和 `service_role` key。
 
 ### 2. 部署到 Render
@@ -161,6 +171,10 @@ cd web && npm run dev      # 终端 2:启动 Vite :5173(已配置 /api 代理)
 | `ENABLE_POSITION_REVIEW` | `true` | 每日持仓复查:论点失效的持仓主动卖出/收紧止损 |
 | `POSITION_REVIEW_HOUR` | `14` | 持仓复查触发时间(美东 24 小时制,盘中) |
 | `ENABLE_RISK_OFFICER` | `true` | 风控官:买入前组合级复核(放行/缩仓/否决),失败放弃买入 |
+| `ENABLE_SLIPPAGE` | `true` | 模拟成交滑点:按市值/时段/波动/订单冲击对成交价施加不利偏移 |
+| `SLIPPAGE_MAX_BPS` | `150` | 单笔滑点上限(基点) |
+| `COMMISSION_BPS` | `0` | 佣金(基点,折算进成交价) |
+| `BUY_PRICE_DRIFT_ABORT_PERCENT` | `5` | 买入漂移熔断:下单时价格相对决策时偏移超过该百分比即放弃 |
 | `ADMIN_TOKEN` | 空 | 设置后手动触发接口需要鉴权;同时是管理后台(`#/admin`)的登录口令,未设置时管理接口整组禁用 |
 
 ## API 一览

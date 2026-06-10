@@ -1,5 +1,6 @@
 import { supabase } from '../db.js';
-import { getHistoricalPrices } from './fmp.js';
+import { getHistoricalPricesAdjusted } from './fmp.js';
+import { isTradingDay } from './marketCalendar.js';
 
 function round2(n) {
   return Math.round(n * 100) / 100;
@@ -90,14 +91,17 @@ export async function getStats() {
 }
 
 /**
- * 净值按美东日历日重采样(取每日最后一条快照)。
+ * 净值按美东日历日重采样(取每日最后一条快照),并过滤到实际交易日。
  * 快照在盘中每分钟一条、休市每 30 分钟一条,频率不均,
- * 夏普等指标必须基于等间隔的日度序列计算。
+ * 夏普等指标必须基于等间隔的日度序列计算;周末/假日的快照若不过滤,
+ * 会变成收益≈0 的伪交易日,人为压低波动率、抬高年化(√252)夏普。
  */
 function toDailySeries(snaps) {
   const byDay = new Map();
   for (const s of snaps) {
-    byDay.set(etDate(s.created_at), Number(s.total_value));
+    const date = etDate(s.created_at);
+    if (!isTradingDay(date)) continue;
+    byDay.set(date, Number(s.total_value));
   }
   return [...byDay.entries()].map(([date, value]) => ({ date, value }));
 }
@@ -118,12 +122,16 @@ function computeSharpe(daily) {
   return (mean / std) * Math.sqrt(252);
 }
 
-/** SPY 买入持有基准:从首个快照日到今天,按初始资金归一化 */
+/**
+ * SPY 买入持有基准:从首个快照日到今天,按初始资金归一化。
+ * 用股息调整后的总回报序列(股息再投资),与策略的"全部盈亏都体现在净值里"
+ * 口径一致;调整端点不可用时回退纯价格序列,basis 标记为 'price'。
+ */
 async function getBenchmark(daily, initialCapital) {
   if (!daily.length || !initialCapital) return null;
   const from = daily[0].date;
   const to = etDate(new Date().toISOString());
-  const prices = await getHistoricalPrices('SPY', from, to);
+  const { rows: prices, adjusted } = await getHistoricalPricesAdjusted('SPY', from, to);
   if (prices.length < 2) return null;
 
   const base = prices[0].price;
@@ -134,6 +142,7 @@ async function getBenchmark(daily, initialCapital) {
   }));
   return {
     symbol: 'SPY',
+    basis: adjusted ? 'total_return' : 'price',
     series,
     cumulative_return_percent: (prices[prices.length - 1].price / base - 1) * 100,
   };
