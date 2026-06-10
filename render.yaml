@@ -55,6 +55,16 @@ services:
         value: "0"
       - key: BUY_PRICE_DRIFT_ABORT_PERCENT
         value: "5"
+      - key: MIN_MARKET_CAP
+        value: "300000000"
+      - key: MIN_PRICE
+        value: "2"
+      - key: MIN_AVG_DOLLAR_VOLUME
+        value: "5000000"
+      - key: PRESS_BULLISH_PENALTY
+        value: "0.75"
+      - key: PENDING_ORDER_MAX_AGE_HOURS
+        value: "96"
       - key: WATCHLIST
         value: "AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA"
       - key: ADMIN_TOKEN

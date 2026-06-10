@@ -1,10 +1,13 @@
 import { supabase } from '../db.js';
 import { config } from '../config.js';
-import { getQuote, getProfile } from './fmp.js';
+import { getQuote, getProfile, getMarketSession } from './fmp.js';
 import { decideTrade, reviewProposedTrade } from './deepseek.js';
 import { getPortfolio, getValuation } from './portfolio.js';
 import { reflectOnClosedTrade, getMemories } from './memoryService.js';
 import { computeFill } from './execution.js';
+import { checkBuyEligibility } from './eligibility.js';
+import { scaleFraction } from './sizing.js';
+import { enqueuePendingOrder } from './openQueue.js';
 
 function round4(n) {
   return Math.round(n * 10000) / 10000;
@@ -121,6 +124,16 @@ export async function handleSignal(article, analysisRow) {
   }
   const price = quote.effective_price ?? quote.price;
 
+  // 标的准入门槛(只拦做多):最小市值/最低股价/最低日均美元成交额,
+  // 在 LLM 决策之前硬性拦截,微盘/低流动性的利好新闻连决策调用都不值得发起
+  if (analysisRow.sentiment === 'bullish') {
+    const gate = checkBuyEligibility({ profile, price });
+    if (!gate.ok) {
+      console.log(`[trader] ${symbol} 未过标的准入门槛,跳过: ${gate.reason}`);
+      return null;
+    }
+  }
+
   const valuation = await getValuation();
   // 历史教训(FinMem 式记忆):该股票及全局的平仓复盘结论,注入决策上下文
   const memories = await getMemories(symbol);
@@ -153,22 +166,18 @@ export async function handleSignal(article, analysisRow) {
 
   if (decision.action === 'buy') {
     // 仓位缩放链(按序叠加):LLM fraction → 档位/置信度/来源可信度缩放 → 风控官 scale → 硬性风控帽。
-    // 信号档位越低、置信度越低,实际动用的资金越少(Lopez-Lira:LLM 信号强度应映射到仓位)。
-    const tierMult = config.tierSizeMultipliers[analysisRow.tier] ?? 0.5;
-    const conf =
-      analysisRow.confidence === null || analysisRow.confidence === undefined
-        ? null
-        : Number(analysisRow.confidence);
-    // 置信度 0.5 → 0.5 倍,1.0 → 1 倍;缺失按 0.7 倍处理
-    const confMult = conf === null ? 0.7 : Math.min(Math.max(conf, 0.5), 1);
-    // 来源可信度 → 0.6~1 倍:通讯社/公告级接近全额,小站/观点文减仓;无评分(旧库)不缩放
+    // fraction 的基数是组合总值(受可用现金约束),而非可用现金本身——按现金比例下单
+    // 会让先到的信号占大仓、后到的信号只剩零头,仓位大小取决于新闻先后而非信号强弱。
     const srcScore =
       article.source_score === null || article.source_score === undefined
         ? null
         : Number(article.source_score);
-    const srcMult =
-      srcScore === null ? 1 : Math.min(Math.max(0.5 + 0.5 * srcScore, 0.6), 1);
-    const sized = round4(decision.fraction * tierMult * confMult * srcMult);
+    const { sized, tierMult, confMult, srcMult } = scaleFraction({
+      fraction: decision.fraction,
+      tier: analysisRow.tier,
+      confidence: analysisRow.confidence,
+      sourceScore: srcScore,
+    });
     if (sized !== decision.fraction) {
       console.log(
         `[trader] ${symbol} 仓位缩放: ${decision.fraction} × 档位${tierMult} × 置信度${confMult} × 来源${srcMult} → ${sized}`
@@ -186,7 +195,9 @@ export async function handleSignal(article, analysisRow) {
             symbol,
             price,
             fraction: decision.fraction,
-            estimatedSpend: round2(decision.fraction * valuation.cash),
+            estimatedSpend: round2(
+              Math.min(decision.fraction * valuation.total_value, valuation.cash)
+            ),
             stopLossPercent: decision.stopLossPercent,
             takeProfitPercent: decision.takeProfitPercent,
             reason: decision.reason,
@@ -229,7 +240,39 @@ export async function handleSignal(article, analysisRow) {
       }
     }
     if (decision.fraction <= 0) return null;
+
+    // 休市时段不按 stale 收盘价成交:真实世界里隔夜新闻只能在次日开盘竞价成交,
+    // 隔夜跳空应由市场兑现而不是被模拟盘白捡。信号挂入开盘队列,
+    // 下一个常规时段以开盘价(含盘中滑点)成交;盘前盘后有真实成交价,仍立即成交。
+    if (getMarketSession() === 'closed') {
+      const pending = await enqueuePendingOrder({
+        symbol,
+        side: 'buy',
+        fraction: decision.fraction,
+        ref_price: round4(price),
+        stop_loss_percent: decision.stopLossPercent,
+        take_profit_percent: decision.takeProfitPercent,
+        reason: decision.reason,
+        news_id: article.id,
+        analysis_id: analysisRow.id,
+      });
+      // 入队失败(010 迁移未执行等)退回旧行为:按休市价立即成交,信号不丢
+      if (pending) return { queued: true, pending };
+    }
     return executeBuy({ symbol, price, decision, analysisRow, article });
+  }
+
+  if (getMarketSession() === 'closed') {
+    const pending = await enqueuePendingOrder({
+      symbol,
+      side: 'sell',
+      fraction: decision.fraction,
+      ref_price: round4(price),
+      reason: decision.reason,
+      news_id: article.id,
+      analysis_id: analysisRow.id,
+    });
+    if (pending) return { queued: true, pending };
   }
   return executeSellOrder({
     symbol,
@@ -244,9 +287,8 @@ export async function handleSignal(article, analysisRow) {
 
 async function executeBuy({ symbol, price, decision, analysisRow, article }) {
   return withTradeLock(async () => {
-    // 下单前重取组合状态与最新报价:DeepSeek 决策(最长两次 90s 调用)耗时较长,
-    // 决策前的估值与价格都可能已过期,绝不能按"消息发布瞬间的价格"成交
-    const valuation = await getValuation();
+    // 下单前重取最新报价:DeepSeek 决策(最长两次 90s 调用)耗时较长,
+    // 决策前的价格可能已过期,绝不能按"消息发布瞬间的价格"成交
     const quote = await getQuote(symbol, 0).catch(() => null);
     if (!quote) {
       console.warn(`[trader] ${symbol} 下单时无法获取最新报价,放弃买入(fail-closed)`);
@@ -264,63 +306,137 @@ async function executeBuy({ symbol, price, decision, analysisRow, article }) {
       return null;
     }
 
-    // 风控:单笔买入金额 ≤ min(决策比例×现金, 总资产×maxBuyCashFraction, 剩余现金)
-    let spend = Math.min(
-      decision.fraction * valuation.cash,
-      config.maxBuyCashFraction * valuation.total_value,
-      valuation.cash
-    );
-
-    // 风控:买入后该股票市值不超过组合总值的 maxPositionFraction
-    const existing = valuation.positions.find((p) => p.symbol === symbol);
-    const existingValue = existing ? existing.market_value : 0;
-    const positionCap = config.maxPositionFraction * valuation.total_value - existingValue;
-    spend = Math.min(spend, Math.max(positionCap, 0));
-
-    if (spend < config.minOrderAmount) {
-      console.log(`[trader] ${symbol} 买入金额 ${round2(spend)} 低于下限,跳过`);
+    const result = await settleBuyLocked({
+      symbol,
+      quote,
+      fraction: decision.fraction,
+      stopLossPercent: decision.stopLossPercent,
+      takeProfitPercent: decision.takeProfitPercent,
+      reason: decision.reason,
+      newsId: article.id,
+      analysisId: analysisRow.id,
+    });
+    if (result.reject) {
+      console.log(`[trader] ${symbol} 买入跳过: ${result.reject}`);
       return null;
     }
+    return result.trade;
+  });
+}
 
-    // 模拟成交:在最新价上施加不利滑点(点差/时段/波动/订单冲击)
-    const profile = await getProfile(symbol).catch(() => null);
-    const fill = computeFill({ side: 'buy', quote, profile, notional: spend });
-    if (fill.slippageBps > 0) {
-      console.log(
-        `[trader] ${symbol} 买入滑点 ${fill.slippageBps}bp: $${fill.refPrice} → $${fill.fillPrice}`
-      );
+/**
+ * 开盘队列成交:休市期间挂起的买单在常规时段以当日开盘价成交。
+ * 不做漂移熔断——隔夜跳空正是这条路径要如实承担的成本;
+ * 服务重启导致的延迟处理同样按开盘价回填(等价于市价开盘单)。
+ * 返回 { trade } 成交 / { reject } 永久作废原因 / null 暂时失败(调用方下轮重试)。
+ */
+export async function executeQueuedBuy({
+  symbol,
+  fraction,
+  stopLossPercent,
+  takeProfitPercent,
+  reason,
+  newsId = null,
+  analysisId = null,
+}) {
+  return withTradeLock(async () => {
+    const quote = await getQuote(symbol, 5_000).catch(() => null);
+    if (!quote) {
+      console.warn(`[trader] ${symbol} 队列成交时无法获取报价,留待下轮重试`);
+      return null;
     }
-    const quantity = round4(spend / fill.fillPrice);
-    const amount = round2(quantity * fill.fillPrice);
-
-    const { data, error } = await supabase().rpc('execute_trade', {
-      p_symbol: symbol,
-      p_side: 'buy',
-      p_quantity: quantity,
-      p_price: round4(fill.fillPrice),
-      p_amount: amount,
-      p_reason: decision.reason,
-      p_trigger: 'news',
-      p_news_id: article.id,
-      p_analysis_id: analysisRow.id,
-      p_stop_loss_percent: decision.stopLossPercent,
-      p_take_profit_percent: decision.takeProfitPercent,
-    });
-    if (!error) return logTrade(await recordFillDetails(data, fill.refPrice, fill.slippageBps));
-    if (!isMissingTradeRpc(error)) throw new Error(`买入 ${symbol} 失败: ${error.message}`);
-    console.warn('[trader] execute_trade RPC 不可用,退回非事务路径(请尽快执行 004 迁移)');
-    return legacyBuy({
+    // 当日开盘价即市价开盘单的成交基准;开盘价缺失(刚开盘数据未就绪)用最新价
+    const open = Number(quote.open);
+    const fillQuote =
+      Number.isFinite(open) && open > 0 ? { ...quote, effective_price: open } : quote;
+    return settleBuyLocked({
       symbol,
-      price: fill.fillPrice,
-      quantity,
-      amount,
-      decision,
-      valuation,
-      analysisRow,
-      article,
-      fill,
+      quote: fillQuote,
+      fraction,
+      stopLossPercent,
+      takeProfitPercent,
+      reason,
+      newsId,
+      analysisId,
     });
   });
+}
+
+/**
+ * 买入下单核心(须在交易锁内调用):重取组合估值 → 硬性风控帽 → 滑点成交 → 原子落库。
+ * 返回 { trade } 或 { reject: 原因 }(风控帽/最小金额拦截,属永久性拒绝)。
+ */
+async function settleBuyLocked({
+  symbol,
+  quote,
+  fraction,
+  stopLossPercent,
+  takeProfitPercent,
+  reason,
+  newsId,
+  analysisId,
+}) {
+  // 组合状态以下单时刻为准
+  const valuation = await getValuation();
+
+  // 风控:单笔买入金额 ≤ min(决策比例×组合总值, 总资产×maxBuyCashFraction, 剩余现金)
+  let spend = Math.min(
+    fraction * valuation.total_value,
+    config.maxBuyCashFraction * valuation.total_value,
+    valuation.cash
+  );
+
+  // 风控:买入后该股票市值不超过组合总值的 maxPositionFraction
+  const existing = valuation.positions.find((p) => p.symbol === symbol);
+  const existingValue = existing ? existing.market_value : 0;
+  const positionCap = config.maxPositionFraction * valuation.total_value - existingValue;
+  spend = Math.min(spend, Math.max(positionCap, 0));
+
+  if (spend < config.minOrderAmount) {
+    return { reject: `买入金额 ${round2(spend)} 低于下限 ${config.minOrderAmount}` };
+  }
+
+  // 模拟成交:在参考价上施加不利滑点(点差/时段/波动/订单冲击)
+  const profile = await getProfile(symbol).catch(() => null);
+  const fill = computeFill({ side: 'buy', quote, profile, notional: spend });
+  if (fill.slippageBps > 0) {
+    console.log(
+      `[trader] ${symbol} 买入滑点 ${fill.slippageBps}bp: $${fill.refPrice} → $${fill.fillPrice}`
+    );
+  }
+  const quantity = round4(spend / fill.fillPrice);
+  const amount = round2(quantity * fill.fillPrice);
+
+  const { data, error } = await supabase().rpc('execute_trade', {
+    p_symbol: symbol,
+    p_side: 'buy',
+    p_quantity: quantity,
+    p_price: round4(fill.fillPrice),
+    p_amount: amount,
+    p_reason: reason,
+    p_trigger: 'news',
+    p_news_id: newsId,
+    p_analysis_id: analysisId,
+    p_stop_loss_percent: stopLossPercent,
+    p_take_profit_percent: takeProfitPercent,
+  });
+  if (!error) {
+    return { trade: logTrade(await recordFillDetails(data, fill.refPrice, fill.slippageBps)) };
+  }
+  if (!isMissingTradeRpc(error)) throw new Error(`买入 ${symbol} 失败: ${error.message}`);
+  console.warn('[trader] execute_trade RPC 不可用,退回非事务路径(请尽快执行 004 迁移)');
+  const trade = await legacyBuy({
+    symbol,
+    price: fill.fillPrice,
+    quantity,
+    amount,
+    decision: { stopLossPercent, takeProfitPercent, reason },
+    valuation,
+    analysisRow: { id: analysisId },
+    article: { id: newsId },
+    fill,
+  });
+  return { trade };
 }
 
 /** 兼容尚未执行 004 迁移的数据库:旧的非事务买入路径 */

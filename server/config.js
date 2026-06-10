@@ -61,6 +61,18 @@ export const config = {
   // 同一股票同方向新闻交易的冷却期(分钟),作为事件去重的兜底防线
   tradeCooldownMinutes: num(process.env.TRADE_COOLDOWN_MINUTES, 30),
 
+  // 标的准入门槛(只约束买入,卖出/止损不受限;设为 0 关闭对应项)。
+  // FMP 全市场新闻流里大量微盘股是付费拉抬的常客,不设门槛等于向 pump 新闻敞开钱包。
+  minMarketCap: num0(process.env.MIN_MARKET_CAP, 300e6),
+  minPrice: num0(process.env.MIN_PRICE, 2),
+  minAvgDollarVolume: num0(process.env.MIN_AVG_DOLLAR_VOLUME, 5e6),
+  // 公司公告类来源(新闻稿通道)的利好信号置信度折价(0~1,1=不折价):
+  // 公告真实性高但立场天然偏多,折价后多数会落入"挂起等独立媒体交叉确认"流程
+  pressBullishPenalty: Math.min(num(process.env.PRESS_BULLISH_PENALTY, 0.75), 1),
+  // 开盘队列:休市时段的交易信号挂单等待下一开盘,超过该时长(小时)未成交自动作废
+  //(默认 96 小时,覆盖周末与三天长假)
+  pendingOrderMaxAgeHours: num(process.env.PENDING_ORDER_MAX_AGE_HOURS, 96),
+
   // 模拟成交真实化(execution.js):按市值/时段/波动/订单冲击对成交价施加不利滑点
   enableSlippage: process.env.ENABLE_SLIPPAGE !== 'false',
   // 单笔滑点上限(基点,1bp = 0.01%)

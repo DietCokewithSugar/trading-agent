@@ -1,0 +1,21 @@
+# CI:纯函数单测(交易日历/滑点/档位/可信度/仓位链/准入门槛/前瞻收益/信号统计)+ 前端构建。
+# 测试不需要任何外部服务或密钥。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build

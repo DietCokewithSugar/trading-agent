@@ -3,6 +3,8 @@ import { runCycle } from './services/newsService.js';
 import { takeSnapshot, getValuation } from './services/portfolio.js';
 import { checkStops } from './services/riskMonitor.js';
 import { maybeRunDailyReview } from './services/positionReview.js';
+import { processPendingOrders } from './services/openQueue.js';
+import { backfillForwardReturns } from './services/signalReturns.js';
 import { getMarketSession } from './services/fmp.js';
 import { broadcast, clientCount } from './services/bus.js';
 
@@ -67,6 +69,20 @@ export function startScheduler() {
   setInterval(() => {
     maybeRunDailyReview().catch((err) =>
       console.error(`[scheduler] 持仓复查失败: ${err.message}`)
+    );
+  }, 10 * 60_000);
+
+  // 开盘队列:休市期间挂起的信号在常规时段开盘后尽快按开盘价成交(非盘中自动跳过)
+  setInterval(() => {
+    processPendingOrders().catch((err) =>
+      console.error(`[scheduler] 开盘队列处理失败: ${err.message}`)
+    );
+  }, Math.max(riskSec, 15) * 1000);
+
+  // 信号前瞻收益回填(评估层):每 10 分钟一批,到期的信号补 1h/1d/5d 前瞻收益
+  setInterval(() => {
+    backfillForwardReturns().catch((err) =>
+      console.error(`[scheduler] 信号前瞻收益回填失败: ${err.message}`)
     );
   }, 10 * 60_000);
 

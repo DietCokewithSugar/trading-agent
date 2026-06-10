@@ -32,8 +32,9 @@ async function drainRunningCycle(maxWaitMs = 60_000) {
  */
 async function legacyReset(db) {
   const steps = [
-    // trade_reflections 引用 trades(006 迁移新增,缺表时容忍)
+    // trade_reflections / pending_orders 引用 trades(006/010 迁移新增,缺表时容忍)
     { table: 'trade_reflections', filter: (q) => q.neq('id', 0), optional: true },
+    { table: 'pending_orders', filter: (q) => q.neq('id', 0), optional: true },
     { table: 'trades', filter: (q) => q.neq('id', 0) },
     { table: 'news_events', filter: (q) => q.neq('id', 0) },
     { table: 'news_analyses', filter: (q) => q.neq('id', 0) },
