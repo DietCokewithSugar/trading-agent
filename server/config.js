@@ -19,8 +19,15 @@ export const config = {
   supabaseUrl: process.env.SUPABASE_URL || '',
   supabaseKey: process.env.SUPABASE_SERVICE_ROLE_KEY || '',
 
-  // 调度(分钟):每轮抓取新闻→分析→交易→快照
-  newsPollMinutes: num(process.env.NEWS_POLL_MINUTES, 1),
+  // 新闻轮询间隔(秒)。兼容旧的 NEWS_POLL_MINUTES 配置
+  newsPollSeconds: num(
+    process.env.NEWS_POLL_SECONDS,
+    num(process.env.NEWS_POLL_MINUTES, 0) * 60 || 20
+  ),
+  // 有访客在线时,实时报价/组合估值的推送间隔(秒)
+  quotePushSeconds: num(process.env.QUOTE_PUSH_SECONDS, 5),
+  // 净值快照间隔(秒)
+  snapshotSeconds: num(process.env.SNAPSHOT_SECONDS, 60),
 
   // 每轮最多用 DeepSeek 分析多少条新新闻(控制 API 成本)
   maxAnalyzePerCycle: num(process.env.MAX_ANALYZE_PER_CYCLE, 8),

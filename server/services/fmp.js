@@ -34,15 +34,14 @@ export async function getPressReleases(limit = 20) {
   return Array.isArray(data) ? data : [];
 }
 
-/** 报价缓存:前端高频刷新时避免重复请求 FMP */
+/** 报价缓存:高频请求时避免重复打 FMP */
 const quoteCache = new Map(); // symbol -> { quote, at }
-const QUOTE_TTL_MS = 10_000;
 
-/** 单只股票实时报价(带 10 秒缓存) */
-export async function getQuote(symbol) {
+/** 单只股票实时报价。maxAgeMs 控制可接受的缓存时长 */
+export async function getQuote(symbol, maxAgeMs = 10_000) {
   const key = symbol.toUpperCase();
   const cached = quoteCache.get(key);
-  if (cached && Date.now() - cached.at < QUOTE_TTL_MS) return cached.quote;
+  if (cached && Date.now() - cached.at < maxAgeMs) return cached.quote;
 
   const data = await fmpGet('/quote', { symbol: key });
   const q = Array.isArray(data) ? data[0] : data;
@@ -52,13 +51,13 @@ export async function getQuote(symbol) {
 }
 
 /** 批量报价,返回 Map<symbol, quote> */
-export async function getQuotes(symbols) {
+export async function getQuotes(symbols, maxAgeMs = 10_000) {
   const unique = [...new Set(symbols.map((s) => s.toUpperCase()))];
   const map = new Map();
   await Promise.all(
     unique.map(async (s) => {
       try {
-        const q = await getQuote(s);
+        const q = await getQuote(s, maxAgeMs);
         if (q) map.set(s, q);
       } catch (err) {
         console.warn(`[fmp] 获取 ${s} 报价失败: ${err.message}`);

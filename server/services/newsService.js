@@ -4,7 +4,8 @@ import { getStockNews, getGeneralNews, getPressReleases } from './fmp.js';
 import { getYahooNews } from './yahoo.js';
 import { analyzeArticle } from './deepseek.js';
 import { handleSignal } from './trader.js';
-import { getPortfolio, takeSnapshot } from './portfolio.js';
+import { getPortfolio } from './portfolio.js';
+import { broadcast } from './bus.js';
 
 export const cycleStatus = {
   running: false,
@@ -39,20 +40,26 @@ function normalizeYahooItem(item) {
   };
 }
 
-/** 抓取所有新闻源并去重入库,返回本次新增的文章 */
-async function fetchAndStoreNews() {
-  const { positions } = await getPortfolio();
-  const watchSymbols = [
-    ...new Set([...config.watchlist, ...positions.map((p) => p.symbol)]),
-  ];
-
+/**
+ * 抓取新闻源并去重入库,返回本次新增的文章。
+ * 快速轮询(秒级)只抓最轻量的个股新闻;fullFetch=true 时附带综合新闻/公告/Yahoo RSS。
+ */
+async function fetchAndStoreNews({ fullFetch = false } = {}) {
   const sources = [
     getStockNews(40).then((items) => items.map((i) => normalizeFmpItem(i, 'fmp-stock'))),
-    getGeneralNews(20).then((items) => items.map((i) => normalizeFmpItem(i, 'fmp-general'))),
-    getPressReleases(20).then((items) => items.map((i) => normalizeFmpItem(i, 'fmp-press'))),
   ];
-  if (config.enableYahoo) {
-    sources.push(getYahooNews(watchSymbols).then((items) => items.map(normalizeYahooItem)));
+  if (fullFetch) {
+    sources.push(
+      getGeneralNews(20).then((items) => items.map((i) => normalizeFmpItem(i, 'fmp-general'))),
+      getPressReleases(20).then((items) => items.map((i) => normalizeFmpItem(i, 'fmp-press')))
+    );
+    if (config.enableYahoo) {
+      const { positions } = await getPortfolio();
+      const watchSymbols = [
+        ...new Set([...config.watchlist, ...positions.map((p) => p.symbol)]),
+      ];
+      sources.push(getYahooNews(watchSymbols).then((items) => items.map(normalizeYahooItem)));
+    }
   }
 
   const results = await Promise.allSettled(sources);
@@ -108,16 +115,16 @@ async function analyzeAndStore(article) {
   return data;
 }
 
-/** 完整的一轮:抓新闻 → 分析 → 交易 → 快照 */
-export async function runCycle() {
+/** 完整的一轮:抓新闻 → 分析 → 交易,并通过 SSE 实时推送各环节结果 */
+export async function runCycle({ fullFetch = false } = {}) {
   if (cycleStatus.running) {
-    console.log('[cycle] 上一轮仍在运行,跳过');
     return cycleStatus.lastResult;
   }
   cycleStatus.running = true;
   const startedAt = new Date();
   const summary = {
     startedAt: startedAt.toISOString(),
+    fullFetch,
     newArticles: 0,
     analyzed: 0,
     signals: 0,
@@ -126,10 +133,13 @@ export async function runCycle() {
   };
 
   try {
-    const { inserted, errors } = await fetchAndStoreNews();
+    const { inserted, errors } = await fetchAndStoreNews({ fullFetch });
     summary.errors.push(...errors);
     summary.newArticles = inserted.length;
-    console.log(`[cycle] 新增新闻 ${inserted.length} 条`);
+    if (inserted.length) {
+      console.log(`[cycle] 新增新闻 ${inserted.length} 条`);
+      broadcast('news', { count: inserted.length });
+    }
 
     // 优先分析带股票代码的新闻,其次按发布时间倒序
     const toAnalyze = inserted
@@ -145,6 +155,12 @@ export async function runCycle() {
         const analysisRow = await analyzeAndStore(article);
         summary.analyzed += 1;
         if (!analysisRow) continue;
+        broadcast('analysis', {
+          id: analysisRow.id,
+          symbol: analysisRow.symbol,
+          sentiment: analysisRow.sentiment,
+          tier: analysisRow.tier,
+        });
 
         const actionable =
           analysisRow.sentiment !== 'neutral' &&
@@ -155,25 +171,25 @@ export async function runCycle() {
 
         summary.signals += 1;
         const trade = await handleSignal(article, analysisRow);
-        if (trade) summary.trades += 1;
+        if (trade) {
+          summary.trades += 1;
+          broadcast('trade', trade);
+        }
       } catch (err) {
         console.error(`[cycle] 处理文章失败 (${article.url}): ${err.message}`);
         summary.errors.push(err.message);
       }
     }
 
-    try {
-      await takeSnapshot();
-    } catch (err) {
-      summary.errors.push(`快照失败: ${err.message}`);
-    }
-
     summary.durationMs = Date.now() - startedAt.getTime();
     cycleStatus.lastResult = summary;
     cycleStatus.lastError = null;
-    console.log(
-      `[cycle] 完成: 新增${summary.newArticles} 分析${summary.analyzed} 信号${summary.signals} 成交${summary.trades} 用时${summary.durationMs}ms`
-    );
+    if (summary.newArticles || summary.analyzed) {
+      console.log(
+        `[cycle] 完成: 新增${summary.newArticles} 分析${summary.analyzed} 信号${summary.signals} 成交${summary.trades} 用时${summary.durationMs}ms`
+      );
+    }
+    broadcast('cycle', summary);
     return summary;
   } catch (err) {
     console.error(`[cycle] 本轮失败: ${err.message}`);

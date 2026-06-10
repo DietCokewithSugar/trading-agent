@@ -28,7 +28,7 @@
 
 ## 技术栈
 
-- **后端**: Node.js + Express,node-cron 定时任务
+- **后端**: Node.js + Express,SSE 实时推送 + 秒级轮询调度
 - **前端**: React + Vite + Recharts(构建后由后端静态托管)
 - **数据**: [FMP API](https://site.financialmodelingprep.com/developer/docs)(新闻 + 实时报价)、Yahoo Finance RSS(补充新闻源)
 - **AI**: [DeepSeek API](https://api-docs.deepseek.com/)(新闻分析 + 交易决策,模型可配置)
@@ -55,10 +55,12 @@
 
 > ⚠️ **注意**:Render Free 计划的服务无流量时会休眠,定时抓取/交易会停摆,建议使用 Starter 及以上计划。若坚持用 Free 计划,可用外部定时服务(如 cron-job.org)定时请求一次 `POST https://你的域名/api/run-cycle` 来代替内置定时器。
 
-### 实时性说明
+### 实时性说明(SSE 秒级推送)
 
-- 后端默认**每 1 分钟**运行一轮:抓取新闻 → 分析新增新闻 → 交易决策 → 记录净值快照(同一条新闻只分析一次,DeepSeek 成本可控)
-- 前端**每 15 秒**自动刷新所有数据;持仓报价通过 FMP 实时获取(服务端带 10 秒缓存,多人访问不会重复消耗 API 配额)
+- 网页通过 **Server-Sent Events**(`/api/stream`)与服务端保持长连接,新闻入库、分析完成、成交、净值快照一发生就**秒级推送**到浏览器,无需刷新
+- 有访客在线时,服务端每 **5 秒**推送一次持仓实时报价与组合估值(无人在线自动暂停,节省 API 配额)
+- 个股新闻每 **20 秒**轮询一次 FMP;综合新闻/公告/Yahoo RSS 每约 5 分钟带一轮(同一条新闻只分析一次,DeepSeek 成本可控)
+- SSE 断线时前端自动降级为 60 秒轮询,并在重连后恢复实时(页面右上角有实时连接指示灯)
 
 ### 3. 本地运行
 
@@ -84,7 +86,9 @@ cd web && npm run dev      # 终端 2:启动 Vite :5173(已配置 /api 代理)
 | `DEEPSEEK_API_KEY` | — | DeepSeek API Key(必填) |
 | `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` | — | Supabase 连接信息(必填) |
 | `DEEPSEEK_MODEL` | `deepseek-chat` | 模型 ID,按 DeepSeek 官方文档可换成更新的模型 |
-| `NEWS_POLL_MINUTES` | `1` | 抓取/分析/交易的运行间隔(分钟),已去重的新闻不会重复分析 |
+| `NEWS_POLL_SECONDS` | `20` | 个股新闻轮询间隔(秒),已去重的新闻不会重复分析 |
+| `QUOTE_PUSH_SECONDS` | `5` | 实时报价 SSE 推送间隔(秒),仅有访客在线时拉取 |
+| `SNAPSHOT_SECONDS` | `60` | 净值快照间隔(秒),决定盈亏折线图粒度 |
 | `MAX_ANALYZE_PER_CYCLE` | `8` | 每轮最多分析的新闻条数(控制 DeepSeek 成本) |
 | `INITIAL_CAPITAL` | `100000` | 模拟账户初始资金(美元) |
 | `TRADE_TIER_THRESHOLD` | `2` | 触发交易的最低档位 |
@@ -100,6 +104,7 @@ cd web && npm run dev      # 终端 2:启动 Vite :5173(已配置 /api 代理)
 | `GET /api/snapshots` | 净值快照序列(盈亏折线图数据) |
 | `GET /api/trades` | 交易记录(含买卖原因、关联新闻) |
 | `GET /api/news` | 新闻流(含 DeepSeek 分析结果) |
+| `GET /api/stream` | SSE 实时推送流(news / analysis / trade / portfolio / snapshot / cycle) |
 | `GET /api/status` | 调度器状态 |
 | `POST /api/run-cycle` | 手动触发一轮抓取/分析/交易 |
 | `GET /api/health` | 健康检查 |

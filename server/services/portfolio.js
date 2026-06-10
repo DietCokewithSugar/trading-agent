@@ -31,11 +31,11 @@ export async function getPortfolio() {
   return { state, positions: positions || [] };
 }
 
-/** 用 FMP 实时报价为持仓估值 */
-export async function getValuation() {
+/** 用 FMP 实时报价为持仓估值。quoteMaxAgeMs 控制报价缓存时长 */
+export async function getValuation({ quoteMaxAgeMs = 10_000 } = {}) {
   const { state, positions } = await getPortfolio();
   const quotes = positions.length
-    ? await getQuotes(positions.map((p) => p.symbol))
+    ? await getQuotes(positions.map((p) => p.symbol), quoteMaxAgeMs)
     : new Map();
 
   const enriched = positions.map((p) => {

@@ -78,7 +78,8 @@ export default function Dashboard({ portfolio, snapshots, trades, status }) {
           <h2>系统状态</h2>
           <div className="status-grid">
             <div>
-              <span className="muted">运行间隔</span> 每 {status.pollMinutes} 分钟
+              <span className="muted">运行节奏</span> 新闻每 {status.pollSeconds} 秒 · 报价推送每{' '}
+              {status.quotePushSeconds} 秒 · 净值快照每 {status.snapshotSeconds} 秒
             </div>
             <div>
               <span className="muted">分析模型</span> {status.model}

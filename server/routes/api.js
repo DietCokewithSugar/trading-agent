@@ -3,6 +3,7 @@ import { supabase } from '../db.js';
 import { config } from '../config.js';
 import { getValuation } from '../services/portfolio.js';
 import { runCycle, cycleStatus } from '../services/newsService.js';
+import { sseHandler, clientCount } from '../services/bus.js';
 
 const router = Router();
 
@@ -88,11 +89,17 @@ router.get(
   })
 );
 
+/** SSE 实时推送流:news / analysis / trade / portfolio / snapshot / cycle 事件 */
+router.get('/stream', sseHandler);
+
 /** 调度状态 */
 router.get('/status', (req, res) => {
   res.json({
     ...cycleStatus,
-    pollMinutes: config.newsPollMinutes,
+    pollSeconds: config.newsPollSeconds,
+    quotePushSeconds: config.quotePushSeconds,
+    snapshotSeconds: config.snapshotSeconds,
+    sseClients: clientCount(),
     model: config.deepseekModel,
   });
 });
@@ -107,7 +114,7 @@ router.post(
     if (cycleStatus.running) {
       return res.status(409).json({ error: '当前已有一轮在运行中' });
     }
-    runCycle(); // 异步执行,不阻塞响应
+    runCycle({ fullFetch: true }); // 异步执行,不阻塞响应
     res.json({ started: true });
   })
 );

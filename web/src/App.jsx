@@ -10,7 +10,8 @@ const TABS = [
   { key: 'trades', label: '🧾 交易记录' },
 ];
 
-const REFRESH_MS = 15_000;
+// SSE 断线时的兜底轮询间隔
+const FALLBACK_REFRESH_MS = 60_000;
 
 export default function App() {
   const [tab, setTab] = useState('dashboard');
@@ -21,6 +22,7 @@ export default function App() {
   const [status, setStatus] = useState(null);
   const [error, setError] = useState(null);
   const [triggering, setTriggering] = useState(false);
+  const [live, setLive] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -44,9 +46,31 @@ export default function App() {
 
   useEffect(() => {
     refresh();
-    const timer = setInterval(refresh, REFRESH_MS);
+    const timer = setInterval(refresh, FALLBACK_REFRESH_MS);
     return () => clearInterval(timer);
   }, [refresh]);
+
+  // SSE 实时推送:报价/快照直接带数据,其余事件触发对应数据的增量拉取
+  useEffect(() => {
+    const es = new EventSource('/api/stream');
+    es.onopen = () => setLive(true);
+    es.onerror = () => setLive(false);
+
+    es.addEventListener('portfolio', (e) => setPortfolio(JSON.parse(e.data)));
+    es.addEventListener('snapshot', (e) => {
+      const snap = JSON.parse(e.data);
+      setSnapshots((prev) => [...prev, snap]);
+    });
+    es.addEventListener('news', () => api.news().then(setNews).catch(() => {}));
+    es.addEventListener('analysis', () => api.news().then(setNews).catch(() => {}));
+    es.addEventListener('trade', () => {
+      api.trades().then(setTrades).catch(() => {});
+      api.portfolio().then(setPortfolio).catch(() => {});
+    });
+    es.addEventListener('cycle', () => api.status().then(setStatus).catch(() => {}));
+
+    return () => es.close();
+  }, []);
 
   const triggerCycle = async () => {
     setTriggering(true);
@@ -70,9 +94,15 @@ export default function App() {
             🤖 AI 新闻交易员
             <span className="subtitle">FMP 新闻 × DeepSeek 分析 × 美股模拟交易</span>
           </h1>
-          <button className="btn" onClick={triggerCycle} disabled={triggering || status?.running}>
-            {status?.running ? '运行中…' : triggering ? '触发中…' : '⚡ 立即分析一轮'}
-          </button>
+          <div className="header-actions">
+            <span className={`live-indicator ${live ? 'on' : ''}`} title={live ? '已建立 SSE 实时连接' : '实时连接断开,使用兜底轮询'}>
+              <span className="dot" />
+              {live ? '实时' : '轮询'}
+            </span>
+            <button className="btn" onClick={triggerCycle} disabled={triggering || status?.running}>
+              {status?.running ? '运行中…' : triggering ? '触发中…' : '⚡ 立即分析一轮'}
+            </button>
+          </div>
         </div>
         {portfolio && (
           <div className="stats">
