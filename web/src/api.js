@@ -11,7 +11,14 @@ export const api = {
   portfolio: () => get('/portfolio'),
   snapshots: (hours) => get(`/snapshots${hours ? `?hours=${hours}` : ''}`),
   trades: (limit = 100, offset = 0) => get(`/trades?limit=${limit}&offset=${offset}`),
-  news: (limit = 60, offset = 0) => get(`/news?limit=${limit}&offset=${offset}`),
+  // 新闻流:筛选/搜索在服务端完成,前端不再为过滤拉全量数据
+  news: ({ limit = 60, offset = 0, filter = 'all', q = '' } = {}) => {
+    const params = new URLSearchParams({ limit, offset });
+    if (filter === 'analyzed') params.set('analyzed', 'true');
+    if (filter === 'bullish' || filter === 'bearish') params.set('sentiment', filter);
+    if (q) params.set('q', q);
+    return get(`/news?${params.toString()}`);
+  },
   stats: () => get('/stats'),
   performance: () => get('/performance'),
   symbol: (symbol) => get(`/symbol/${encodeURIComponent(symbol)}`),

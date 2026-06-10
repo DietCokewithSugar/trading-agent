@@ -152,7 +152,7 @@ export async function handleSignal(article, analysisRow) {
   }
 
   if (decision.action === 'buy') {
-    // 仓位缩放链(按序叠加):LLM fraction → 档位/置信度缩放 → 风控官 scale → 硬性风控帽。
+    // 仓位缩放链(按序叠加):LLM fraction → 档位/置信度/来源可信度缩放 → 风控官 scale → 硬性风控帽。
     // 信号档位越低、置信度越低,实际动用的资金越少(Lopez-Lira:LLM 信号强度应映射到仓位)。
     const tierMult = config.tierSizeMultipliers[analysisRow.tier] ?? 0.5;
     const conf =
@@ -161,10 +161,17 @@ export async function handleSignal(article, analysisRow) {
         : Number(analysisRow.confidence);
     // 置信度 0.5 → 0.5 倍,1.0 → 1 倍;缺失按 0.7 倍处理
     const confMult = conf === null ? 0.7 : Math.min(Math.max(conf, 0.5), 1);
-    const sized = round4(decision.fraction * tierMult * confMult);
+    // 来源可信度 → 0.6~1 倍:通讯社/公告级接近全额,小站/观点文减仓;无评分(旧库)不缩放
+    const srcScore =
+      article.source_score === null || article.source_score === undefined
+        ? null
+        : Number(article.source_score);
+    const srcMult =
+      srcScore === null ? 1 : Math.min(Math.max(0.5 + 0.5 * srcScore, 0.6), 1);
+    const sized = round4(decision.fraction * tierMult * confMult * srcMult);
     if (sized !== decision.fraction) {
       console.log(
-        `[trader] ${symbol} 仓位缩放: ${decision.fraction} × 档位${tierMult} × 置信度${confMult} → ${sized}`
+        `[trader] ${symbol} 仓位缩放: ${decision.fraction} × 档位${tierMult} × 置信度${confMult} × 来源${srcMult} → ${sized}`
       );
       decision.fraction = sized;
     }
@@ -185,6 +192,7 @@ export async function handleSignal(article, analysisRow) {
             reason: decision.reason,
           },
           analysis: analysisRow,
+          sourceScore: srcScore,
           portfolio: {
             cash: valuation.cash,
             totalValue: valuation.total_value,

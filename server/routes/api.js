@@ -131,22 +131,55 @@ router.get(
   })
 );
 
-/** 新闻流(含 DeepSeek 分析结果) */
+/**
+ * 新闻流(含分析结果)。过滤在数据库端完成,前端不再为筛选拉全量数据:
+ * ?analyzed=true 只看已分析;?sentiment=bullish|bearish 按方向过滤(隐含已分析且有档位);
+ * ?q=xxx 按标题/股票代码搜索。
+ */
 router.get(
   '/news',
   asyncHandler(async (req, res) => {
     const limit = Math.min(Number(req.query.limit) || 50, 200);
     const offset = Math.max(Number(req.query.offset) || 0, 0);
     const onlyAnalyzed = req.query.analyzed === 'true';
-    let query = supabase()
-      .from('news_articles')
-      .select('id, url, title, source, publisher, symbols, published_at, fetched_at, news_analyses(*)')
-      .order('published_at', { ascending: false, nullsFirst: false })
-      .range(offset, offset + limit - 1);
-    if (onlyAnalyzed) {
-      query = query.not('news_analyses', 'is', null);
+    const sentiment = ['bullish', 'bearish'].includes(req.query.sentiment)
+      ? req.query.sentiment
+      : null;
+    // 搜索词只保留安全字符,避免拼入 PostgREST or 过滤器时产生语法歧义
+    const q = String(req.query.q || '')
+      .trim()
+      .slice(0, 40)
+      .replace(/[%,()."'\\{}]/g, '');
+
+    const buildQuery = (cols) => {
+      // sentiment 过滤需要 inner join,否则嵌套过滤只清空子数组、不过滤父行
+      let query = supabase()
+        .from('news_articles')
+        .select(`${cols}, ${sentiment ? 'news_analyses!inner(*)' : 'news_analyses(*)'}`)
+        .order('published_at', { ascending: false, nullsFirst: false })
+        .range(offset, offset + limit - 1);
+      if (sentiment) {
+        query = query
+          .eq('news_analyses.sentiment', sentiment)
+          .not('news_analyses.tier', 'is', null);
+      } else if (onlyAnalyzed) {
+        query = query.not('news_analyses', 'is', null);
+      }
+      if (q) {
+        query = query.or(`title.ilike.%${q}%,symbols.cs.{${q.toUpperCase()}}`);
+      }
+      return query;
+    };
+
+    let { data, error } = await buildQuery(
+      'id, url, title, source, publisher, source_domain, source_score, symbols, published_at, fetched_at'
+    );
+    // 兼容尚未执行 009 迁移的数据库:去掉来源可信度列重试
+    if (error && /source_domain|source_score/.test(error.message)) {
+      ({ data, error } = await buildQuery(
+        'id, url, title, source, publisher, symbols, published_at, fetched_at'
+      ));
     }
-    const { data, error } = await query;
     if (error) throw new Error(error.message);
     res.json(data || []);
   })

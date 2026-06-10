@@ -35,6 +35,8 @@ services:
         value: "100000"
       - key: TRADE_TIER_THRESHOLD
         value: "2"
+      - key: MIN_FINAL_CONFIDENCE
+        value: "0.35"
       - key: ENABLE_REFLECTION
         value: "true"
       - key: ENABLE_TRAILING_STOP
