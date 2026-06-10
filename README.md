@@ -188,6 +188,16 @@ cd web && npm run dev      # 终端 2:启动 Vite :5173(已配置 /api 代理)
 **部署后日志出现 `Node.js 20 detected without native WebSocket support` 警告?**
 这是 `@supabase/supabase-js` 的 Realtime 模块在 Node < 22 下的提示。本项目不使用 Realtime 功能,该警告无害;但建议使用 Node 22+(`render.yaml` 已配置 `NODE_VERSION=22`)。如果你的 Render 服务是在旧配置下创建的,请到服务的 **Environment** 页将 `NODE_VERSION` 改为 `22` 并手动重新部署即可消除警告。
 
+## 设计参考
+
+系统的核心机制参考了以下研究与开源项目:
+
+- [Can ChatGPT Forecast Stock Price Movements?](https://arxiv.org/abs/2304.07619)(Lopez-Lira & Tang)— LLM 新闻信号的有效性与信号强度-仓位映射
+- [TradingAgents: Multi-Agents LLM Financial Trading Framework](https://arxiv.org/abs/2412.20138) — 多角色协作与独立风控审批
+- [FinMem: A Performance-Enhanced LLM Trading Agent with Layered Memory](https://arxiv.org/abs/2311.13743) — 交易记忆与反思机制
+- [Large Language Model Agent in Financial Trading: A Survey](https://arxiv.org/abs/2408.06361) — 评估指标与架构综述
+- [virattt/ai-hedge-fund](https://github.com/virattt/ai-hedge-fund) — 多角色 AI 投资组合的开源实践
+
 ## 免责声明
 
 本项目仅为模拟交易与技术演示,所有"买入/卖出"均为虚拟操作,不构成任何投资建议。
