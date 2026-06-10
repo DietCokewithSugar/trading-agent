@@ -3,6 +3,12 @@ function num(value, fallback) {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+// 与 num 的区别:允许 0(例如佣金默认 0,但显式配置 0 也合法)
+function num0(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
 export const config = {
   port: process.env.PORT || 3000,
 
@@ -51,6 +57,16 @@ export const config = {
   eventDedupHours: num(process.env.EVENT_DEDUP_HOURS, 72),
   // 同一股票同方向新闻交易的冷却期(分钟),作为事件去重的兜底防线
   tradeCooldownMinutes: num(process.env.TRADE_COOLDOWN_MINUTES, 30),
+
+  // 模拟成交真实化(execution.js):按市值/时段/波动/订单冲击对成交价施加不利滑点
+  enableSlippage: process.env.ENABLE_SLIPPAGE !== 'false',
+  // 单笔滑点上限(基点,1bp = 0.01%)
+  slippageMaxBps: num(process.env.SLIPPAGE_MAX_BPS, 150),
+  // 佣金(基点,折算进成交价;美股主流券商零佣金,默认 0)
+  commissionBps: num0(process.env.COMMISSION_BPS, 0),
+  // 买入漂移熔断:下单时最新价相对 LLM 决策时价格的偏移超过该百分比即放弃
+  //(上漂=追 spike 顶部,下漂=行情已反转,决策依据的价格均已失效)
+  buyPriceDriftAbortPercent: num(process.env.BUY_PRICE_DRIFT_ABORT_PERCENT, 5),
 
   // 平仓后是否用 DeepSeek 复盘并沉淀经验教训(注入后续交易决策)
   enableReflection: process.env.ENABLE_REFLECTION !== 'false',

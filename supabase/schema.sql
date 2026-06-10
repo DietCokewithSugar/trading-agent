@@ -71,6 +71,9 @@ create table if not exists trades (
   news_id bigint references news_articles(id) on delete set null,
   analysis_id bigint references news_analyses(id) on delete set null,
   realized_pnl numeric,
+  -- 成交真实化(008):下单时点的市场参考价与施加的滑点(基点),price 为滑点后实际成交价
+  quote_price numeric,
+  slippage_bps numeric,
   created_at timestamptz not null default now()
 );
 create index if not exists idx_trades_created on trades (created_at desc);
