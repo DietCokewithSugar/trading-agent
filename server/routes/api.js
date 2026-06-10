@@ -154,7 +154,7 @@ router.get(
 /** SSE 实时推送流:news / analysis / trade / portfolio / snapshot / cycle 事件 */
 router.get('/stream', sseHandler);
 
-/** 调度状态 */
+/** 调度状态(公开接口,不暴露模型等内部配置;完整状态见 /api/admin/status) */
 router.get('/status', (req, res) => {
   res.json({
     ...cycleStatus,
@@ -163,14 +163,14 @@ router.get('/status', (req, res) => {
     snapshotSeconds: config.snapshotSeconds,
     riskCheckSeconds: config.riskCheckSeconds,
     sseClients: clientCount(),
-    model: config.deepseekModel,
   });
 });
 
 /**
  * 手动触发一轮抓取/分析/交易(设置了 ADMIN_TOKEN 时需要鉴权)。
- * 未设置 ADMIN_TOKEN 时接口对所有人开放(首页按钮依赖此行为),
- * 但加全局冷却,防止被刷着消耗 FMP/DeepSeek 配额。
+ * 未设置 ADMIN_TOKEN 时接口对所有人开放(供外部定时服务在 Render Free
+ * 计划休眠时代替内置定时器),但加全局冷却,防止被刷着消耗 API 配额。
+ * 站内的手动触发入口在管理页(#/admin → /api/admin/run-cycle)。
  */
 const ANON_CYCLE_COOLDOWN_MS = 120_000;
 let lastAnonCycleAt = 0;

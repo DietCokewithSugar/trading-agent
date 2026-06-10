@@ -26,7 +26,6 @@ function MainApp() {
   const [performance, setPerformance] = useState(null);
   const [status, setStatus] = useState(null);
   const [error, setError] = useState(null);
-  const [triggering, setTriggering] = useState(false);
   const [live, setLive] = useState(false);
   const [toasts, setToasts] = useState([]);
   const [activeSymbol, setActiveSymbol] = useState(null);
@@ -126,18 +125,6 @@ function MainApp() {
     return () => es.close();
   }, [pushToast, refresh]);
 
-  const triggerCycle = async () => {
-    setTriggering(true);
-    try {
-      await api.runCycle();
-      setTimeout(refresh, 5000);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setTriggering(false);
-    }
-  };
-
   const pnl = portfolio?.pnl ?? 0;
   const session = portfolio?.market_session;
 
@@ -145,10 +132,7 @@ function MainApp() {
     <div className="app">
       <header className="header">
         <div className="header-top">
-          <h1>
-            AI 新闻交易员
-            <span className="subtitle">FMP 新闻 · DeepSeek 分析 · 美股模拟交易</span>
-          </h1>
+          <h1>AI 新闻交易员</h1>
           <div className="header-actions">
             {session && (
               <span className={`badge badge-session session-${session}`}>
@@ -159,9 +143,6 @@ function MainApp() {
               <span className="dot" />
               {live ? '实时' : '轮询'}
             </span>
-            <button className="btn" onClick={triggerCycle} disabled={triggering || status?.running}>
-              {status?.running ? '运行中…' : triggering ? '触发中…' : '立即分析一轮'}
-            </button>
           </div>
         </div>
         {portfolio && (
@@ -217,9 +198,7 @@ function MainApp() {
         {tab === 'trades' && <TradesPage trades={trades} onSymbolClick={setActiveSymbol} />}
       </main>
 
-      <footer className="footer">
-        模拟交易,不构成投资建议 · 数据来源 Financial Modeling Prep / Yahoo Finance · 分析引擎 DeepSeek
-      </footer>
+      <footer className="footer">模拟交易,不构成投资建议</footer>
 
       <Toasts toasts={toasts} />
       {activeSymbol && <SymbolModal symbol={activeSymbol} onClose={() => setActiveSymbol(null)} />}

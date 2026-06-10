@@ -118,9 +118,6 @@ export default function Dashboard({ portfolio, snapshots, trades, stats, perform
               {status.riskCheckSeconds} 秒
             </div>
             <div>
-              <span className="muted">分析模型</span> {status.model}
-            </div>
-            <div>
               <span className="muted">上次运行</span> {fmtTime(status.lastRunAt)}
             </div>
             {status.lastResult && (
