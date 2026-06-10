@@ -47,6 +47,10 @@ export const config = {
   maxBuyCashFraction: 0.2,
   // 低于该金额的订单忽略
   minOrderAmount: 50,
+  // 事件去重窗口(小时):同一事件的多渠道报道在该窗口内归并,只触发一次交易
+  eventDedupHours: num(process.env.EVENT_DEDUP_HOURS, 72),
+  // 同一股票同方向新闻交易的冷却期(分钟),作为事件去重的兜底防线
+  tradeCooldownMinutes: num(process.env.TRADE_COOLDOWN_MINUTES, 30),
 
   // 关注列表(用于 Yahoo RSS 抓取),持仓股票会自动加入
   watchlist: (process.env.WATCHLIST || 'AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA')

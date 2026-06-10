@@ -1,6 +1,6 @@
 import { supabase } from '../db.js';
 import { config } from '../config.js';
-import { getQuote } from './fmp.js';
+import { getQuote, getProfile } from './fmp.js';
 import { decideTrade } from './deepseek.js';
 import { getPortfolio, getValuation } from './portfolio.js';
 
@@ -11,16 +11,47 @@ function round2(n) {
   return Math.round(n * 100) / 100;
 }
 
+// 进程内交易互斥:新闻交易(runCycle)与止损/止盈监控(checkStops)并发运行,
+// 下单段在此串行化,避免「读组合 → 算现金 → 写回」交错导致的资金竞态;
+// 数据库侧 execute_trade 的行锁是第二道防线。
+let tradeChain = Promise.resolve();
+function withTradeLock(fn) {
+  const run = tradeChain.then(fn, fn);
+  tradeChain = run.then(
+    () => {},
+    () => {}
+  );
+  return run;
+}
+
+/** execute_trade RPC 尚未部署(未执行 004 迁移)时的判定 */
+function isMissingTradeRpc(error) {
+  return error?.code === 'PGRST202' || /execute_trade/.test(error?.message || '');
+}
+
+function logTrade(trade) {
+  console.log(
+    `[trader] 成交: ${trade.side === 'buy' ? '买入' : '卖出'} ${trade.symbol} ${trade.quantity} 股 @ $${trade.price}`
+  );
+  return trade;
+}
+
 /**
  * 处理一条可交易的新闻分析信号:
- * 询问 DeepSeek 决策 → 校验风控约束 → 以 FMP 实时价格(含盘前盘后)模拟成交 → 落库。
+ * 拉取报价 + 公司档案做标的核验 → 询问 DeepSeek 决策 → 校验风控约束 →
+ * 以 FMP 实时价格(含盘前盘后)模拟成交 → 落库。
  * 返回成交记录,未成交返回 null。
  */
 export async function handleSignal(article, analysisRow) {
   const symbol = analysisRow.symbol;
-  const quote = await getQuote(symbol);
+  const [quote, profile] = await Promise.all([getQuote(symbol), getProfile(symbol)]);
   if (!quote) {
     console.warn(`[trader] ${symbol} 无法获取报价,跳过`);
+    return null;
+  }
+  // 硬校验:档案明确显示该代码当前并未正常交易(退市/停牌)时直接跳过
+  if (profile && profile.isActivelyTrading === false) {
+    console.warn(`[trader] ${symbol} 当前未在正常交易(isActivelyTrading=false),跳过`);
     return null;
   }
   const price = quote.effective_price ?? quote.price;
@@ -30,6 +61,7 @@ export async function handleSignal(article, analysisRow) {
     analysis: analysisRow,
     article,
     quote,
+    profile,
     portfolio: {
       cash: valuation.cash,
       totalValue: valuation.total_value,
@@ -37,11 +69,15 @@ export async function handleSignal(article, analysisRow) {
     },
   });
 
+  if (!decision.symbolValid) {
+    console.warn(`[trader] ${symbol} 标的核验未通过: ${decision.validationReason}`);
+    return null;
+  }
   console.log(`[trader] ${symbol} 决策: ${decision.action} fraction=${decision.fraction}`);
   if (decision.action === 'hold' || decision.fraction <= 0) return null;
 
   if (decision.action === 'buy') {
-    return executeBuy({ symbol, price, decision, valuation, analysisRow, article });
+    return executeBuy({ symbol, price, decision, analysisRow, article });
   }
   return executeSellOrder({
     symbol,
@@ -51,35 +87,59 @@ export async function handleSignal(article, analysisRow) {
     trigger: 'news',
     news_id: article.id,
     analysis_id: analysisRow.id,
-    valuation,
   });
 }
 
-async function executeBuy({ symbol, price, decision, valuation, analysisRow, article }) {
+async function executeBuy({ symbol, price, decision, analysisRow, article }) {
+  return withTradeLock(async () => {
+    // 下单前重取组合状态:DeepSeek 决策耗时较长,决策前的快照可能已过期
+    const valuation = await getValuation();
+
+    // 风控:单笔买入金额 ≤ min(决策比例×现金, 总资产×maxBuyCashFraction, 剩余现金)
+    let spend = Math.min(
+      decision.fraction * valuation.cash,
+      config.maxBuyCashFraction * valuation.total_value,
+      valuation.cash
+    );
+
+    // 风控:买入后该股票市值不超过组合总值的 maxPositionFraction
+    const existing = valuation.positions.find((p) => p.symbol === symbol);
+    const existingValue = existing ? existing.market_value : 0;
+    const positionCap = config.maxPositionFraction * valuation.total_value - existingValue;
+    spend = Math.min(spend, Math.max(positionCap, 0));
+
+    if (spend < config.minOrderAmount) {
+      console.log(`[trader] ${symbol} 买入金额 ${round2(spend)} 低于下限,跳过`);
+      return null;
+    }
+
+    const quantity = round4(spend / price);
+    const amount = round2(quantity * price);
+
+    const { data, error } = await supabase().rpc('execute_trade', {
+      p_symbol: symbol,
+      p_side: 'buy',
+      p_quantity: quantity,
+      p_price: round4(price),
+      p_amount: amount,
+      p_reason: decision.reason,
+      p_trigger: 'news',
+      p_news_id: article.id,
+      p_analysis_id: analysisRow.id,
+      p_stop_loss_percent: decision.stopLossPercent,
+      p_take_profit_percent: decision.takeProfitPercent,
+    });
+    if (!error) return logTrade(data);
+    if (!isMissingTradeRpc(error)) throw new Error(`买入 ${symbol} 失败: ${error.message}`);
+    console.warn('[trader] execute_trade RPC 不可用,退回非事务路径(请尽快执行 004 迁移)');
+    return legacyBuy({ symbol, price, quantity, amount, decision, valuation, analysisRow, article });
+  });
+}
+
+/** 兼容尚未执行 004 迁移的数据库:旧的非事务买入路径 */
+async function legacyBuy({ symbol, price, quantity, amount, decision, valuation, analysisRow, article }) {
   const db = supabase();
 
-  // 风控:单笔买入金额 ≤ min(决策比例×现金, 总资产×maxBuyCashFraction, 剩余现金)
-  let spend = Math.min(
-    decision.fraction * valuation.cash,
-    config.maxBuyCashFraction * valuation.total_value,
-    valuation.cash
-  );
-
-  // 风控:买入后该股票市值不超过组合总值的 maxPositionFraction
-  const existing = valuation.positions.find((p) => p.symbol === symbol);
-  const existingValue = existing ? existing.market_value : 0;
-  const positionCap = config.maxPositionFraction * valuation.total_value - existingValue;
-  spend = Math.min(spend, Math.max(positionCap, 0));
-
-  if (spend < config.minOrderAmount) {
-    console.log(`[trader] ${symbol} 买入金额 ${round2(spend)} 低于下限,跳过`);
-    return null;
-  }
-
-  const quantity = round4(spend / price);
-  const amount = round2(quantity * price);
-
-  // 更新现金
   const { error: cashErr } = await db
     .from('portfolio_state')
     .update({ cash: round2(valuation.cash - amount), updated_at: new Date().toISOString() })
@@ -137,28 +197,51 @@ export async function executeSellOrder({
   trigger = 'news',
   news_id = null,
   analysis_id = null,
-  valuation = null,
 }) {
+  return withTradeLock(async () => {
+    // 持仓与现金以下单时刻的最新状态为准
+    const val = await getValuation();
+
+    const position = val.positions.find((p) => p.symbol === symbol);
+    if (!position || position.quantity <= 0) {
+      console.log(`[trader] 未持有 ${symbol},无法卖出`);
+      return null;
+    }
+
+    let quantity = round4(position.quantity * fraction);
+    // 余量太小则全部卖出
+    if (position.quantity - quantity < 0.0001 || fraction >= 0.99) {
+      quantity = position.quantity;
+    }
+    const amount = round2(quantity * price);
+    if (amount < config.minOrderAmount && quantity < position.quantity) {
+      console.log(`[trader] ${symbol} 卖出金额 ${amount} 低于下限,跳过`);
+      return null;
+    }
+
+    const { data, error } = await supabase().rpc('execute_trade', {
+      p_symbol: symbol,
+      p_side: 'sell',
+      p_quantity: quantity,
+      p_price: round4(price),
+      p_amount: amount,
+      p_reason: reason,
+      p_trigger: trigger,
+      p_news_id: news_id,
+      p_analysis_id: analysis_id,
+      p_stop_loss_percent: null,
+      p_take_profit_percent: null,
+    });
+    if (!error) return logTrade(data);
+    if (!isMissingTradeRpc(error)) throw new Error(`卖出 ${symbol} 失败: ${error.message}`);
+    console.warn('[trader] execute_trade RPC 不可用,退回非事务路径(请尽快执行 004 迁移)');
+    return legacySell({ symbol, price, quantity, amount, reason, trigger, news_id, analysis_id, val, position });
+  });
+}
+
+/** 兼容尚未执行 004 迁移的数据库:旧的非事务卖出路径 */
+async function legacySell({ symbol, price, quantity, amount, reason, trigger, news_id, analysis_id, val, position }) {
   const db = supabase();
-  const val = valuation || (await getValuation());
-
-  const position = val.positions.find((p) => p.symbol === symbol);
-  if (!position || position.quantity <= 0) {
-    console.log(`[trader] 未持有 ${symbol},无法卖出`);
-    return null;
-  }
-
-  let quantity = round4(position.quantity * fraction);
-  // 余量太小则全部卖出
-  if (position.quantity - quantity < 0.0001 || fraction >= 0.99) {
-    quantity = position.quantity;
-  }
-  const amount = round2(quantity * price);
-  if (amount < config.minOrderAmount && quantity < position.quantity) {
-    console.log(`[trader] ${symbol} 卖出金额 ${amount} 低于下限,跳过`);
-    return null;
-  }
-
   const realizedPnl = round2((price - position.avg_cost) * quantity);
 
   const { error: cashErr } = await db
@@ -194,10 +277,7 @@ export async function executeSellOrder({
 async function insertTrade(db, trade) {
   const { data, error } = await db.from('trades').insert(trade).select().single();
   if (error) throw new Error(`写入交易记录失败: ${error.message}`);
-  console.log(
-    `[trader] 成交: ${trade.side === 'buy' ? '买入' : '卖出'} ${trade.symbol} ${trade.quantity} 股 @ $${trade.price}`
-  );
-  return data;
+  return logTrade(data);
 }
 
 export { getPortfolio };

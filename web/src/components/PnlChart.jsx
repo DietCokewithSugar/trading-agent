@@ -32,8 +32,8 @@ function TradeMarker(props) {
       <path
         d={buy ? `M ${cx} ${cy - 6} L ${cx - 5} ${cy + 4} L ${cx + 5} ${cy + 4} Z`
                : `M ${cx} ${cy + 6} L ${cx - 5} ${cy - 4} L ${cx + 5} ${cy - 4} Z`}
-        fill={buy ? '#f04848' : '#1db954'}
-        stroke="#0f1218"
+        fill={buy ? '#e0524e' : '#2fa572'}
+        stroke="#0b0d12"
         strokeWidth={1}
       />
     </g>
@@ -110,7 +110,7 @@ export default function PnlChart({ snapshots, trades, initialCapital }) {
       ) : (
         <ResponsiveContainer width="100%" height={320}>
           <ComposedChart data={data} margin={{ top: 10, right: 16, bottom: 0, left: 8 }}>
-            <CartesianGrid stroke="#2a2f3a" strokeDasharray="3 3" />
+            <CartesianGrid stroke="#1f2530" strokeDasharray="3 3" />
             <XAxis
               dataKey="time"
               type="number"
@@ -123,18 +123,18 @@ export default function PnlChart({ snapshots, trades, initialCapital }) {
                   minute: '2-digit',
                 })
               }
-              stroke="#8a92a6"
+              stroke="#7a8294"
               fontSize={12}
             />
             <YAxis
               domain={['auto', 'auto']}
               tickFormatter={(v) => `$${(v / 1000).toFixed(1)}k`}
-              stroke="#8a92a6"
+              stroke="#7a8294"
               fontSize={12}
               width={70}
             />
             <Tooltip
-              contentStyle={{ background: '#1a1e27', border: '1px solid #2a2f3a', borderRadius: 8 }}
+              contentStyle={{ background: '#12151c', border: '1px solid #1f2530', borderRadius: 8 }}
               labelFormatter={(t) => new Date(t).toLocaleString('zh-CN')}
               formatter={(value, name, props) => {
                 if (name === 'total') {
@@ -149,15 +149,15 @@ export default function PnlChart({ snapshots, trades, initialCapital }) {
             {initialCapital && (
               <ReferenceLine
                 y={Number(initialCapital)}
-                stroke="#8a92a6"
+                stroke="#7a8294"
                 strokeDasharray="4 4"
-                label={{ value: '初始资金', fill: '#8a92a6', fontSize: 12, position: 'insideTopRight' }}
+                label={{ value: '初始资金', fill: '#7a8294', fontSize: 12, position: 'insideTopRight' }}
               />
             )}
             <Line
               type="monotone"
               dataKey="total"
-              stroke={data[data.length - 1].pnl >= 0 ? '#f04848' : '#1db954'}
+              stroke={data[data.length - 1].pnl >= 0 ? '#e0524e' : '#2fa572'}
               strokeWidth={2}
               dot={false}
             />
