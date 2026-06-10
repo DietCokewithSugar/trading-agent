@@ -15,7 +15,7 @@ function round2(n) {
 // 下单段在此串行化,避免「读组合 → 算现金 → 写回」交错导致的资金竞态;
 // 数据库侧 execute_trade 的行锁是第二道防线。
 let tradeChain = Promise.resolve();
-function withTradeLock(fn) {
+export function withTradeLock(fn) {
   const run = tradeChain.then(fn, fn);
   tradeChain = run.then(
     () => {},

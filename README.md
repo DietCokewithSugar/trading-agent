@@ -50,6 +50,16 @@
 
 非盘中时段,系统通过 FMP 的 aftermarket-trade 接口获取盘前(美东 4:00–9:30)/盘后(16:00–20:00)最新成交价,用于估值、模拟成交和止损监控;页面持仓表会显示「盘前 / 盘后」徽章及相对收盘价的涨跌幅。若订阅不含该端点,自动退回收盘价。
 
+### 管理后台(#/admin)
+
+访问 `https://你的域名/#/admin` 进入隐藏管理页,输入 `ADMIN_TOKEN` 登录后可:
+
+- 查看调度运行状态(交易轮、上次运行、SSE 在线数等);
+- 手动触发一轮全源「抓取 → 分析 → 交易」;
+- **初始化所有数据**:清空全部新闻、AI 分析、事件、交易记录、持仓与净值快照,现金恢复为 `INITIAL_CAPITAL`。适用于持仓数据已脏、想从头开始的场景。操作不可恢复,页面要求输入 `RESET` 二次确认。
+
+安全设计:管理接口(`/api/admin/*`)在服务端**强制鉴权**——未配置 `ADMIN_TOKEN` 时整组接口直接禁用(503),令牌错误返回 403;重置执行期间自动暂停新闻轮询与止损监控,并等待运行中的交易轮结束,绝不与交易并发删库。重置在数据库端通过 `admin_reset_data` 函数(005 迁移)单事务完成;尚未执行 005 迁移的库自动退回逐表删除。
+
 ## 技术栈
 
 - **后端**: Node.js + Express,SSE 实时推送 + 秒级轮询调度
@@ -64,7 +74,7 @@
 ### 1. 初始化 Supabase
 
 1. 在 [supabase.com](https://supabase.com) 创建项目;
-2. 打开 **SQL Editor**,执行仓库中的 [`supabase/schema.sql`](supabase/schema.sql);**已有部署升级时**,改为执行 `supabase/migrations/` 下的增量脚本(如 [`002_stops_and_stats.sql`](supabase/migrations/002_stops_and_stats.sql)、[`003_news_events.sql`](supabase/migrations/003_news_events.sql)、[`004_atomic_trade.sql`](supabase/migrations/004_atomic_trade.sql));
+2. 打开 **SQL Editor**,执行仓库中的 [`supabase/schema.sql`](supabase/schema.sql);**已有部署升级时**,改为执行 `supabase/migrations/` 下的增量脚本(如 [`002_stops_and_stats.sql`](supabase/migrations/002_stops_and_stats.sql)、[`003_news_events.sql`](supabase/migrations/003_news_events.sql)、[`004_atomic_trade.sql`](supabase/migrations/004_atomic_trade.sql)、[`005_admin_reset.sql`](supabase/migrations/005_admin_reset.sql));
 3. 在 **Project Settings → API** 记下 `Project URL` 和 `service_role` key。
 
 ### 2. 部署到 Render
@@ -121,7 +131,7 @@ cd web && npm run dev      # 终端 2:启动 Vite :5173(已配置 /api 代理)
 | `TRADE_COOLDOWN_MINUTES` | `30` | 同一股票同方向新闻交易的冷却期(分钟),事件去重的兜底防线 |
 | `WATCHLIST` | 七巨头 | Yahoo RSS 抓取的关注列表,持仓自动加入 |
 | `ENABLE_YAHOO` | `true` | 是否启用 Yahoo Finance RSS 补充源 |
-| `ADMIN_TOKEN` | 空 | 设置后手动触发接口需要鉴权 |
+| `ADMIN_TOKEN` | 空 | 设置后手动触发接口需要鉴权;同时是管理后台(`#/admin`)的登录口令,未设置时管理接口整组禁用 |
 
 ## API 一览
 
@@ -137,6 +147,10 @@ cd web && npm run dev      # 终端 2:启动 Vite :5173(已配置 /api 代理)
 | `GET /api/status` | 调度器状态 |
 | `POST /api/run-cycle` | 手动触发一轮抓取/分析/交易(未设 `ADMIN_TOKEN` 时全局 120 秒冷却,防滥用) |
 | `GET /api/health` | 健康检查 |
+| `GET /api/admin/verify` | 管理:校验令牌(以下均需 `x-admin-token` 请求头) |
+| `GET /api/admin/status` | 管理:调度与运行状态 |
+| `POST /api/admin/run-cycle` | 管理:手动触发一轮(带鉴权,无冷却) |
+| `POST /api/admin/reset` | 管理:全量数据初始化(body 需 `{"confirm":"RESET"}`) |
 
 ## 常见问题
 

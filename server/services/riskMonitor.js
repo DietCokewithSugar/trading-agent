@@ -2,6 +2,7 @@ import { getQuote, getMarketSession } from './fmp.js';
 import { getPortfolio } from './portfolio.js';
 import { executeSellOrder } from './trader.js';
 import { broadcast } from './bus.js';
+import { isHalted } from './halt.js';
 
 let running = false;
 
@@ -11,6 +12,7 @@ let running = false;
  */
 export async function checkStops() {
   if (running) return;
+  if (isHalted()) return;
   if (getMarketSession() === 'closed') return;
   running = true;
 

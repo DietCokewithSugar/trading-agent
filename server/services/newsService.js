@@ -7,6 +7,7 @@ import { resolveEvent, markEventTraded } from './eventService.js';
 import { handleSignal } from './trader.js';
 import { getPortfolio } from './portfolio.js';
 import { broadcast } from './bus.js';
+import { isHalted } from './halt.js';
 
 export const cycleStatus = {
   running: false,
@@ -160,6 +161,10 @@ async function analyzeAndStore(article) {
 
 /** 完整的一轮:抓新闻 → 分析 → 交易,并通过 SSE 实时推送各环节结果 */
 export async function runCycle({ fullFetch = false } = {}) {
+  // 管理后台正在重置数据时暂停,避免边删库边交易
+  if (isHalted()) {
+    return cycleStatus.lastResult;
+  }
   if (cycleStatus.running) {
     return cycleStatus.lastResult;
   }

@@ -37,3 +37,5 @@ services:
         value: "2"
       - key: WATCHLIST
         value: "AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA"
+      - key: ADMIN_TOKEN
+        sync: false # 管理后台(#/admin)登录口令,在 Render 控制台填写

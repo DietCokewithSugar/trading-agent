@@ -5,6 +5,7 @@ import NewsFeed from './components/NewsFeed.jsx';
 import TradesPage from './components/TradesPage.jsx';
 import Toasts from './components/Toasts.jsx';
 import SymbolModal from './components/SymbolModal.jsx';
+import AdminPage from './components/AdminPage.jsx';
 
 const TABS = [
   { key: 'dashboard', label: '仪表盘' },
@@ -15,7 +16,7 @@ const TABS = [
 // SSE 断线时的兜底轮询间隔
 const FALLBACK_REFRESH_MS = 60_000;
 
-export default function App() {
+function MainApp() {
   const [tab, setTab] = useState('dashboard');
   const [portfolio, setPortfolio] = useState(null);
   const [snapshots, setSnapshots] = useState([]);
@@ -106,9 +107,14 @@ export default function App() {
       } catch { /* 忽略畸形数据 */ }
     });
     es.addEventListener('cycle', () => api.status().then(setStatus).catch(() => {}));
+    // 管理后台执行了全量数据重置:全部数据作废,整体刷新
+    es.addEventListener('reset', () => {
+      refresh();
+      pushToast('数据已重置,账户恢复初始状态');
+    });
 
     return () => es.close();
-  }, [pushToast]);
+  }, [pushToast, refresh]);
 
   const triggerCycle = async () => {
     setTriggering(true);
@@ -208,4 +214,16 @@ export default function App() {
       {activeSymbol && <SymbolModal symbol={activeSymbol} onClose={() => setActiveSymbol(null)} />}
     </div>
   );
+}
+
+/** 根组件:hash 为 #/admin 时进入隐藏管理页,其余渲染主面板 */
+export default function App() {
+  const [hash, setHash] = useState(window.location.hash);
+  useEffect(() => {
+    const onHash = () => setHash(window.location.hash);
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+  if (hash === '#/admin') return <AdminPage />;
+  return <MainApp />;
 }

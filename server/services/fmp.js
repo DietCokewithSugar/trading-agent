@@ -143,6 +143,12 @@ export async function getQuote(symbol, maxAgeMs = 10_000) {
   return q;
 }
 
+/** 清空进程内缓存(管理后台数据重置时调用,确保重置后拿到的都是新数据) */
+export function clearCaches() {
+  quoteCache.clear();
+  profileCache.clear();
+}
+
 /** 批量报价,返回 Map<symbol, quote> */
 export async function getQuotes(symbols, maxAgeMs = 10_000) {
   const unique = [...new Set(symbols.map((s) => s.toUpperCase()))];

@@ -25,6 +25,31 @@ export const api = {
   },
 };
 
+/** 管理接口:所有请求携带 x-admin-token 请求头 */
+async function adminRequest(path, { method = 'GET', token, body } = {}) {
+  const res = await fetch(`/api/admin${path}`, {
+    method,
+    headers: {
+      'x-admin-token': token || '',
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `请求失败: ${res.status}`);
+  }
+  return res.json();
+}
+
+export const adminApi = {
+  verify: (token) => adminRequest('/verify', { token }),
+  status: (token) => adminRequest('/status', { token }),
+  runCycle: (token) => adminRequest('/run-cycle', { method: 'POST', token }),
+  reset: (token) =>
+    adminRequest('/reset', { method: 'POST', token, body: { confirm: 'RESET' } }),
+};
+
 export function fmtMoney(n, digits = 2) {
   if (n === null || n === undefined || Number.isNaN(Number(n))) return '—';
   return Number(n).toLocaleString('en-US', {
