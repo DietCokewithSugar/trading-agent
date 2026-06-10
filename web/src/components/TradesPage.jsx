@@ -41,7 +41,7 @@ export default function TradesPage({ trades, onSymbolClick }) {
       <div className="filter-row">
         <input
           className="search-input"
-          placeholder="🔍 按股票代码筛选…"
+          placeholder="按股票代码筛选"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
@@ -60,7 +60,7 @@ export default function TradesPage({ trades, onSymbolClick }) {
               <button className="symbol symbol-link" onClick={() => onSymbolClick(t.symbol)}>
                 {t.symbol}
               </button>
-              <span>
+              <span className="num">
                 {fmtNum(t.quantity, 4)} 股 × {fmtMoney(t.price)} = {fmtMoney(t.amount)}
               </span>
               {t.realized_pnl !== null && t.realized_pnl !== undefined && (
@@ -71,7 +71,12 @@ export default function TradesPage({ trades, onSymbolClick }) {
               <span className="muted">{fmtTime(t.created_at)}</span>
             </div>
 
-            {t.reason && <p className="reason">💡 决策原因:{t.reason}</p>}
+            {t.reason && (
+              <p className="reason">
+                <span className="reason-label">决策依据</span>
+                {t.reason}
+              </p>
+            )}
 
             {t.news_analyses && (
               <p className="muted small">
@@ -82,7 +87,7 @@ export default function TradesPage({ trades, onSymbolClick }) {
 
             {t.news_articles && (
               <p className="small">
-                📰 触发新闻:
+                <span className="muted">触发新闻 </span>
                 <a href={t.news_articles.url} target="_blank" rel="noreferrer">
                   {t.news_articles.title}
                 </a>

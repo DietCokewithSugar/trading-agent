@@ -42,7 +42,7 @@ export default function SymbolModal({ symbol, onClose }) {
           <button className="modal-close" onClick={onClose}>✕</button>
         </div>
 
-        {error && <p className="empty">⚠️ {error}</p>}
+        {error && <p className="empty">{error}</p>}
         {!data && !error && <p className="empty">加载中…</p>}
 
         {data && (
@@ -113,7 +113,12 @@ export default function SymbolModal({ symbol, onClose }) {
                           </a>
                         </p>
                       )}
-                      {a.reasoning && <p className="reason">🧠 {a.reasoning}</p>}
+                      {a.reasoning && (
+                        <p className="reason">
+                          <span className="reason-label">分析理由</span>
+                          {a.reasoning}
+                        </p>
+                      )}
                     </li>
                   ))}
                 </ul>
@@ -143,7 +148,12 @@ export default function SymbolModal({ symbol, onClose }) {
                         </span>
                       )}
                       <span className="muted small"> {fmtTime(t.created_at)}</span>
-                      {t.reason && <p className="reason">💡 {t.reason}</p>}
+                      {t.reason && (
+                        <p className="reason">
+                          <span className="reason-label">决策依据</span>
+                          {t.reason}
+                        </p>
+                      )}
                     </li>
                   ))}
                 </ul>

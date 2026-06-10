@@ -74,6 +74,6 @@ export const SESSION_LABELS = {
 };
 
 export const TRIGGER_LABELS = {
-  stop_loss: '🛑 自动止损',
-  take_profit: '🎯 自动止盈',
+  stop_loss: '自动止损',
+  take_profit: '自动止盈',
 };
