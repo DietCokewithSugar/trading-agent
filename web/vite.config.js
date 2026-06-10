@@ -8,4 +8,15 @@ export default defineConfig({
       '/api': 'http://localhost:3000',
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        // 把体积大的依赖拆成独立 chunk,便于浏览器缓存
+        manualChunks: {
+          antd: ['antd'],
+          recharts: ['recharts'],
+        },
+      },
+    },
+  },
 });

@@ -88,7 +88,7 @@
 ## 技术栈
 
 - **后端**: Node.js + Express,SSE 实时推送 + 秒级轮询调度
-- **前端**: React + Vite + Recharts(构建后由后端静态托管)
+- **前端**: React + Vite + [Ant Design 5](https://ant.design/)(浅色主题、中文界面、移动端自适应)+ Recharts 图表(构建后由后端静态托管)。配色遵循美股惯例:绿涨红跌
 - **数据**: [FMP API](https://site.financialmodelingprep.com/developer/docs)(新闻 + 实时报价)、Yahoo Finance RSS(补充新闻源)
 - **AI**: [DeepSeek API](https://api-docs.deepseek.com/)(新闻分析 + 交易决策,模型可配置)
 - **存储**: Supabase (PostgreSQL)
