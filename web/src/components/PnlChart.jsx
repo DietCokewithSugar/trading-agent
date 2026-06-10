@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { Segmented, Typography } from 'antd';
 import {
   ResponsiveContainer,
   ComposedChart,
@@ -11,6 +12,7 @@ import {
   CartesianGrid,
 } from 'recharts';
 import { api, fmtMoney, fmtNum, fmtPercent } from '../api.js';
+import { CHART, COLOR_UP, COLOR_DOWN } from '../theme.js';
 
 const RANGES = [
   { key: '1d', label: '1天', hours: 24 },
@@ -19,7 +21,7 @@ const RANGES = [
   { key: 'all', label: '全部', hours: null },
 ];
 
-/** 买卖点标记:买入红色▲,卖出绿色▼,悬停显示交易详情(SVG 原生 title) */
+/** 买卖点标记:买入绿色▲,卖出红色▼(美股惯例),悬停显示交易详情(SVG 原生 title) */
 function TradeMarker(props) {
   const { cx, cy, payload } = props;
   if (cx === undefined || cy === undefined || !payload?.trade) return null;
@@ -32,8 +34,8 @@ function TradeMarker(props) {
       <path
         d={buy ? `M ${cx} ${cy - 6} L ${cx - 5} ${cy + 4} L ${cx + 5} ${cy + 4} Z`
                : `M ${cx} ${cy + 6} L ${cx - 5} ${cy - 4} L ${cx + 5} ${cy - 4} Z`}
-        fill={buy ? '#e0524e' : '#2fa572'}
-        stroke="#0b0d12"
+        fill={buy ? COLOR_UP : COLOR_DOWN}
+        stroke={CHART.markerStroke}
         strokeWidth={1}
       />
     </g>
@@ -104,29 +106,52 @@ export default function PnlChart({ snapshots, trades, initialCapital, benchmark 
       .filter((p) => p.time >= minTime && p.time <= maxTime);
   }, [benchmark, data, rangeKey]);
 
+  // 自适应 Y 轴:窄幅波动时旧的「$xx.xk」格式会让所有刻度显示成同一个值,
+  // 这里按实际数值跨度选择精度,并给上下各留 8% 空间
+  const { yDomain, fmtTick } = useMemo(() => {
+    const values = [
+      ...data.map((d) => d.total),
+      ...benchmarkData.map((d) => d.benchmark),
+    ].filter((v) => Number.isFinite(v));
+    if (!values.length) {
+      return { yDomain: ['auto', 'auto'], fmtTick: (v) => `$${(v / 1000).toFixed(1)}k` };
+    }
+    const lo = Math.min(...values);
+    const hi = Math.max(...values);
+    // 完全平坦的序列也要有非零跨度,避免 domain 退化
+    const span = Math.max(hi - lo, Math.max(Math.abs(hi) * 0.002, 1));
+    const pad = span * 0.08;
+    const fmtTick =
+      span >= 20000
+        ? (v) => `$${(v / 1000).toFixed(0)}k`
+        : span >= 2000
+          ? (v) => `$${(v / 1000).toFixed(1)}k`
+          : span >= 100
+            ? (v) => `$${Math.round(v).toLocaleString('en-US')}`
+            : (v) => `$${Number(v).toFixed(2)}`;
+    return { yDomain: [lo - pad, hi + pad], fmtTick };
+  }, [data, benchmarkData]);
+
   return (
     <div>
-      <div className="filter-row">
-        {RANGES.map((r) => (
-          <button
-            key={r.key}
-            className={`chip ${rangeKey === r.key ? 'active' : ''}`}
-            onClick={() => setRangeKey(r.key)}
-          >
-            {r.label}
-          </button>
-        ))}
-        <span className="muted small chart-legend">
+      <div className="header-actions" style={{ marginBottom: 12 }}>
+        <Segmented
+          size="small"
+          options={RANGES.map((r) => ({ label: r.label, value: r.key }))}
+          value={rangeKey}
+          onChange={setRangeKey}
+        />
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
           ▲ 买入 ▼ 卖出(悬停看详情){benchmarkData.length > 1 ? ' · ┄ SPY 基准' : ''}
-        </span>
+        </Typography.Text>
       </div>
 
       {!data.length ? (
-        <p className="empty">该时间范围内暂无净值数据。</p>
+        <Typography.Text type="secondary">该时间范围内暂无净值数据。</Typography.Text>
       ) : (
         <ResponsiveContainer width="100%" height={320}>
-          <ComposedChart data={data} margin={{ top: 10, right: 16, bottom: 0, left: 8 }}>
-            <CartesianGrid stroke="#1f2530" strokeDasharray="3 3" />
+          <ComposedChart data={data} margin={{ top: 10, right: 8, bottom: 0, left: 4 }}>
+            <CartesianGrid stroke={CHART.grid} strokeDasharray="3 3" />
             <XAxis
               dataKey="time"
               type="number"
@@ -139,18 +164,24 @@ export default function PnlChart({ snapshots, trades, initialCapital, benchmark 
                   minute: '2-digit',
                 })
               }
-              stroke="#7a8294"
+              stroke={CHART.axis}
               fontSize={12}
             />
             <YAxis
-              domain={['auto', 'auto']}
-              tickFormatter={(v) => `$${(v / 1000).toFixed(1)}k`}
-              stroke="#7a8294"
+              domain={yDomain}
+              tickCount={6}
+              tickFormatter={fmtTick}
+              stroke={CHART.axis}
               fontSize={12}
-              width={70}
+              width={62}
             />
             <Tooltip
-              contentStyle={{ background: '#12151c', border: '1px solid #1f2530', borderRadius: 8 }}
+              contentStyle={{
+                background: CHART.tooltipBg,
+                border: `1px solid ${CHART.tooltipBorder}`,
+                borderRadius: 8,
+                boxShadow: CHART.tooltipShadow,
+              }}
               labelFormatter={(t) => new Date(t).toLocaleString('zh-CN')}
               formatter={(value, name, props) => {
                 if (name === 'total') {
@@ -168,15 +199,16 @@ export default function PnlChart({ snapshots, trades, initialCapital, benchmark 
             {initialCapital && (
               <ReferenceLine
                 y={Number(initialCapital)}
-                stroke="#7a8294"
+                stroke={CHART.reference}
                 strokeDasharray="4 4"
-                label={{ value: '初始资金', fill: '#7a8294', fontSize: 12, position: 'insideTopRight' }}
+                ifOverflow="hidden"
+                label={{ value: '初始资金', fill: CHART.axis, fontSize: 12, position: 'insideTopRight' }}
               />
             )}
             <Line
               type="monotone"
               dataKey="total"
-              stroke={data[data.length - 1].pnl >= 0 ? '#e0524e' : '#2fa572'}
+              stroke={data[data.length - 1].pnl >= 0 ? COLOR_UP : COLOR_DOWN}
               strokeWidth={2}
               dot={false}
             />
@@ -185,7 +217,7 @@ export default function PnlChart({ snapshots, trades, initialCapital, benchmark 
                 data={benchmarkData}
                 type="monotone"
                 dataKey="benchmark"
-                stroke="#7a8294"
+                stroke={CHART.benchmark}
                 strokeWidth={1.5}
                 strokeDasharray="5 4"
                 dot={false}

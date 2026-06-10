@@ -1,4 +1,14 @@
 import React, { useCallback, useEffect, useState } from 'react';
+import {
+  Alert,
+  Button,
+  Card,
+  Descriptions,
+  Form,
+  Input,
+  Space,
+  Typography,
+} from 'antd';
 import { adminApi, fmtMoney, fmtTime } from '../api.js';
 
 /**
@@ -7,7 +17,6 @@ import { adminApi, fmtMoney, fmtTime } from '../api.js';
  */
 export default function AdminPage() {
   const [token, setToken] = useState(() => sessionStorage.getItem('admin_token') || '');
-  const [input, setInput] = useState('');
   const [authed, setAuthed] = useState(false);
   const [error, setError] = useState(null);
   const [status, setStatus] = useState(null);
@@ -43,12 +52,10 @@ export default function AdminPage() {
     return () => clearInterval(timer);
   }, [authed, token]);
 
-  const login = async (e) => {
-    e.preventDefault();
-    if (!input.trim()) return;
+  const login = async ({ token: input }) => {
+    if (!input?.trim()) return;
     try {
       await verify(input.trim());
-      setInput('');
     } catch (err) {
       setError(err.message);
     }
@@ -94,116 +101,96 @@ export default function AdminPage() {
   };
 
   return (
-    <div className="app admin-page">
-      <header className="header">
-        <div className="header-top">
-          <h1>
-            管理后台
-            <span className="subtitle">AI 新闻交易员 · 系统管理</span>
-          </h1>
-          <div className="header-actions">
-            <a className="btn btn-secondary" href="#/">
-              返回首页
-            </a>
-            {authed && (
-              <button className="btn btn-secondary" onClick={logout}>
-                退出登录
-              </button>
-            )}
-          </div>
-        </div>
-        {error && <div className="error-bar">{error}</div>}
-        {message && <div className="admin-message">{message}</div>}
+    <div className="app">
+      <header className="header-top">
+        <h1>
+          管理后台{' '}
+          <Typography.Text type="secondary" style={{ fontSize: 13, fontWeight: 400 }}>
+            AI 新闻交易员 · 系统管理
+          </Typography.Text>
+        </h1>
+        <Space>
+          <Button href="#/">返回首页</Button>
+          {authed && <Button onClick={logout}>退出登录</Button>}
+        </Space>
       </header>
 
-      <main className="content">
+      <Space direction="vertical" size={16} style={{ width: '100%' }}>
+        {error && <Alert type="error" message={error} showIcon />}
+        {message && <Alert type="success" message={message} showIcon />}
+
         {!authed ? (
-          <div className="card admin-login">
-            <h2>身份验证</h2>
-            <p className="muted small">请输入服务端配置的 ADMIN_TOKEN(仅保存在当前浏览器会话中)。</p>
-            <form onSubmit={login} className="admin-form">
-              <input
-                type="password"
-                className="search-input"
-                placeholder="ADMIN_TOKEN"
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                autoFocus
-              />
-              <button className="btn" type="submit" disabled={!input.trim()}>
+          <Card title="身份验证" style={{ maxWidth: 480 }}>
+            <Typography.Paragraph type="secondary" style={{ fontSize: 12.5 }}>
+              请输入服务端配置的 ADMIN_TOKEN(仅保存在当前浏览器会话中)。
+            </Typography.Paragraph>
+            <Form onFinish={login} layout="inline">
+              <Form.Item name="token" style={{ flex: 1, marginRight: 8 }}>
+                <Input.Password placeholder="ADMIN_TOKEN" autoFocus />
+              </Form.Item>
+              <Button type="primary" htmlType="submit">
                 登录
-              </button>
-            </form>
-          </div>
+              </Button>
+            </Form>
+          </Card>
         ) : (
           <>
-            <div className="card">
-              <h2>运行状态</h2>
-              <div className="status-grid">
-                <div>
-                  <span className="muted">交易轮</span>
+            <Card title="运行状态">
+              <Descriptions size="small" column={{ xs: 1, sm: 2, md: 3 }}>
+                <Descriptions.Item label="交易轮">
                   {status?.halted ? '已暂停(重置中)' : status?.running ? '运行中' : '空闲'}
-                </div>
-                <div>
-                  <span className="muted">上次运行</span>
+                </Descriptions.Item>
+                <Descriptions.Item label="上次运行">
                   {status?.lastRunAt ? fmtTime(status.lastRunAt) : '—'}
-                </div>
-                <div>
-                  <span className="muted">轮询间隔</span>
+                </Descriptions.Item>
+                <Descriptions.Item label="轮询间隔">
                   {status ? `${status.pollSeconds}s` : '—'}
-                </div>
-                <div>
-                  <span className="muted">SSE 在线</span>
+                </Descriptions.Item>
+                <Descriptions.Item label="SSE 在线">
                   {status ? `${status.sseClients} 个客户端` : '—'}
-                </div>
-                <div>
-                  <span className="muted">模型</span>
-                  {status?.model || '—'}
-                </div>
-                <div>
-                  <span className="muted">初始资金</span>
+                </Descriptions.Item>
+                <Descriptions.Item label="模型">{status?.model || '—'}</Descriptions.Item>
+                <Descriptions.Item label="初始资金">
                   {status ? fmtMoney(status.initialCapital) : '—'}
-                </div>
-              </div>
+                </Descriptions.Item>
+              </Descriptions>
               {status?.lastError && (
-                <p className="muted small">上次错误:{status.lastError}</p>
+                <Alert type="warning" message={`上次错误:${status.lastError}`} style={{ marginTop: 12 }} />
               )}
-            </div>
+            </Card>
 
-            <div className="card">
-              <h2>手动操作</h2>
-              <p className="muted small">立即执行一轮完整的「抓取 → 分析 → 交易」(全新闻源)。</p>
-              <button className="btn" onClick={triggerCycle} disabled={busy || status?.running}>
+            <Card title="手动操作">
+              <Typography.Paragraph type="secondary" style={{ fontSize: 12.5 }}>
+                立即执行一轮完整的「抓取 → 分析 → 交易」(全新闻源)。
+              </Typography.Paragraph>
+              <Button type="primary" onClick={triggerCycle} loading={busy} disabled={status?.running}>
                 {status?.running ? '运行中…' : '立即执行一轮'}
-              </button>
-            </div>
+              </Button>
+            </Card>
 
-            <div className="card admin-danger">
-              <h2>危险区:初始化所有数据</h2>
-              <p className="muted small">
-                清空全部新闻、AI 分析、事件、交易记录、持仓与净值快照,现金恢复为初始资金。
-                该操作不可恢复。输入 <b>RESET</b> 后方可执行。
-              </p>
-              <div className="admin-form">
-                <input
-                  type="text"
-                  className="search-input"
+            <Card title="危险区:初始化所有数据">
+              <Alert
+                type="warning"
+                showIcon
+                message="该操作不可恢复"
+                description="清空全部新闻、AI 分析、事件、交易记录、持仓与净值快照,现金恢复为初始资金。"
+                style={{ marginBottom: 12 }}
+              />
+              <Space wrap>
+                <Input
                   placeholder="输入 RESET 确认"
                   value={confirmText}
                   onChange={(e) => setConfirmText(e.target.value)}
+                  style={{ width: 200 }}
                 />
-                <button
-                  className="btn btn-danger"
-                  onClick={doReset}
-                  disabled={busy || confirmText !== 'RESET'}
-                >
-                  {busy ? '执行中…' : '初始化所有数据'}
-                </button>
-              </div>
-            </div>
+                <Button danger type="primary" onClick={doReset} loading={busy} disabled={confirmText !== 'RESET'}>
+                  初始化所有数据
+                </Button>
+              </Space>
+            </Card>
           </>
         )}
-      </main>
+      </Space>
 
       <footer className="footer">管理操作均需 ADMIN_TOKEN 鉴权 · 请勿泄露令牌</footer>
     </div>

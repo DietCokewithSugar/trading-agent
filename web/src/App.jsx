@@ -1,9 +1,9 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
+import { Alert, App as AntApp, Badge, Card, Col, Row, Statistic, Tabs, Tag } from 'antd';
 import { api, fmtMoney, fmtNum, fmtPercent, SESSION_LABELS } from './api.js';
 import Dashboard from './components/Dashboard.jsx';
 import NewsFeed from './components/NewsFeed.jsx';
 import TradesPage from './components/TradesPage.jsx';
-import Toasts from './components/Toasts.jsx';
 import SymbolModal from './components/SymbolModal.jsx';
 import AdminPage from './components/AdminPage.jsx';
 
@@ -13,10 +13,13 @@ const TABS = [
   { key: 'trades', label: '交易记录' },
 ];
 
+const SESSION_TAG_COLORS = { pre: 'orange', regular: 'blue', post: 'orange', closed: 'default' };
+
 // SSE 断线时的兜底轮询间隔
 const FALLBACK_REFRESH_MS = 60_000;
 
 function MainApp() {
+  const { notification } = AntApp.useApp();
   const [tab, setTab] = useState('dashboard');
   const [portfolio, setPortfolio] = useState(null);
   const [snapshots, setSnapshots] = useState([]);
@@ -27,17 +30,18 @@ function MainApp() {
   const [status, setStatus] = useState(null);
   const [error, setError] = useState(null);
   const [live, setLive] = useState(false);
-  const [toasts, setToasts] = useState([]);
   const [activeSymbol, setActiveSymbol] = useState(null);
-  const toastId = useRef(0);
 
-  const pushToast = useCallback((text, tone = '') => {
-    const id = ++toastId.current;
-    setToasts((prev) => [...prev.slice(-2), { id, text, tone }]);
-    setTimeout(() => {
-      setToasts((prev) => prev.filter((t) => t.id !== id));
-    }, 5000);
-  }, []);
+  const pushToast = useCallback(
+    (text, tone = '') => {
+      notification.open({
+        message: <span className={tone}>{text}</span>,
+        placement: 'bottomRight',
+        duration: 5,
+      });
+    },
+    [notification]
+  );
 
   const refresh = useCallback(async () => {
     try {
@@ -88,7 +92,7 @@ function MainApp() {
         if (a.tier && a.tier <= 2) {
           pushToast(
             `${a.sentiment === 'bullish' ? '利好' : '利空'}信号 ${a.symbol} · 第${a.tier}档`,
-            a.sentiment === 'bullish' ? 'toast-up' : 'toast-down'
+            a.sentiment === 'bullish' ? 'up' : 'down'
           );
         }
       } catch { /* 忽略畸形数据 */ }
@@ -111,7 +115,7 @@ function MainApp() {
                 : '';
         pushToast(
           `${prefix}${verb} ${t.symbol} ${fmtNum(t.quantity, 4)} 股 @ ${fmtMoney(t.price)}`,
-          t.side === 'buy' ? 'toast-up' : 'toast-down'
+          t.side === 'buy' ? 'up' : 'down'
         );
       } catch { /* 忽略畸形数据 */ }
     });
@@ -128,61 +132,60 @@ function MainApp() {
   const pnl = portfolio?.pnl ?? 0;
   const session = portfolio?.market_session;
 
+  const headerStats = portfolio
+    ? [
+        { title: '总资产', render: <span className="num">{fmtMoney(portfolio.total_value)}</span> },
+        { title: '可用现金', render: <span className="num">{fmtMoney(portfolio.cash)}</span> },
+        {
+          title: '持仓市值',
+          render: <span className="num">{fmtMoney(portfolio.positions_value)}</span>,
+        },
+        {
+          title: '总盈亏',
+          render: (
+            <span className={`num ${pnl >= 0 ? 'up' : 'down'}`}>
+              {fmtMoney(pnl)} ({fmtPercent(portfolio.pnl_percent)})
+            </span>
+          ),
+        },
+      ]
+    : [];
+
   return (
     <div className="app">
-      <header className="header">
+      <header>
         <div className="header-top">
           <h1>AI 新闻交易员</h1>
           <div className="header-actions">
             {session && (
-              <span className={`badge badge-session session-${session}`}>
+              <Tag color={SESSION_TAG_COLORS[session] || 'default'} style={{ marginRight: 0 }}>
                 {SESSION_LABELS[session]}
-              </span>
+              </Tag>
             )}
-            <span className={`live-indicator ${live ? 'on' : ''}`} title={live ? '已建立 SSE 实时连接' : '实时连接断开,使用兜底轮询'}>
-              <span className="dot" />
-              {live ? '实时' : '轮询'}
-            </span>
+            <Badge
+              status={live ? 'processing' : 'default'}
+              text={live ? '实时' : '轮询'}
+              title={live ? '已建立 SSE 实时连接' : '实时连接断开,使用兜底轮询'}
+            />
           </div>
         </div>
         {portfolio && (
-          <div className="stats">
-            <div className="stat">
-              <span className="stat-label">总资产</span>
-              <span className="stat-value">{fmtMoney(portfolio.total_value)}</span>
-            </div>
-            <div className="stat">
-              <span className="stat-label">可用现金</span>
-              <span className="stat-value">{fmtMoney(portfolio.cash)}</span>
-            </div>
-            <div className="stat">
-              <span className="stat-label">持仓市值</span>
-              <span className="stat-value">{fmtMoney(portfolio.positions_value)}</span>
-            </div>
-            <div className="stat">
-              <span className="stat-label">总盈亏</span>
-              <span className={`stat-value ${pnl >= 0 ? 'up' : 'down'}`}>
-                {fmtMoney(pnl)} ({fmtPercent(portfolio.pnl_percent)})
-              </span>
-            </div>
-          </div>
+          <Row gutter={[12, 12]}>
+            {headerStats.map((s) => (
+              <Col xs={12} md={6} key={s.title}>
+                <Card size="small">
+                  <Statistic title={s.title} valueRender={() => s.render} />
+                </Card>
+              </Col>
+            ))}
+          </Row>
         )}
-        {error && <div className="error-bar">{error}</div>}
+        {error && <Alert type="error" banner message={error} style={{ marginTop: 12 }} />}
       </header>
 
-      <nav className="tabs">
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            className={`tab ${tab === t.key ? 'active' : ''}`}
-            onClick={() => setTab(t.key)}
-          >
-            {t.label}
-          </button>
-        ))}
-      </nav>
+      <Tabs activeKey={tab} onChange={setTab} items={TABS} style={{ marginTop: 8 }} />
 
-      <main className="content">
+      <main>
         {tab === 'dashboard' && (
           <Dashboard
             portfolio={portfolio}
@@ -200,8 +203,11 @@ function MainApp() {
 
       <footer className="footer">模拟交易,不构成投资建议</footer>
 
-      <Toasts toasts={toasts} />
-      {activeSymbol && <SymbolModal symbol={activeSymbol} onClose={() => setActiveSymbol(null)} />}
+      <SymbolModal
+        symbol={activeSymbol}
+        open={Boolean(activeSymbol)}
+        onClose={() => setActiveSymbol(null)}
+      />
     </div>
   );
 }
