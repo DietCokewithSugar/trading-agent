@@ -2,6 +2,7 @@ import { config } from './config.js';
 import { runCycle } from './services/newsService.js';
 import { takeSnapshot, getValuation } from './services/portfolio.js';
 import { checkStops } from './services/riskMonitor.js';
+import { maybeRunDailyReview } from './services/positionReview.js';
 import { getMarketSession } from './services/fmp.js';
 import { broadcast, clientCount } from './services/bus.js';
 
@@ -61,6 +62,13 @@ export function startScheduler() {
   setInterval(() => {
     checkStops().catch((err) => console.error(`[scheduler] 风控检查失败: ${err.message}`));
   }, riskSec * 1000);
+
+  // 每日持仓复查:每 10 分钟探测一次触发条件(盘中、美东指定小时后、当日未复查)
+  setInterval(() => {
+    maybeRunDailyReview().catch((err) =>
+      console.error(`[scheduler] 持仓复查失败: ${err.message}`)
+    );
+  }, 10 * 60_000);
 
   console.log(
     `[scheduler] 已启动: 新闻每 ${newsSec}s(每 ${fullEvery} 轮全源抓取) · 报价推送每 ${quoteSec}s · 快照每 ${snapSec}s · 风控每 ${riskSec}s`

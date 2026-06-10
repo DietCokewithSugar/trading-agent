@@ -42,9 +42,16 @@
 3. 重复报道只累计报道数,不再触发交易;只有真正的新事件才放行;
 4. 新事件放行前再过一道同向交易冷却期(`TRADE_COOLDOWN_MINUTES`,默认 30 分钟),作为 LLM 误判的兜底;去重检查全部不可用时保守跳过,宁可错过也不重复下单。
 
-### 止损 / 止盈
+### 止损 / 止盈 / 移动止损
 
 每次买入时,DeepSeek 会根据新闻强度与股票波动性同时设定**止损价**(成本价下方 3%~15%)和**止盈价**(上方 5%~30%),存储在持仓上。服务端每 `RISK_CHECK_SECONDS`(默认 30 秒)监控一次持仓价格(含盘前盘后),跌破止损价或触及止盈价即自动全仓卖出,交易记录中会标注「自动止损 / 自动止盈」及详细原因。加仓时按新的平均成本重新设定。在本功能上线前已存在的持仓没有止损价,可在 Supabase 中手动 `update positions set stop_loss=..., take_profit=...` 补设。
+
+**移动止损**(007 迁移,`ENABLE_TRAILING_STOP` 默认开):股价创出建仓后新高时,止损价按买入时设定的止损距离跟随上抬(峰值价 × (1 − 原止损距离)),只升不降、止盈价不动,浮盈越大保护越紧。
+
+### 仓位缩放与每日持仓复查
+
+- **按信号质量缩放仓位**(参考 [Lopez-Lira & Tang](https://arxiv.org/abs/2304.07619):信号强度应映射到仓位):在 LLM 给出的买入比例之上,按档位(一档 ×1.0、二档 ×0.7)与置信度(0.5→×0.5,1.0→×1.0)叠加缩放,最终仍受硬性风控帽(单股 ≤25%、单笔 ≤20%)约束;
+- **每日持仓复查**(`ENABLE_POSITION_REVIEW` 默认开):新闻驱动的买入论点有时效性。每个交易日美东 `POSITION_REVIEW_HOUR`(默认 14)点后,DeepSeek 用**一次调用**整体评估全部持仓——论点已失效的主动卖出(交易标注「持仓复查」)、浮盈较大的收紧止损、健康的维持持有,防止过期论点的持仓长期滞留。
 
 ### 盘前盘后价格
 
@@ -86,7 +93,7 @@
 ### 1. 初始化 Supabase
 
 1. 在 [supabase.com](https://supabase.com) 创建项目;
-2. 打开 **SQL Editor**,执行仓库中的 [`supabase/schema.sql`](supabase/schema.sql);**已有部署升级时**,改为执行 `supabase/migrations/` 下的增量脚本(如 [`002_stops_and_stats.sql`](supabase/migrations/002_stops_and_stats.sql)、[`003_news_events.sql`](supabase/migrations/003_news_events.sql)、[`004_atomic_trade.sql`](supabase/migrations/004_atomic_trade.sql)、[`005_admin_reset.sql`](supabase/migrations/005_admin_reset.sql));
+2. 打开 **SQL Editor**,执行仓库中的 [`supabase/schema.sql`](supabase/schema.sql);**已有部署升级时**,改为执行 `supabase/migrations/` 下的增量脚本(如 [`002_stops_and_stats.sql`](supabase/migrations/002_stops_and_stats.sql)、[`003_news_events.sql`](supabase/migrations/003_news_events.sql)、[`004_atomic_trade.sql`](supabase/migrations/004_atomic_trade.sql)、[`005_admin_reset.sql`](supabase/migrations/005_admin_reset.sql)、[`006_trade_reflections.sql`](supabase/migrations/006_trade_reflections.sql)、[`007_position_management.sql`](supabase/migrations/007_position_management.sql));
 3. 在 **Project Settings → API** 记下 `Project URL` 和 `service_role` key。
 
 ### 2. 部署到 Render
@@ -144,6 +151,9 @@ cd web && npm run dev      # 终端 2:启动 Vite :5173(已配置 /api 代理)
 | `WATCHLIST` | 七巨头 | Yahoo RSS 抓取的关注列表,持仓自动加入 |
 | `ENABLE_YAHOO` | `true` | 是否启用 Yahoo Finance RSS 补充源 |
 | `ENABLE_REFLECTION` | `true` | 平仓后是否复盘并沉淀经验教训(注入后续决策),需执行 006 迁移 |
+| `ENABLE_TRAILING_STOP` | `true` | 移动止损:创新高后止损价跟随上抬,需执行 007 迁移 |
+| `ENABLE_POSITION_REVIEW` | `true` | 每日持仓复查:论点失效的持仓主动卖出/收紧止损 |
+| `POSITION_REVIEW_HOUR` | `14` | 持仓复查触发时间(美东 24 小时制,盘中) |
 | `ADMIN_TOKEN` | 空 | 设置后手动触发接口需要鉴权;同时是管理后台(`#/admin`)的登录口令,未设置时管理接口整组禁用 |
 
 ## API 一览

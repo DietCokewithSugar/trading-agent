@@ -78,9 +78,32 @@ export async function handleSignal(article, analysisRow) {
     return null;
   }
   console.log(`[trader] ${symbol} 决策: ${decision.action} fraction=${decision.fraction}`);
-  if (decision.action === 'hold' || decision.fraction <= 0) return null;
+  if (decision.action === 'hold' || decision.fraction <= 0) {
+    // 可观测性:一档利空 + 已持仓却选择不动,值得人工复核
+    const held = valuation.positions.some((p) => p.symbol === symbol);
+    if (held && analysisRow.sentiment === 'bearish' && analysisRow.tier === 1) {
+      console.warn(`[trader] ${symbol} 一档利空且已持仓但决策为 hold: ${decision.reason}`);
+    }
+    return null;
+  }
 
   if (decision.action === 'buy') {
+    // 仓位缩放链(按序叠加):LLM fraction → 档位/置信度缩放 → 风控官 scale → 硬性风控帽。
+    // 信号档位越低、置信度越低,实际动用的资金越少(Lopez-Lira:LLM 信号强度应映射到仓位)。
+    const tierMult = config.tierSizeMultipliers[analysisRow.tier] ?? 0.5;
+    const conf =
+      analysisRow.confidence === null || analysisRow.confidence === undefined
+        ? null
+        : Number(analysisRow.confidence);
+    // 置信度 0.5 → 0.5 倍,1.0 → 1 倍;缺失按 0.7 倍处理
+    const confMult = conf === null ? 0.7 : Math.min(Math.max(conf, 0.5), 1);
+    const sized = round4(decision.fraction * tierMult * confMult);
+    if (sized !== decision.fraction) {
+      console.log(
+        `[trader] ${symbol} 仓位缩放: ${decision.fraction} × 档位${tierMult} × 置信度${confMult} → ${sized}`
+      );
+      decision.fraction = sized;
+    }
     return executeBuy({ symbol, price, decision, analysisRow, article });
   }
   return executeSellOrder({

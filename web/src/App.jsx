@@ -103,7 +103,13 @@ function MainApp() {
         const t = JSON.parse(e.data);
         const verb = t.side === 'buy' ? '买入' : '卖出';
         const prefix =
-          t.trigger === 'stop_loss' ? '止损' : t.trigger === 'take_profit' ? '止盈' : '';
+          t.trigger === 'stop_loss'
+            ? '止损'
+            : t.trigger === 'take_profit'
+              ? '止盈'
+              : t.trigger === 'review'
+                ? '复查'
+                : '';
         pushToast(
           `${prefix}${verb} ${t.symbol} ${fmtNum(t.quantity, 4)} 股 @ ${fmtMoney(t.price)}`,
           t.side === 'buy' ? 'toast-up' : 'toast-down'

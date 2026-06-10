@@ -37,6 +37,12 @@ services:
         value: "2"
       - key: ENABLE_REFLECTION
         value: "true"
+      - key: ENABLE_TRAILING_STOP
+        value: "true"
+      - key: ENABLE_POSITION_REVIEW
+        value: "true"
+      - key: POSITION_REVIEW_HOUR
+        value: "14"
       - key: WATCHLIST
         value: "AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA"
       - key: ADMIN_TOKEN

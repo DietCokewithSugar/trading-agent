@@ -212,6 +212,62 @@ export async function decideTrade({ analysis, article, quote, profile, portfolio
   };
 }
 
+const REVIEW_SYSTEM_PROMPT = `你是一名美股组合管理人,每个交易日对当前全部持仓做一次例行复查。新闻驱动的买入论点有时效性,你的职责是发现"论点已失效却还躺在组合里"的持仓:
+
+- 买入论点是否仍然成立?支撑它的新闻是否已过时(事件已兑现、被反转、或多日无后续)?
+- 浮亏但尚未触及止损的持仓,若论点已被证伪,应主动卖出(sell),不要等止损;
+- 浮盈较大的持仓,可收紧止损保住利润(tighten_stop),new_stop_loss_percent 表示新止损价距当前价的百分比(3~15);
+- 状态健康、论点未变的持仓保持 hold。不要为了动作而动作,复查的默认结论是 hold。
+- sell 时 fraction 为卖出持仓的比例(0~1);论点完全失效卖出全部(1.0),仅部分弱化可减半。
+
+必须严格返回 JSON(reviews 数组需覆盖所有持仓):
+{
+  "reviews": [
+    {
+      "symbol": "AAPL",
+      "action": "hold" | "sell" | "tighten_stop",
+      "fraction": 0.0 到 1.0,
+      "new_stop_loss_percent": 3 到 15 之间的数字,
+      "reason": "中文理由(60字以内)"
+    }
+  ]
+}`;
+
+/** 每日持仓复查:一次调用评估全部持仓,返回逐仓建议 */
+export async function reviewPositions({ positions, cash, totalValue }) {
+  const user = JSON.stringify(
+    {
+      可用现金: cash,
+      组合总值: totalValue,
+      持仓: positions,
+    },
+    null,
+    1
+  );
+
+  const result = await chatJSON(
+    [
+      { role: 'system', content: REVIEW_SYSTEM_PROMPT },
+      { role: 'user', content: user },
+    ],
+    { maxTokens: 2000 }
+  );
+
+  const clamp = (value, min, max, fallback) => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.min(Math.max(n, min), max);
+  };
+  const reviews = Array.isArray(result.reviews) ? result.reviews : [];
+  return reviews.map((r) => ({
+    symbol: String(r.symbol || '').toUpperCase(),
+    action: ['hold', 'sell', 'tighten_stop'].includes(r.action) ? r.action : 'hold',
+    fraction: clamp(r.fraction, 0, 1, 0),
+    newStopLossPercent: clamp(r.new_stop_loss_percent, 3, 15, 8),
+    reason: String(r.reason || '').slice(0, 120),
+  }));
+}
+
 const REFLECT_SYSTEM_PROMPT = `你是一名严格的交易复盘教练。给你一笔已平仓的美股模拟交易(买入论点、平仓触发方式、持有时长、盈亏结果),请客观复盘并提炼一条可迁移到未来交易的经验教训。
 
 要求:

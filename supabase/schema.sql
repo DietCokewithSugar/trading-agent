@@ -52,6 +52,7 @@ create table if not exists positions (
   avg_cost numeric not null,
   stop_loss numeric,
   take_profit numeric,
+  peak_price numeric,           -- 建仓后的最高价,移动止损用(只升不降)
   opened_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
