@@ -64,7 +64,7 @@
 ### 1. 初始化 Supabase
 
 1. 在 [supabase.com](https://supabase.com) 创建项目;
-2. 打开 **SQL Editor**,执行仓库中的 [`supabase/schema.sql`](supabase/schema.sql);**已有部署升级时**,改为执行 `supabase/migrations/` 下的增量脚本(如 [`002_stops_and_stats.sql`](supabase/migrations/002_stops_and_stats.sql)、[`003_news_events.sql`](supabase/migrations/003_news_events.sql));
+2. 打开 **SQL Editor**,执行仓库中的 [`supabase/schema.sql`](supabase/schema.sql);**已有部署升级时**,改为执行 `supabase/migrations/` 下的增量脚本(如 [`002_stops_and_stats.sql`](supabase/migrations/002_stops_and_stats.sql)、[`003_news_events.sql`](supabase/migrations/003_news_events.sql)、[`004_atomic_trade.sql`](supabase/migrations/004_atomic_trade.sql));
 3. 在 **Project Settings → API** 记下 `Project URL` 和 `service_role` key。
 
 ### 2. 部署到 Render
@@ -112,9 +112,9 @@ cd web && npm run dev      # 终端 2:启动 Vite :5173(已配置 /api 代理)
 | `DEEPSEEK_MODEL` | `deepseek-chat` | 模型 ID,按 DeepSeek 官方文档可换成更新的模型 |
 | `NEWS_POLL_SECONDS` | `20` | 个股新闻轮询间隔(秒),已去重的新闻不会重复分析 |
 | `QUOTE_PUSH_SECONDS` | `5` | 实时报价 SSE 推送间隔(秒),仅有访客在线时拉取 |
-| `SNAPSHOT_SECONDS` | `60` | 净值快照间隔(秒),决定盈亏折线图粒度 |
+| `SNAPSHOT_SECONDS` | `60` | 净值快照间隔(秒),决定盈亏折线图粒度;休市时段自动降频到每 30 分钟一条 |
 | `RISK_CHECK_SECONDS` | `30` | 止损/止盈监控间隔(秒),休市时段自动跳过 |
-| `MAX_ANALYZE_PER_CYCLE` | `8` | 每轮最多分析的新闻条数(控制 DeepSeek 成本) |
+| `MAX_ANALYZE_PER_CYCLE` | `8` | 每轮最多分析的新闻条数(控制 DeepSeek 成本);超出的进入积压队列,后续轮次继续消化(仅保留近 24 小时) |
 | `INITIAL_CAPITAL` | `100000` | 模拟账户初始资金(美元) |
 | `TRADE_TIER_THRESHOLD` | `2` | 触发交易的最低档位 |
 | `EVENT_DEDUP_HOURS` | `72` | 事件去重窗口(小时),同一事件的多渠道报道只触发一次交易 |
@@ -135,7 +135,7 @@ cd web && npm run dev      # 终端 2:启动 Vite :5173(已配置 /api 代理)
 | `GET /api/stats` | 组合统计(今日盈亏、已实现盈亏、胜率、最大回撤) |
 | `GET /api/symbol/:symbol` | 单只股票详情(报价、持仓、分析、交易历史) |
 | `GET /api/status` | 调度器状态 |
-| `POST /api/run-cycle` | 手动触发一轮抓取/分析/交易 |
+| `POST /api/run-cycle` | 手动触发一轮抓取/分析/交易(未设 `ADMIN_TOKEN` 时全局 120 秒冷却,防滥用) |
 | `GET /api/health` | 健康检查 |
 
 ## 常见问题

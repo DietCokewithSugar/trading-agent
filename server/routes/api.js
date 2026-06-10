@@ -210,16 +210,33 @@ router.get('/status', (req, res) => {
   });
 });
 
-/** 手动触发一轮抓取/分析/交易(设置了 ADMIN_TOKEN 时需要鉴权) */
+/**
+ * 手动触发一轮抓取/分析/交易(设置了 ADMIN_TOKEN 时需要鉴权)。
+ * 未设置 ADMIN_TOKEN 时接口对所有人开放(首页按钮依赖此行为),
+ * 但加全局冷却,防止被刷着消耗 FMP/DeepSeek 配额。
+ */
+const ANON_CYCLE_COOLDOWN_MS = 120_000;
+let lastAnonCycleAt = 0;
+
 router.post(
   '/run-cycle',
   asyncHandler(async (req, res) => {
-    if (config.adminToken && req.headers['x-admin-token'] !== config.adminToken) {
-      return res.status(403).json({ error: '需要有效的 x-admin-token' });
+    if (config.adminToken) {
+      if (req.headers['x-admin-token'] !== config.adminToken) {
+        return res.status(403).json({ error: '需要有效的 x-admin-token' });
+      }
+    } else {
+      const wait = ANON_CYCLE_COOLDOWN_MS - (Date.now() - lastAnonCycleAt);
+      if (wait > 0) {
+        return res
+          .status(429)
+          .json({ error: `手动触发过于频繁,请 ${Math.ceil(wait / 1000)} 秒后再试` });
+      }
     }
     if (cycleStatus.running) {
       return res.status(409).json({ error: '当前已有一轮在运行中' });
     }
+    if (!config.adminToken) lastAnonCycleAt = Date.now();
     runCycle({ fullFetch: true }); // 异步执行,不阻塞响应
     res.json({ started: true });
   })

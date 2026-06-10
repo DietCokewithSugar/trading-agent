@@ -2,7 +2,12 @@ import { config } from './config.js';
 import { runCycle } from './services/newsService.js';
 import { takeSnapshot, getValuation } from './services/portfolio.js';
 import { checkStops } from './services/riskMonitor.js';
+import { getMarketSession } from './services/fmp.js';
 import { broadcast, clientCount } from './services/bus.js';
+
+// 休市时段净值几乎不变,快照降频到每 30 分钟一条(保持折线图连续),
+// 同时避免对持仓报价的无谓 FMP 请求
+const CLOSED_SNAPSHOT_MS = 30 * 60_000;
 
 export function startScheduler() {
   const newsSec = Math.max(config.newsPollSeconds, 5);
@@ -37,9 +42,14 @@ export function startScheduler() {
     }
   }, quoteSec * 1000);
 
-  // 净值快照(盈亏折线图数据点)
+  // 净值快照(盈亏折线图数据点),休市时段降频
+  let lastClosedSnapshotAt = 0;
   setInterval(async () => {
     try {
+      if (getMarketSession() === 'closed') {
+        if (Date.now() - lastClosedSnapshotAt < CLOSED_SNAPSHOT_MS) return;
+        lastClosedSnapshotAt = Date.now();
+      }
       const snap = await takeSnapshot();
       broadcast('snapshot', snap);
     } catch (err) {
