@@ -1,12 +1,14 @@
 import { config } from './config.js';
 import { runCycle } from './services/newsService.js';
 import { takeSnapshot, getValuation } from './services/portfolio.js';
+import { checkStops } from './services/riskMonitor.js';
 import { broadcast, clientCount } from './services/bus.js';
 
 export function startScheduler() {
   const newsSec = Math.max(config.newsPollSeconds, 5);
   const quoteSec = Math.max(config.quotePushSeconds, 2);
   const snapSec = Math.max(config.snapshotSeconds, 15);
+  const riskSec = Math.max(config.riskCheckSeconds, 10);
 
   // 新闻轮询(秒级):平时只抓轻量的个股新闻,每约 5 分钟带一轮综合新闻/公告/Yahoo
   const fullEvery = Math.max(Math.round(300 / newsSec), 1);
@@ -45,8 +47,13 @@ export function startScheduler() {
     }
   }, snapSec * 1000);
 
+  // 止损/止盈监控(与是否有访客在线无关)
+  setInterval(() => {
+    checkStops().catch((err) => console.error(`[scheduler] 风控检查失败: ${err.message}`));
+  }, riskSec * 1000);
+
   console.log(
-    `[scheduler] 已启动: 新闻每 ${newsSec}s(每 ${fullEvery} 轮全源抓取) · 报价推送每 ${quoteSec}s · 快照每 ${snapSec}s`
+    `[scheduler] 已启动: 新闻每 ${newsSec}s(每 ${fullEvery} 轮全源抓取) · 报价推送每 ${quoteSec}s · 快照每 ${snapSec}s · 风控每 ${riskSec}s`
   );
 
   // 启动后先跑一轮全源抓取

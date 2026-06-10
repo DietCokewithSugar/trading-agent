@@ -320,3 +320,195 @@ a { color: var(--accent); }
   color: var(--muted);
   font-size: 0.8rem;
 }
+
+/* ---- 统计卡片 + 资产配置 ---- */
+.stats-row {
+  display: flex;
+  gap: 16px;
+  align-items: stretch;
+  flex-wrap: wrap;
+}
+.stats-cards {
+  flex: 1 1 360px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+}
+.mini-stat {
+  background: rgba(79, 124, 255, 0.05);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.mini-stat-value {
+  font-size: 1.1rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.mini-stat-sub {
+  font-size: 0.75rem;
+}
+.pie-wrap {
+  flex: 0 1 300px;
+  min-width: 260px;
+}
+.pie-title {
+  text-align: center;
+  margin-top: -8px;
+}
+
+/* ---- 市场时段 / 止损止盈 / 触发来源徽章 ---- */
+.badge-session {
+  background: rgba(232, 163, 61, 0.15);
+  color: #e8a33d;
+}
+.session-regular { background: rgba(240, 72, 72, 0.15); color: var(--red); }
+.session-closed { background: rgba(138, 146, 166, 0.15); color: var(--muted); }
+.cell-badge {
+  margin-left: 6px;
+  font-size: 0.7rem;
+  padding: 1px 7px;
+}
+.badge-trigger {
+  background: rgba(232, 163, 61, 0.15);
+  color: #e8a33d;
+}
+
+/* ---- 可点击的股票代码 ---- */
+.symbol-link {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: inherit;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  cursor: pointer;
+  padding: 0;
+}
+.symbol-link:hover { text-decoration: underline; }
+.symbol-link-inline {
+  background: none;
+  border: none;
+  color: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  padding: 0;
+  font-size: inherit;
+  text-decoration: underline dotted;
+}
+
+/* ---- 搜索框 / 加载更多 ---- */
+.search-input {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 6px 16px;
+  font-size: 0.85rem;
+  min-width: 220px;
+  outline: none;
+}
+.search-input:focus { border-color: var(--accent); }
+.load-more-row {
+  text-align: center;
+  margin: 16px 0;
+}
+.btn-secondary {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+.chart-legend { margin-left: auto; align-self: center; }
+
+/* ---- Toast ---- */
+.toasts {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 100;
+}
+.toast {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+  padding: 10px 16px;
+  font-size: 0.88rem;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4);
+  animation: slide-in 0.25s ease-out;
+  max-width: 320px;
+}
+.toast.toast-up { border-left-color: var(--red); }
+.toast.toast-down { border-left-color: var(--green); }
+@keyframes slide-in {
+  from { transform: translateX(40px); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+/* ---- 股票详情弹层 ---- */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 48px 16px;
+  z-index: 90;
+  overflow-y: auto;
+}
+.modal {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 20px 24px;
+  width: 100%;
+  max-width: 640px;
+  max-height: calc(100vh - 96px);
+  overflow-y: auto;
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.modal-head h2 { font-size: 1.3rem; }
+.modal-name { font-size: 0.85rem; font-weight: normal; }
+.modal-close {
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 1.1rem;
+  cursor: pointer;
+}
+.modal-close:hover { color: var(--text); }
+.quote-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.quote-price {
+  font-size: 1.5rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.modal-section { margin-top: 16px; }
+.modal-section h3 {
+  font-size: 0.95rem;
+  margin-bottom: 8px;
+  color: var(--muted);
+}
+.modal-item {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.modal-item:last-child { border-bottom: none; }

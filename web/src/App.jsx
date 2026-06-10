@@ -1,8 +1,10 @@
-import React, { useEffect, useState, useCallback } from 'react';
-import { api, fmtMoney, fmtPercent } from './api.js';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
+import { api, fmtMoney, fmtNum, fmtPercent, SESSION_LABELS } from './api.js';
 import Dashboard from './components/Dashboard.jsx';
 import NewsFeed from './components/NewsFeed.jsx';
 import TradesPage from './components/TradesPage.jsx';
+import Toasts from './components/Toasts.jsx';
+import SymbolModal from './components/SymbolModal.jsx';
 
 const TABS = [
   { key: 'dashboard', label: '📈 仪表盘' },
@@ -19,25 +21,39 @@ export default function App() {
   const [snapshots, setSnapshots] = useState([]);
   const [trades, setTrades] = useState([]);
   const [news, setNews] = useState([]);
+  const [stats, setStats] = useState(null);
   const [status, setStatus] = useState(null);
   const [error, setError] = useState(null);
   const [triggering, setTriggering] = useState(false);
   const [live, setLive] = useState(false);
+  const [toasts, setToasts] = useState([]);
+  const [activeSymbol, setActiveSymbol] = useState(null);
+  const toastId = useRef(0);
+
+  const pushToast = useCallback((text, tone = '') => {
+    const id = ++toastId.current;
+    setToasts((prev) => [...prev.slice(-2), { id, text, tone }]);
+    setTimeout(() => {
+      setToasts((prev) => prev.filter((t) => t.id !== id));
+    }, 5000);
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
-      const [p, s, t, n, st] = await Promise.all([
+      const [p, s, t, n, st, stt] = await Promise.all([
         api.portfolio(),
         api.snapshots(),
         api.trades(),
         api.news(),
         api.status(),
+        api.stats(),
       ]);
       setPortfolio(p);
       setSnapshots(s);
       setTrades(t);
       setNews(n);
       setStatus(st);
+      setStats(stt);
       setError(null);
     } catch (err) {
       setError(err.message);
@@ -62,15 +78,36 @@ export default function App() {
       setSnapshots((prev) => [...prev, snap]);
     });
     es.addEventListener('news', () => api.news().then(setNews).catch(() => {}));
-    es.addEventListener('analysis', () => api.news().then(setNews).catch(() => {}));
-    es.addEventListener('trade', () => {
+    es.addEventListener('analysis', (e) => {
+      api.news().then(setNews).catch(() => {});
+      try {
+        const a = JSON.parse(e.data);
+        if (a.tier && a.tier <= 2) {
+          pushToast(
+            `📊 ${a.sentiment === 'bullish' ? '利好' : '利空'} ${a.symbol} · 第${a.tier}档信号`,
+            a.sentiment === 'bullish' ? 'toast-up' : 'toast-down'
+          );
+        }
+      } catch { /* 忽略畸形数据 */ }
+    });
+    es.addEventListener('trade', (e) => {
       api.trades().then(setTrades).catch(() => {});
       api.portfolio().then(setPortfolio).catch(() => {});
+      api.stats().then(setStats).catch(() => {});
+      try {
+        const t = JSON.parse(e.data);
+        const verb = t.side === 'buy' ? '买入' : '卖出';
+        const prefix = t.trigger === 'stop_loss' ? '🛑 止损' : t.trigger === 'take_profit' ? '🎯 止盈' : '🤖';
+        pushToast(
+          `${prefix} ${verb} ${t.symbol} ${fmtNum(t.quantity, 4)} 股 @ ${fmtMoney(t.price)}`,
+          t.side === 'buy' ? 'toast-up' : 'toast-down'
+        );
+      } catch { /* 忽略畸形数据 */ }
     });
     es.addEventListener('cycle', () => api.status().then(setStatus).catch(() => {}));
 
     return () => es.close();
-  }, []);
+  }, [pushToast]);
 
   const triggerCycle = async () => {
     setTriggering(true);
@@ -85,6 +122,7 @@ export default function App() {
   };
 
   const pnl = portfolio?.pnl ?? 0;
+  const session = portfolio?.market_session;
 
   return (
     <div className="app">
@@ -95,6 +133,11 @@ export default function App() {
             <span className="subtitle">FMP 新闻 × DeepSeek 分析 × 美股模拟交易</span>
           </h1>
           <div className="header-actions">
+            {session && (
+              <span className={`badge badge-session session-${session}`}>
+                {SESSION_LABELS[session]}
+              </span>
+            )}
             <span className={`live-indicator ${live ? 'on' : ''}`} title={live ? '已建立 SSE 实时连接' : '实时连接断开,使用兜底轮询'}>
               <span className="dot" />
               {live ? '实时' : '轮询'}
@@ -143,15 +186,25 @@ export default function App() {
 
       <main className="content">
         {tab === 'dashboard' && (
-          <Dashboard portfolio={portfolio} snapshots={snapshots} trades={trades} status={status} />
+          <Dashboard
+            portfolio={portfolio}
+            snapshots={snapshots}
+            trades={trades}
+            stats={stats}
+            status={status}
+            onSymbolClick={setActiveSymbol}
+          />
         )}
-        {tab === 'news' && <NewsFeed news={news} />}
-        {tab === 'trades' && <TradesPage trades={trades} />}
+        {tab === 'news' && <NewsFeed news={news} onSymbolClick={setActiveSymbol} />}
+        {tab === 'trades' && <TradesPage trades={trades} onSymbolClick={setActiveSymbol} />}
       </main>
 
       <footer className="footer">
         模拟交易,不构成投资建议 · 数据来源 Financial Modeling Prep / Yahoo Finance · 分析引擎 DeepSeek
       </footer>
+
+      <Toasts toasts={toasts} />
+      {activeSymbol && <SymbolModal symbol={activeSymbol} onClose={() => setActiveSymbol(null)} />}
     </div>
   );
 }

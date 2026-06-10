@@ -42,11 +42,13 @@ create table if not exists portfolio_state (
   updated_at timestamptz not null default now()
 );
 
--- 当前持仓
+-- 当前持仓(止损/止盈价由 AI 在买入时设定,服务端自动监控触发)
 create table if not exists positions (
   symbol text primary key,
   quantity numeric not null,
   avg_cost numeric not null,
+  stop_loss numeric,
+  take_profit numeric,
   opened_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -60,6 +62,8 @@ create table if not exists trades (
   price numeric not null,
   amount numeric not null,
   reason text,
+  -- 触发来源:news=新闻信号, stop_loss=自动止损, take_profit=自动止盈
+  trigger text not null default 'news',
   news_id bigint references news_articles(id) on delete set null,
   analysis_id bigint references news_analyses(id) on delete set null,
   realized_pnl numeric,
@@ -78,6 +82,23 @@ create table if not exists portfolio_snapshots (
   created_at timestamptz not null default now()
 );
 create index if not exists idx_snapshots_created on portfolio_snapshots (created_at);
+
+-- 净值快照均匀采样(绕过 PostgREST 单次 1000 行上限,支撑长时间范围的折线图)
+create or replace function snapshots_sampled(since timestamptz, max_points int default 600)
+returns setof portfolio_snapshots
+language sql stable as $$
+  with filtered as (
+    select s.*, row_number() over (order by created_at) as rn, count(*) over () as total
+    from portfolio_snapshots s
+    where created_at >= since
+  )
+  select id, cash, positions_value, total_value, pnl, pnl_percent, created_at
+  from filtered
+  where total <= max_points
+     or rn % ceil(total::numeric / max_points)::int = 0
+     or rn = total
+  order by created_at;
+$$;
 
 -- 初始资金 10 万美元(服务端也会在缺失时自动初始化)
 insert into portfolio_state (id, cash, initial_capital)

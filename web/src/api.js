@@ -9,9 +9,11 @@ async function get(path) {
 
 export const api = {
   portfolio: () => get('/portfolio'),
-  snapshots: (limit = 500) => get(`/snapshots?limit=${limit}`),
-  trades: (limit = 100) => get(`/trades?limit=${limit}`),
-  news: (limit = 60) => get(`/news?limit=${limit}`),
+  snapshots: (hours) => get(`/snapshots${hours ? `?hours=${hours}` : ''}`),
+  trades: (limit = 100, offset = 0) => get(`/trades?limit=${limit}&offset=${offset}`),
+  news: (limit = 60, offset = 0) => get(`/news?limit=${limit}&offset=${offset}`),
+  stats: () => get('/stats'),
+  symbol: (symbol) => get(`/symbol/${encodeURIComponent(symbol)}`),
   status: () => get('/status'),
   runCycle: async () => {
     const res = await fetch('/api/run-cycle', { method: 'POST' });
@@ -62,4 +64,16 @@ export const TIER_LABELS = {
   2: '第二档 · 程度大 范围小',
   3: '第三档 · 程度小 范围大',
   4: '第四档 · 程度小 范围小',
+};
+
+export const SESSION_LABELS = {
+  pre: '盘前',
+  regular: '盘中',
+  post: '盘后',
+  closed: '休市',
+};
+
+export const TRIGGER_LABELS = {
+  stop_loss: '🛑 自动止损',
+  take_profit: '🎯 自动止盈',
 };

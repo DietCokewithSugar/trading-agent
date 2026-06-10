@@ -28,6 +28,8 @@ export const config = {
   quotePushSeconds: num(process.env.QUOTE_PUSH_SECONDS, 5),
   // 净值快照间隔(秒)
   snapshotSeconds: num(process.env.SNAPSHOT_SECONDS, 60),
+  // 止损/止盈监控间隔(秒)
+  riskCheckSeconds: num(process.env.RISK_CHECK_SECONDS, 30),
 
   // 每轮最多用 DeepSeek 分析多少条新新闻(控制 API 成本)
   maxAnalyzePerCycle: num(process.env.MAX_ANALYZE_PER_CYCLE, 8),

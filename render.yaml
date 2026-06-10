@@ -27,6 +27,8 @@ services:
         value: "5"
       - key: SNAPSHOT_SECONDS
         value: "60"
+      - key: RISK_CHECK_SECONDS
+        value: "30"
       - key: MAX_ANALYZE_PER_CYCLE
         value: "8"
       - key: INITIAL_CAPITAL

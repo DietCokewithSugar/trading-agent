@@ -1,6 +1,6 @@
 import { supabase } from '../db.js';
 import { config } from '../config.js';
-import { getQuotes } from './fmp.js';
+import { getQuotes, getMarketSession } from './fmp.js';
 
 /** 读取(必要时初始化)资金账户与持仓 */
 export async function getPortfolio() {
@@ -40,15 +40,21 @@ export async function getValuation({ quoteMaxAgeMs = 10_000 } = {}) {
 
   const enriched = positions.map((p) => {
     const quote = quotes.get(p.symbol);
-    const price = quote?.price ?? Number(p.avg_cost);
+    const price = quote?.effective_price ?? quote?.price ?? Number(p.avg_cost);
     const marketValue = price * Number(p.quantity);
     const costBasis = Number(p.avg_cost) * Number(p.quantity);
     return {
       ...p,
       quantity: Number(p.quantity),
       avg_cost: Number(p.avg_cost),
+      stop_loss: p.stop_loss !== null && p.stop_loss !== undefined ? Number(p.stop_loss) : null,
+      take_profit:
+        p.take_profit !== null && p.take_profit !== undefined ? Number(p.take_profit) : null,
       current_price: price,
       live_quote: Boolean(quote),
+      session: quote?.session ?? null,
+      extended_price: quote?.extended_price ?? null,
+      extended_change_percent: quote?.extended_change_percent ?? null,
       change_percent: quote?.changesPercentage ?? quote?.changePercentage ?? null,
       market_value: marketValue,
       unrealized_pnl: marketValue - costBasis,
@@ -68,6 +74,7 @@ export async function getValuation({ quoteMaxAgeMs = 10_000 } = {}) {
     total_value: totalValue,
     pnl: totalValue - initial,
     pnl_percent: initial > 0 ? ((totalValue - initial) / initial) * 100 : 0,
+    market_session: getMarketSession(),
     positions: enriched,
   };
 }

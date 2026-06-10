@@ -26,6 +26,14 @@
 
 默认只有第一、二档信号会触发交易决策(可通过 `TRADE_TIER_THRESHOLD` 调整)。交易由 DeepSeek 结合组合状态决定买卖与仓位,并受服务端风控约束(单股仓位 ≤25% 总资产、单笔买入 ≤20% 总资产、不允许做空)。
 
+### 止损 / 止盈
+
+每次买入时,DeepSeek 会根据新闻强度与股票波动性同时设定**止损价**(成本价下方 3%~15%)和**止盈价**(上方 5%~30%),存储在持仓上。服务端每 `RISK_CHECK_SECONDS`(默认 30 秒)监控一次持仓价格(含盘前盘后),跌破止损价或触及止盈价即自动全仓卖出,交易记录中会标注「自动止损 / 自动止盈」及详细原因。加仓时按新的平均成本重新设定。在本功能上线前已存在的持仓没有止损价,可在 Supabase 中手动 `update positions set stop_loss=..., take_profit=...` 补设。
+
+### 盘前盘后价格
+
+非盘中时段,系统通过 FMP 的 aftermarket-trade 接口获取盘前(美东 4:00–9:30)/盘后(16:00–20:00)最新成交价,用于估值、模拟成交和止损监控;页面持仓表会显示「盘前 / 盘后」徽章及相对收盘价的涨跌幅。若订阅不含该端点,自动退回收盘价。
+
 ## 技术栈
 
 - **后端**: Node.js + Express,SSE 实时推送 + 秒级轮询调度
@@ -40,7 +48,7 @@
 ### 1. 初始化 Supabase
 
 1. 在 [supabase.com](https://supabase.com) 创建项目;
-2. 打开 **SQL Editor**,执行仓库中的 [`supabase/schema.sql`](supabase/schema.sql);
+2. 打开 **SQL Editor**,执行仓库中的 [`supabase/schema.sql`](supabase/schema.sql);**已有部署升级时**,改为执行 `supabase/migrations/` 下的增量脚本(如 [`002_stops_and_stats.sql`](supabase/migrations/002_stops_and_stats.sql));
 3. 在 **Project Settings → API** 记下 `Project URL` 和 `service_role` key。
 
 ### 2. 部署到 Render
@@ -89,6 +97,7 @@ cd web && npm run dev      # 终端 2:启动 Vite :5173(已配置 /api 代理)
 | `NEWS_POLL_SECONDS` | `20` | 个股新闻轮询间隔(秒),已去重的新闻不会重复分析 |
 | `QUOTE_PUSH_SECONDS` | `5` | 实时报价 SSE 推送间隔(秒),仅有访客在线时拉取 |
 | `SNAPSHOT_SECONDS` | `60` | 净值快照间隔(秒),决定盈亏折线图粒度 |
+| `RISK_CHECK_SECONDS` | `30` | 止损/止盈监控间隔(秒),休市时段自动跳过 |
 | `MAX_ANALYZE_PER_CYCLE` | `8` | 每轮最多分析的新闻条数(控制 DeepSeek 成本) |
 | `INITIAL_CAPITAL` | `100000` | 模拟账户初始资金(美元) |
 | `TRADE_TIER_THRESHOLD` | `2` | 触发交易的最低档位 |
@@ -105,6 +114,8 @@ cd web && npm run dev      # 终端 2:启动 Vite :5173(已配置 /api 代理)
 | `GET /api/trades` | 交易记录(含买卖原因、关联新闻) |
 | `GET /api/news` | 新闻流(含 DeepSeek 分析结果) |
 | `GET /api/stream` | SSE 实时推送流(news / analysis / trade / portfolio / snapshot / cycle) |
+| `GET /api/stats` | 组合统计(今日盈亏、已实现盈亏、胜率、最大回撤) |
+| `GET /api/symbol/:symbol` | 单只股票详情(报价、持仓、分析、交易历史) |
 | `GET /api/status` | 调度器状态 |
 | `POST /api/run-cycle` | 手动触发一轮抓取/分析/交易 |
 | `GET /api/health` | 健康检查 |
