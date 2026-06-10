@@ -1,0 +1,33 @@
+# Render Blueprint — 在 Render 控制台选择 "New +" → "Blueprint",关联本仓库即可。
+# 文档: https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: news-trading-agent
+    runtime: node
+    plan: starter # 注意:free 计划会休眠,定时抓取/交易会停摆,建议 starter 及以上
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: FMP_API_KEY
+        sync: false # 在 Render 控制台填写
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: DEEPSEEK_MODEL
+        value: deepseek-chat
+      - key: NEWS_POLL_MINUTES
+        value: "10"
+      - key: MAX_ANALYZE_PER_CYCLE
+        value: "8"
+      - key: INITIAL_CAPITAL
+        value: "100000"
+      - key: TRADE_TIER_THRESHOLD
+        value: "2"
+      - key: WATCHLIST
+        value: "AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA"

@@ -1,0 +1,21 @@
+{
+  "name": "news-trading-agent",
+  "version": "1.0.0",
+  "description": "基于新闻的美股模拟交易网站:FMP 新闻 + DeepSeek 分析 + Supabase 存储",
+  "type": "module",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node server/index.js",
+    "build": "cd web && npm install && npm run build"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "express": "^4.19.2",
+    "fast-xml-parser": "^4.4.1",
+    "node-cron": "^3.0.3"
+  }
+}

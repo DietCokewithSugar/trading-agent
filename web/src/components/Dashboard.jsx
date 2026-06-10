@@ -1,0 +1,106 @@
+import React from 'react';
+import PnlChart from './PnlChart.jsx';
+import { fmtMoney, fmtNum, fmtPercent, fmtTime } from '../api.js';
+
+export default function Dashboard({ portfolio, snapshots, trades, status }) {
+  return (
+    <div className="dashboard">
+      <section className="card">
+        <h2>账户净值走势</h2>
+        <PnlChart snapshots={snapshots} initialCapital={portfolio?.initial_capital} />
+      </section>
+
+      <section className="card">
+        <h2>当前持仓 {portfolio?.positions?.length ? `(${portfolio.positions.length})` : ''}</h2>
+        {!portfolio?.positions?.length ? (
+          <p className="empty">暂无持仓。AI 会在出现高档位利好新闻时自动建仓。</p>
+        ) : (
+          <div className="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>代码</th>
+                  <th>数量</th>
+                  <th>平均成本</th>
+                  <th>现价</th>
+                  <th>今日涨跌</th>
+                  <th>市值</th>
+                  <th>浮动盈亏</th>
+                </tr>
+              </thead>
+              <tbody>
+                {portfolio.positions.map((p) => (
+                  <tr key={p.symbol}>
+                    <td className="symbol">{p.symbol}</td>
+                    <td>{fmtNum(p.quantity, 4)}</td>
+                    <td>{fmtMoney(p.avg_cost)}</td>
+                    <td>{fmtMoney(p.current_price)}</td>
+                    <td className={p.change_percent >= 0 ? 'up' : 'down'}>
+                      {fmtPercent(p.change_percent)}
+                    </td>
+                    <td>{fmtMoney(p.market_value)}</td>
+                    <td className={p.unrealized_pnl >= 0 ? 'up' : 'down'}>
+                      {fmtMoney(p.unrealized_pnl)} ({fmtPercent(p.unrealized_pnl_percent)})
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      <section className="card">
+        <h2>最近交易</h2>
+        {!trades?.length ? (
+          <p className="empty">暂无交易记录。</p>
+        ) : (
+          <ul className="trade-list">
+            {trades.slice(0, 5).map((t) => (
+              <li key={t.id} className="trade-item">
+                <span className={`badge ${t.side === 'buy' ? 'badge-buy' : 'badge-sell'}`}>
+                  {t.side === 'buy' ? '买入' : '卖出'}
+                </span>
+                <span className="symbol">{t.symbol}</span>
+                <span>
+                  {fmtNum(t.quantity, 4)} 股 @ {fmtMoney(t.price)}
+                </span>
+                <span className="muted">{fmtTime(t.created_at)}</span>
+                {t.reason && <p className="reason">💡 {t.reason}</p>}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      {status && (
+        <section className="card">
+          <h2>系统状态</h2>
+          <div className="status-grid">
+            <div>
+              <span className="muted">运行间隔</span> 每 {status.pollMinutes} 分钟
+            </div>
+            <div>
+              <span className="muted">分析模型</span> {status.model}
+            </div>
+            <div>
+              <span className="muted">上次运行</span> {fmtTime(status.lastRunAt)}
+            </div>
+            {status.lastResult && (
+              <div>
+                <span className="muted">上轮结果</span> 新增新闻 {status.lastResult.newArticles} ·
+                分析 {status.lastResult.analyzed} · 信号 {status.lastResult.signals} · 成交{' '}
+                {status.lastResult.trades}
+              </div>
+            )}
+            {status.lastError && (
+              <div className="down">
+                <span className="muted">错误</span> {status.lastError}
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+    </div>
+  );
+}
