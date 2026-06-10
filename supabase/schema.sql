@@ -230,9 +230,12 @@ grant execute on function execute_trade(text, text, numeric, numeric, numeric, t
 
 -- 管理后台全量数据重置:清空所有业务数据,现金恢复为初始资金。
 -- truncate ... cascade 会一并清空引用这些表的从表(如 trade_reflections)。
+-- security definer:restart identity 需要序列属主权限,必须以函数属主(postgres)身份执行
 create or replace function admin_reset_data(p_initial_capital numeric default null)
 returns void
 language plpgsql
+security definer
+set search_path = public
 as $$
 declare
   v_capital numeric;
@@ -261,8 +264,10 @@ begin
 end;
 $$;
 
--- 该函数会清空全部数据,只允许服务端(service_role)调用
+-- 该函数会清空全部数据且以属主身份执行,只允许服务端(service_role)调用
 revoke all on function admin_reset_data(numeric) from public;
+revoke all on function admin_reset_data(numeric) from anon;
+revoke all on function admin_reset_data(numeric) from authenticated;
 grant execute on function admin_reset_data(numeric) to service_role;
 
 -- 交易记忆与反思(参考 FinMem/FinAgent:平仓后复盘,经验注入后续决策)
