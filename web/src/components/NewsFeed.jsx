@@ -82,7 +82,7 @@ export default function NewsFeed({ news, onSymbolClick }) {
         ))}
         <input
           className="search-input"
-          placeholder="🔍 搜索标题或股票代码…"
+          placeholder="搜索标题或股票代码"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
@@ -114,7 +114,12 @@ export default function NewsFeed({ news, onSymbolClick }) {
                   {typeof a.confidence === 'number' && (
                     <span className="muted"> 置信度 {(a.confidence * 100).toFixed(0)}%</span>
                   )}
-                  {a.reasoning && <p className="reason">🧠 {a.reasoning}</p>}
+                  {a.reasoning && (
+                    <p className="reason">
+                      <span className="reason-label">分析理由</span>
+                      {a.reasoning}
+                    </p>
+                  )}
                 </div>
               ))}
             </li>

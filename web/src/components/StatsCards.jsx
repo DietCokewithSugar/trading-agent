@@ -2,7 +2,7 @@ import React from 'react';
 import { ResponsiveContainer, PieChart, Pie, Cell, Tooltip, Legend } from 'recharts';
 import { fmtMoney, fmtPercent } from '../api.js';
 
-const PIE_COLORS = ['#4f7cff', '#f04848', '#1db954', '#e8a33d', '#9b59e0', '#3dc8e8', '#e060a8', '#8a92a6'];
+const PIE_COLORS = ['#6f8ce8', '#e0524e', '#2fa572', '#c9924d', '#9b7fd4', '#4fb3c9', '#c76fa8', '#7a8294'];
 
 export default function StatsCards({ stats, portfolio }) {
   const cards = [
@@ -81,7 +81,7 @@ export default function StatsCards({ stats, portfolio }) {
                   ))}
                 </Pie>
                 <Tooltip
-                  contentStyle={{ background: '#1a1e27', border: '1px solid #2a2f3a', borderRadius: 8 }}
+                  contentStyle={{ background: '#12151c', border: '1px solid #1f2530', borderRadius: 8 }}
                   formatter={(value, name) => [fmtMoney(value), name]}
                 />
                 <Legend
@@ -89,7 +89,7 @@ export default function StatsCards({ stats, portfolio }) {
                   align="right"
                   verticalAlign="middle"
                   iconSize={8}
-                  formatter={(value) => <span style={{ color: '#8a92a6', fontSize: 12 }}>{value}</span>}
+                  formatter={(value) => <span style={{ color: '#7a8294', fontSize: 12 }}>{value}</span>}
                 />
               </PieChart>
             </ResponsiveContainer>

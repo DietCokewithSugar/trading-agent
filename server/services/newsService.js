@@ -3,6 +3,7 @@ import { config } from '../config.js';
 import { getStockNews, getGeneralNews, getPressReleases } from './fmp.js';
 import { getYahooNews } from './yahoo.js';
 import { analyzeArticle } from './deepseek.js';
+import { resolveEvent, markEventTraded } from './eventService.js';
 import { handleSignal } from './trader.js';
 import { getPortfolio } from './portfolio.js';
 import { broadcast } from './bus.js';
@@ -108,9 +109,16 @@ async function analyzeAndStore(article) {
     impact_scope: analysis.impact_scope || null,
     confidence: typeof analysis.confidence === 'number' ? analysis.confidence : null,
     reasoning: analysis.reasoning || '',
+    event_summary: analysis.event_summary || null,
     model: config.deepseekModel,
   };
-  const { data, error } = await supabase().from('news_analyses').insert(row).select().single();
+  let { data, error } = await supabase().from('news_analyses').insert(row).select().single();
+  // 兼容尚未执行 003 迁移的数据库:去掉 event_summary 列重试
+  if (error && /event_summary/.test(error.message)) {
+    const { event_summary, ...legacy } = row;
+    ({ data, error } = await supabase().from('news_analyses').insert(legacy).select().single());
+    if (!error) data.event_summary = event_summary;
+  }
   if (error) throw new Error(`分析结果入库失败: ${error.message}`);
   return data;
 }
@@ -128,6 +136,7 @@ export async function runCycle({ fullFetch = false } = {}) {
     newArticles: 0,
     analyzed: 0,
     signals: 0,
+    deduped: 0,
     trades: 0,
     errors: [],
   };
@@ -170,9 +179,19 @@ export async function runCycle({ fullFetch = false } = {}) {
         if (!actionable) continue;
 
         summary.signals += 1;
+
+        // 事件溯源去重:同一底层事件的多渠道报道只允许触发一次交易
+        const dedup = await resolveEvent(article, analysisRow);
+        if (!dedup.proceed) {
+          summary.deduped += 1;
+          console.log(`[cycle] ${analysisRow.symbol} 跳过交易: ${dedup.reason}`);
+          continue;
+        }
+
         const trade = await handleSignal(article, analysisRow);
         if (trade) {
           summary.trades += 1;
+          await markEventTraded(dedup.eventId, trade.id);
           broadcast('trade', trade);
         }
       } catch (err) {
@@ -186,7 +205,7 @@ export async function runCycle({ fullFetch = false } = {}) {
     cycleStatus.lastError = null;
     if (summary.newArticles || summary.analyzed) {
       console.log(
-        `[cycle] 完成: 新增${summary.newArticles} 分析${summary.analyzed} 信号${summary.signals} 成交${summary.trades} 用时${summary.durationMs}ms`
+        `[cycle] 完成: 新增${summary.newArticles} 分析${summary.analyzed} 信号${summary.signals} 去重${summary.deduped} 成交${summary.trades} 用时${summary.durationMs}ms`
       );
     }
     broadcast('cycle', summary);

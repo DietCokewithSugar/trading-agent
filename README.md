@@ -1,4 +1,4 @@
-# 🤖 AI 新闻交易员 — 基于新闻的美股模拟交易网站
+# AI 新闻交易员 — 基于新闻的美股模拟交易网站
 
 自动抓取财经新闻 → DeepSeek 判断利好/利空(四档分级)→ 基于信号自动模拟买卖美股 → 网页实时展示盈亏曲线、持仓、交易记录与买卖原因。无需登录,所有人公开可见。
 
@@ -26,6 +26,22 @@
 
 默认只有第一、二档信号会触发交易决策(可通过 `TRADE_TIER_THRESHOLD` 调整)。交易由 DeepSeek 结合组合状态决定买卖与仓位,并受服务端风控约束(单股仓位 ≤25% 总资产、单笔买入 ≤20% 总资产、不允许做空)。
 
+### 交易标的核验
+
+新闻分析容易把"未上市公司"映射到名称相似的已上市代码(典型错误:SpaceX 的 IPO 新闻被映射到 SPCE,而 SPCE 是 Virgin Galactic)。系统在两个层面拦截:
+
+1. **分析阶段**:DeepSeek 被明确要求,新闻主体若是未上市/即将 IPO 的私有公司,一律判定为不可交易,严禁映射到相似代码;
+2. **决策阶段**:交易前拉取 FMP 公司档案(公司名称、交易所、行业、市值、IPO 日期、是否正常交易、52 周区间、日均成交量),连同实时报价一起交给 DeepSeek 做标的核验——新闻主体与报价公司是否同一家、股价/市值量级与新闻内容是否自洽(如新闻称 IPO 定价 175 美元而报价只有 4.59 美元即判定映射错误)。核验不通过强制 hold,绝不下单;档案显示已退市/停牌的代码由服务端直接跳过。
+
+### 新闻事件溯源去重
+
+同一底层事件(同一份公告/合作/财报)经常被多家媒体以不同标题重复报道,如果每条报道都独立触发交易,就会对同一利好反复加仓。系统的处理:
+
+1. 分析阶段为每条新闻提炼一句"事件概要"(写"发生了什么",与报道角度无关);
+2. 可交易信号先在 `news_events` 表内做事件归并:DeepSeek 对比该股票近 `EVENT_DEDUP_HOURS`(默认 72)小时内的已记录事件,判断是否为重复报道/跟进报道;
+3. 重复报道只累计报道数,不再触发交易;只有真正的新事件才放行;
+4. 新事件放行前再过一道同向交易冷却期(`TRADE_COOLDOWN_MINUTES`,默认 30 分钟),作为 LLM 误判的兜底;去重检查全部不可用时保守跳过,宁可错过也不重复下单。
+
 ### 止损 / 止盈
 
 每次买入时,DeepSeek 会根据新闻强度与股票波动性同时设定**止损价**(成本价下方 3%~15%)和**止盈价**(上方 5%~30%),存储在持仓上。服务端每 `RISK_CHECK_SECONDS`(默认 30 秒)监控一次持仓价格(含盘前盘后),跌破止损价或触及止盈价即自动全仓卖出,交易记录中会标注「自动止损 / 自动止盈」及详细原因。加仓时按新的平均成本重新设定。在本功能上线前已存在的持仓没有止损价,可在 Supabase 中手动 `update positions set stop_loss=..., take_profit=...` 补设。
@@ -48,7 +64,7 @@
 ### 1. 初始化 Supabase
 
 1. 在 [supabase.com](https://supabase.com) 创建项目;
-2. 打开 **SQL Editor**,执行仓库中的 [`supabase/schema.sql`](supabase/schema.sql);**已有部署升级时**,改为执行 `supabase/migrations/` 下的增量脚本(如 [`002_stops_and_stats.sql`](supabase/migrations/002_stops_and_stats.sql));
+2. 打开 **SQL Editor**,执行仓库中的 [`supabase/schema.sql`](supabase/schema.sql);**已有部署升级时**,改为执行 `supabase/migrations/` 下的增量脚本(如 [`002_stops_and_stats.sql`](supabase/migrations/002_stops_and_stats.sql)、[`003_news_events.sql`](supabase/migrations/003_news_events.sql));
 3. 在 **Project Settings → API** 记下 `Project URL` 和 `service_role` key。
 
 ### 2. 部署到 Render
@@ -101,6 +117,8 @@ cd web && npm run dev      # 终端 2:启动 Vite :5173(已配置 /api 代理)
 | `MAX_ANALYZE_PER_CYCLE` | `8` | 每轮最多分析的新闻条数(控制 DeepSeek 成本) |
 | `INITIAL_CAPITAL` | `100000` | 模拟账户初始资金(美元) |
 | `TRADE_TIER_THRESHOLD` | `2` | 触发交易的最低档位 |
+| `EVENT_DEDUP_HOURS` | `72` | 事件去重窗口(小时),同一事件的多渠道报道只触发一次交易 |
+| `TRADE_COOLDOWN_MINUTES` | `30` | 同一股票同方向新闻交易的冷却期(分钟),事件去重的兜底防线 |
 | `WATCHLIST` | 七巨头 | Yahoo RSS 抓取的关注列表,持仓自动加入 |
 | `ENABLE_YAHOO` | `true` | 是否启用 Yahoo Finance RSS 补充源 |
 | `ADMIN_TOKEN` | 空 | 设置后手动触发接口需要鉴权 |

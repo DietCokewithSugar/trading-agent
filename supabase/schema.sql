@@ -71,6 +71,26 @@ create table if not exists trades (
 );
 create index if not exists idx_trades_created on trades (created_at desc);
 
+-- 新闻事件:同一底层事件(同一公告/合作/财报)的多渠道报道归并为一条,
+-- 事件级去重防止同一利好/利空被反复交易。
+create table if not exists news_events (
+  id bigint generated always as identity primary key,
+  symbol text not null,
+  sentiment text,
+  summary text not null,            -- 事件概要(DeepSeek 提炼,跨媒体一致)
+  article_count int not null default 1,  -- 归并到该事件的报道数
+  traded boolean not null default false, -- 该事件是否已触发过交易
+  trade_id bigint references trades(id) on delete set null,
+  first_news_id bigint references news_articles(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists idx_events_symbol_created on news_events (symbol, created_at desc);
+
+-- 分析结果关联事件 + 事件概要
+alter table news_analyses add column if not exists event_id bigint references news_events(id) on delete set null;
+alter table news_analyses add column if not exists event_summary text;
+
 -- 组合净值快照(盈亏折线图)
 create table if not exists portfolio_snapshots (
   id bigint generated always as identity primary key,
@@ -112,6 +132,7 @@ alter table portfolio_state enable row level security;
 alter table positions enable row level security;
 alter table trades enable row level security;
 alter table portfolio_snapshots enable row level security;
+alter table news_events enable row level security;
 
 create policy "public read news_articles" on news_articles for select using (true);
 create policy "public read news_analyses" on news_analyses for select using (true);
@@ -119,3 +140,4 @@ create policy "public read portfolio_state" on portfolio_state for select using 
 create policy "public read positions" on positions for select using (true);
 create policy "public read trades" on trades for select using (true);
 create policy "public read portfolio_snapshots" on portfolio_snapshots for select using (true);
+create policy "public read news_events" on news_events for select using (true);

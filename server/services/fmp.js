@@ -76,6 +76,30 @@ async function getAftermarketTrade(symbol) {
   }
 }
 
+/** 公司档案缓存:名称/行业/上市状态等变化极慢,缓存 24 小时 */
+const profileCache = new Map(); // symbol -> { profile, at }
+
+/**
+ * 公司档案(companyName / sector / industry / marketCap / ipoDate /
+ * isActivelyTrading / range / averageVolume 等)。
+ * 交易前用于核验"新闻主体公司"与"报价对应公司"是否一致,失败返回 null。
+ */
+export async function getProfile(symbol, maxAgeMs = 24 * 3600_000) {
+  const key = symbol.toUpperCase();
+  const cached = profileCache.get(key);
+  if (cached && Date.now() - cached.at < maxAgeMs) return cached.profile;
+  try {
+    const data = await fmpGet('/profile', { symbol: key });
+    const p = Array.isArray(data) ? data[0] : data;
+    const profile = p && (p.companyName || p.symbol) ? p : null;
+    profileCache.set(key, { profile, at: Date.now() });
+    return profile;
+  } catch (err) {
+    console.warn(`[fmp] 获取 ${key} 公司档案失败: ${err.message}`);
+    return null;
+  }
+}
+
 /** 报价缓存:高频请求时避免重复打 FMP */
 const quoteCache = new Map(); // symbol -> { quote, at }
 

@@ -1,6 +1,6 @@
 import { supabase } from '../db.js';
 import { config } from '../config.js';
-import { getQuote } from './fmp.js';
+import { getQuote, getProfile } from './fmp.js';
 import { decideTrade } from './deepseek.js';
 import { getPortfolio, getValuation } from './portfolio.js';
 
@@ -13,14 +13,20 @@ function round2(n) {
 
 /**
  * 处理一条可交易的新闻分析信号:
- * 询问 DeepSeek 决策 → 校验风控约束 → 以 FMP 实时价格(含盘前盘后)模拟成交 → 落库。
+ * 拉取报价 + 公司档案做标的核验 → 询问 DeepSeek 决策 → 校验风控约束 →
+ * 以 FMP 实时价格(含盘前盘后)模拟成交 → 落库。
  * 返回成交记录,未成交返回 null。
  */
 export async function handleSignal(article, analysisRow) {
   const symbol = analysisRow.symbol;
-  const quote = await getQuote(symbol);
+  const [quote, profile] = await Promise.all([getQuote(symbol), getProfile(symbol)]);
   if (!quote) {
     console.warn(`[trader] ${symbol} 无法获取报价,跳过`);
+    return null;
+  }
+  // 硬校验:档案明确显示该代码当前并未正常交易(退市/停牌)时直接跳过
+  if (profile && profile.isActivelyTrading === false) {
+    console.warn(`[trader] ${symbol} 当前未在正常交易(isActivelyTrading=false),跳过`);
     return null;
   }
   const price = quote.effective_price ?? quote.price;
@@ -30,6 +36,7 @@ export async function handleSignal(article, analysisRow) {
     analysis: analysisRow,
     article,
     quote,
+    profile,
     portfolio: {
       cash: valuation.cash,
       totalValue: valuation.total_value,
@@ -37,6 +44,10 @@ export async function handleSignal(article, analysisRow) {
     },
   });
 
+  if (!decision.symbolValid) {
+    console.warn(`[trader] ${symbol} 标的核验未通过: ${decision.validationReason}`);
+    return null;
+  }
   console.log(`[trader] ${symbol} 决策: ${decision.action} fraction=${decision.fraction}`);
   if (decision.action === 'hold' || decision.fraction <= 0) return null;
 

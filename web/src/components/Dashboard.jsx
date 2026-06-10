@@ -91,11 +91,16 @@ export default function Dashboard({ portfolio, snapshots, trades, stats, status,
                 <button className="symbol symbol-link" onClick={() => onSymbolClick(t.symbol)}>
                   {t.symbol}
                 </button>
-                <span>
+                <span className="num">
                   {fmtNum(t.quantity, 4)} 股 @ {fmtMoney(t.price)}
                 </span>
                 <span className="muted">{fmtTime(t.created_at)}</span>
-                {t.reason && <p className="reason">💡 {t.reason}</p>}
+                {t.reason && (
+                  <p className="reason">
+                    <span className="reason-label">决策依据</span>
+                    {t.reason}
+                  </p>
+                )}
               </li>
             ))}
           </ul>
