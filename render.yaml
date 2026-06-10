@@ -10,7 +10,7 @@ services:
     healthCheckPath: /api/health
     envVars:
       - key: NODE_VERSION
-        value: "20"
+        value: "22"
       - key: FMP_API_KEY
         sync: false # 在 Render 控制台填写
       - key: DEEPSEEK_API_KEY

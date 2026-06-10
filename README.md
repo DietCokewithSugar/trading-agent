@@ -99,6 +99,11 @@ cd web && npm run dev      # 终端 2:启动 Vite :5173(已配置 /api 代理)
 | `POST /api/run-cycle` | 手动触发一轮抓取/分析/交易 |
 | `GET /api/health` | 健康检查 |
 
+## 常见问题
+
+**部署后日志出现 `Node.js 20 detected without native WebSocket support` 警告?**
+这是 `@supabase/supabase-js` 的 Realtime 模块在 Node < 22 下的提示。本项目不使用 Realtime 功能,该警告无害;但建议使用 Node 22+(`render.yaml` 已配置 `NODE_VERSION=22`)。如果你的 Render 服务是在旧配置下创建的,请到服务的 **Environment** 页将 `NODE_VERSION` 改为 `22` 并手动重新部署即可消除警告。
+
 ## 免责声明
 
 本项目仅为模拟交易与技术演示,所有"买入/卖出"均为虚拟操作,不构成任何投资建议。

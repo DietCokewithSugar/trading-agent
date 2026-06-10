@@ -10,7 +10,7 @@
     "build": "cd web && npm install && npm run build"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0",
