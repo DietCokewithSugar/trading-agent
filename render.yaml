@@ -22,7 +22,7 @@ services:
       - key: DEEPSEEK_MODEL
         value: deepseek-chat
       - key: NEWS_POLL_MINUTES
-        value: "10"
+        value: "1"
       - key: MAX_ANALYZE_PER_CYCLE
         value: "8"
       - key: INITIAL_CAPITAL

@@ -53,7 +53,12 @@
    - `SUPABASE_URL`、`SUPABASE_SERVICE_ROLE_KEY`
 4. 部署完成后访问服务 URL 即可。
 
-> ⚠️ **注意**:Render Free 计划的服务无流量时会休眠,定时抓取/交易会停摆,建议使用 Starter 及以上计划。若坚持用 Free 计划,可用外部定时服务(如 cron-job.org)每 10 分钟请求一次 `POST https://你的域名/api/run-cycle` 来代替内置定时器。
+> ⚠️ **注意**:Render Free 计划的服务无流量时会休眠,定时抓取/交易会停摆,建议使用 Starter 及以上计划。若坚持用 Free 计划,可用外部定时服务(如 cron-job.org)定时请求一次 `POST https://你的域名/api/run-cycle` 来代替内置定时器。
+
+### 实时性说明
+
+- 后端默认**每 1 分钟**运行一轮:抓取新闻 → 分析新增新闻 → 交易决策 → 记录净值快照(同一条新闻只分析一次,DeepSeek 成本可控)
+- 前端**每 15 秒**自动刷新所有数据;持仓报价通过 FMP 实时获取(服务端带 10 秒缓存,多人访问不会重复消耗 API 配额)
 
 ### 3. 本地运行
 
@@ -79,7 +84,7 @@ cd web && npm run dev      # 终端 2:启动 Vite :5173(已配置 /api 代理)
 | `DEEPSEEK_API_KEY` | — | DeepSeek API Key(必填) |
 | `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` | — | Supabase 连接信息(必填) |
 | `DEEPSEEK_MODEL` | `deepseek-chat` | 模型 ID,按 DeepSeek 官方文档可换成更新的模型 |
-| `NEWS_POLL_MINUTES` | `10` | 抓取/分析/交易的运行间隔(分钟) |
+| `NEWS_POLL_MINUTES` | `1` | 抓取/分析/交易的运行间隔(分钟),已去重的新闻不会重复分析 |
 | `MAX_ANALYZE_PER_CYCLE` | `8` | 每轮最多分析的新闻条数(控制 DeepSeek 成本) |
 | `INITIAL_CAPITAL` | `100000` | 模拟账户初始资金(美元) |
 | `TRADE_TIER_THRESHOLD` | `2` | 触发交易的最低档位 |

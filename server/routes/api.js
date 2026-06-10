@@ -28,18 +28,28 @@ router.get(
   })
 );
 
-/** 净值快照序列(盈亏折线图数据) */
+/** 净值快照序列(盈亏折线图数据),自动降采样避免点位过多 */
 router.get(
   '/snapshots',
   asyncHandler(async (req, res) => {
-    const limit = Math.min(Number(req.query.limit) || 500, 2000);
+    const limit = Math.min(Number(req.query.limit) || 3000, 10000);
+    const maxPoints = 600;
     const { data, error } = await supabase()
       .from('portfolio_snapshots')
       .select('total_value, cash, positions_value, pnl, pnl_percent, created_at')
       .order('created_at', { ascending: false })
       .limit(limit);
     if (error) throw new Error(error.message);
-    res.json((data || []).reverse());
+
+    const rows = (data || []).reverse();
+    if (rows.length <= maxPoints) return res.json(rows);
+    // 均匀抽样,保留首尾点
+    const step = (rows.length - 1) / (maxPoints - 1);
+    const sampled = [];
+    for (let i = 0; i < maxPoints; i++) {
+      sampled.push(rows[Math.round(i * step)]);
+    }
+    res.json(sampled);
   })
 );
 

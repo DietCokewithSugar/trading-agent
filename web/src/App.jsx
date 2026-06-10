@@ -10,7 +10,7 @@ const TABS = [
   { key: 'trades', label: '🧾 交易记录' },
 ];
 
-const REFRESH_MS = 60_000;
+const REFRESH_MS = 15_000;
 
 export default function App() {
   const [tab, setTab] = useState('dashboard');

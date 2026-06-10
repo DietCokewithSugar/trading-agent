@@ -19,8 +19,8 @@ export const config = {
   supabaseUrl: process.env.SUPABASE_URL || '',
   supabaseKey: process.env.SUPABASE_SERVICE_ROLE_KEY || '',
 
-  // 调度
-  newsPollMinutes: num(process.env.NEWS_POLL_MINUTES, 10),
+  // 调度(分钟):每轮抓取新闻→分析→交易→快照
+  newsPollMinutes: num(process.env.NEWS_POLL_MINUTES, 1),
 
   // 每轮最多用 DeepSeek 分析多少条新新闻(控制 API 成本)
   maxAnalyzePerCycle: num(process.env.MAX_ANALYZE_PER_CYCLE, 8),

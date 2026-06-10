@@ -34,11 +34,20 @@ export async function getPressReleases(limit = 20) {
   return Array.isArray(data) ? data : [];
 }
 
-/** 单只股票实时报价 */
+/** 报价缓存:前端高频刷新时避免重复请求 FMP */
+const quoteCache = new Map(); // symbol -> { quote, at }
+const QUOTE_TTL_MS = 10_000;
+
+/** 单只股票实时报价(带 10 秒缓存) */
 export async function getQuote(symbol) {
-  const data = await fmpGet('/quote', { symbol });
+  const key = symbol.toUpperCase();
+  const cached = quoteCache.get(key);
+  if (cached && Date.now() - cached.at < QUOTE_TTL_MS) return cached.quote;
+
+  const data = await fmpGet('/quote', { symbol: key });
   const q = Array.isArray(data) ? data[0] : data;
   if (!q || typeof q.price !== 'number') return null;
+  quoteCache.set(key, { quote: q, at: Date.now() });
   return q;
 }
 
