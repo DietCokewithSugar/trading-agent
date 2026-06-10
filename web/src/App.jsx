@@ -23,6 +23,7 @@ function MainApp() {
   const [trades, setTrades] = useState([]);
   const [news, setNews] = useState([]);
   const [stats, setStats] = useState(null);
+  const [performance, setPerformance] = useState(null);
   const [status, setStatus] = useState(null);
   const [error, setError] = useState(null);
   const [triggering, setTriggering] = useState(false);
@@ -41,13 +42,14 @@ function MainApp() {
 
   const refresh = useCallback(async () => {
     try {
-      const [p, s, t, n, st, stt] = await Promise.all([
+      const [p, s, t, n, st, stt, perf] = await Promise.all([
         api.portfolio(),
         api.snapshots(),
         api.trades(),
         api.news(),
         api.status(),
         api.stats(),
+        api.performance().catch(() => null),
       ]);
       setPortfolio(p);
       setSnapshots(s);
@@ -55,6 +57,7 @@ function MainApp() {
       setNews(n);
       setStatus(st);
       setStats(stt);
+      if (perf) setPerformance(perf);
       setError(null);
     } catch (err) {
       setError(err.message);
@@ -95,6 +98,7 @@ function MainApp() {
       api.trades().then(setTrades).catch(() => {});
       api.portfolio().then(setPortfolio).catch(() => {});
       api.stats().then(setStats).catch(() => {});
+      api.performance().then(setPerformance).catch(() => {});
       try {
         const t = JSON.parse(e.data);
         const verb = t.side === 'buy' ? '买入' : '卖出';
@@ -198,6 +202,7 @@ function MainApp() {
             snapshots={snapshots}
             trades={trades}
             stats={stats}
+            performance={performance}
             status={status}
             onSymbolClick={setActiveSymbol}
           />

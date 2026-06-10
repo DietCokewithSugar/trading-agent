@@ -3,10 +3,10 @@ import PnlChart from './PnlChart.jsx';
 import StatsCards from './StatsCards.jsx';
 import { fmtMoney, fmtNum, fmtPercent, fmtTime, SESSION_LABELS, TRIGGER_LABELS } from '../api.js';
 
-export default function Dashboard({ portfolio, snapshots, trades, stats, status, onSymbolClick }) {
+export default function Dashboard({ portfolio, snapshots, trades, stats, performance, status, onSymbolClick }) {
   return (
     <div className="dashboard">
-      <StatsCards stats={stats} portfolio={portfolio} />
+      <StatsCards stats={stats} performance={performance} portfolio={portfolio} />
 
       <section className="card">
         <h2>账户净值走势</h2>
@@ -14,6 +14,7 @@ export default function Dashboard({ portfolio, snapshots, trades, stats, status,
           snapshots={snapshots}
           trades={trades}
           initialCapital={portfolio?.initial_capital}
+          benchmark={performance?.benchmark}
         />
       </section>
 

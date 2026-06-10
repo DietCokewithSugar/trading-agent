@@ -13,6 +13,7 @@ export const api = {
   trades: (limit = 100, offset = 0) => get(`/trades?limit=${limit}&offset=${offset}`),
   news: (limit = 60, offset = 0) => get(`/news?limit=${limit}&offset=${offset}`),
   stats: () => get('/stats'),
+  performance: () => get('/performance'),
   symbol: (symbol) => get(`/symbol/${encodeURIComponent(symbol)}`),
   status: () => get('/status'),
   runCycle: async () => {

@@ -5,6 +5,7 @@ import { getValuation } from '../services/portfolio.js';
 import { runCycle, cycleStatus } from '../services/newsService.js';
 import { sseHandler, clientCount } from '../services/bus.js';
 import { getQuote } from '../services/fmp.js';
+import { getStats, getPerformance } from '../services/statsService.js';
 
 const router = Router();
 
@@ -66,59 +67,15 @@ router.get(
 router.get(
   '/stats',
   asyncHandler(async (req, res) => {
-    const db = supabase();
-    const [tradesRes, snapsRes] = await Promise.all([
-      db
-        .from('trades')
-        .select('side, realized_pnl, created_at')
-        .order('created_at', { ascending: false })
-        .limit(1000),
-      db.rpc('snapshots_sampled', { since: new Date(0).toISOString(), max_points: 600 }),
-    ]);
-    if (tradesRes.error) throw new Error(tradesRes.error.message);
-    const trades = tradesRes.data || [];
-    const snaps = snapsRes.error ? [] : snapsRes.data || [];
+    res.json(await getStats());
+  })
+);
 
-    const sells = trades.filter((t) => t.side === 'sell' && t.realized_pnl !== null);
-    const realizedPnl = sells.reduce((sum, t) => sum + Number(t.realized_pnl), 0);
-    const wins = sells.filter((t) => Number(t.realized_pnl) > 0).length;
-
-    // 最大回撤(基于采样后的净值序列)
-    let peak = -Infinity;
-    let maxDrawdown = 0;
-    for (const s of snaps) {
-      const v = Number(s.total_value);
-      if (v > peak) peak = v;
-      if (peak > 0) maxDrawdown = Math.max(maxDrawdown, ((peak - v) / peak) * 100);
-    }
-
-    // 今日盈亏:最新净值 vs 美东今日首个快照之前的最后一个净值
-    const etDate = (iso) =>
-      new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' }).format(new Date(iso));
-    const today = etDate(new Date().toISOString());
-    let baseline = null;
-    for (const s of snaps) {
-      if (etDate(s.created_at) < today) baseline = s;
-      else break;
-    }
-    const latest = snaps[snaps.length - 1] || null;
-    const dayPnl =
-      latest && baseline ? Number(latest.total_value) - Number(baseline.total_value) : null;
-    const dayPnlPercent =
-      dayPnl !== null && Number(baseline.total_value) > 0
-        ? (dayPnl / Number(baseline.total_value)) * 100
-        : null;
-
-    res.json({
-      total_trades: trades.length,
-      sell_count: sells.length,
-      win_count: wins,
-      win_rate: sells.length ? (wins / sells.length) * 100 : null,
-      realized_pnl: realizedPnl,
-      max_drawdown_percent: maxDrawdown,
-      day_pnl: dayPnl,
-      day_pnl_percent: dayPnlPercent,
-    });
+/** 业绩指标:夏普比率、累计收益率、与 SPY 买入持有基准的对比 */
+router.get(
+  '/performance',
+  asyncHandler(async (req, res) => {
+    res.json(await getPerformance());
   })
 );
 

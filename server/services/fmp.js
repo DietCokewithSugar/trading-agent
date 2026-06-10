@@ -143,10 +143,35 @@ export async function getQuote(symbol, maxAgeMs = 10_000) {
   return q;
 }
 
+/** 历史日线缓存:日线收盘价当天内不变,缓存 1 小时足够 */
+const historyCache = new Map(); // symbol:from:to -> { rows, at }
+
+/**
+ * 历史日线收盘价(轻量端点),用于业绩基准对比。
+ * from/to 为 YYYY-MM-DD;返回按日期升序的 [{ date, price, volume }]。
+ */
+export async function getHistoricalPrices(symbol, from, to, maxAgeMs = 3600_000) {
+  const key = `${symbol.toUpperCase()}:${from}:${to}`;
+  const cached = historyCache.get(key);
+  if (cached && Date.now() - cached.at < maxAgeMs) return cached.rows;
+
+  const data = await fmpGet('/historical-price-eod/light', {
+    symbol: symbol.toUpperCase(),
+    from,
+    to,
+  });
+  const rows = (Array.isArray(data) ? data : [])
+    .filter((r) => r && r.date && typeof r.price === 'number')
+    .sort((a, b) => (a.date < b.date ? -1 : 1));
+  historyCache.set(key, { rows, at: Date.now() });
+  return rows;
+}
+
 /** 清空进程内缓存(管理后台数据重置时调用,确保重置后拿到的都是新数据) */
 export function clearCaches() {
   quoteCache.clear();
   profileCache.clear();
+  historyCache.clear();
 }
 
 /** 批量报价,返回 Map<symbol, quote> */

@@ -40,7 +40,7 @@ function TradeMarker(props) {
   );
 }
 
-export default function PnlChart({ snapshots, trades, initialCapital }) {
+export default function PnlChart({ snapshots, trades, initialCapital, benchmark }) {
   const [rangeKey, setRangeKey] = useState('all');
   const [rangeData, setRangeData] = useState(null);
 
@@ -90,6 +90,20 @@ export default function PnlChart({ snapshots, trades, initialCapital }) {
     return { data, markers };
   }, [rows, trades]);
 
+  // SPY 买入持有基准(日线):1 天视图下日线粒度太粗,不展示
+  const benchmarkData = useMemo(() => {
+    if (rangeKey === '1d' || !benchmark?.series?.length || !data.length) return [];
+    const minTime = data[0].time - 24 * 3600_000;
+    const maxTime = data[data.length - 1].time + 24 * 3600_000;
+    return benchmark.series
+      .map((p) => ({
+        // 日线点定位到当日美股收盘附近(20:00 UTC)
+        time: new Date(`${p.date}T20:00:00Z`).getTime(),
+        benchmark: p.value,
+      }))
+      .filter((p) => p.time >= minTime && p.time <= maxTime);
+  }, [benchmark, data, rangeKey]);
+
   return (
     <div>
       <div className="filter-row">
@@ -102,7 +116,9 @@ export default function PnlChart({ snapshots, trades, initialCapital }) {
             {r.label}
           </button>
         ))}
-        <span className="muted small chart-legend">▲ 买入 ▼ 卖出(悬停看详情)</span>
+        <span className="muted small chart-legend">
+          ▲ 买入 ▼ 卖出(悬停看详情){benchmarkData.length > 1 ? ' · ┄ SPY 基准' : ''}
+        </span>
       </div>
 
       {!data.length ? (
@@ -143,6 +159,9 @@ export default function PnlChart({ snapshots, trades, initialCapital }) {
                     '总资产',
                   ];
                 }
+                if (name === 'benchmark') {
+                  return [fmtMoney(value), 'SPY 基准(同期买入持有)'];
+                }
                 return null;
               }}
             />
@@ -161,6 +180,17 @@ export default function PnlChart({ snapshots, trades, initialCapital }) {
               strokeWidth={2}
               dot={false}
             />
+            {benchmarkData.length > 1 && (
+              <Line
+                data={benchmarkData}
+                type="monotone"
+                dataKey="benchmark"
+                stroke="#7a8294"
+                strokeWidth={1.5}
+                strokeDasharray="5 4"
+                dot={false}
+              />
+            )}
             <Scatter data={markers} dataKey="total" shape={<TradeMarker />} isAnimationActive={false} />
           </ComposedChart>
         </ResponsiveContainer>
