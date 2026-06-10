@@ -93,6 +93,41 @@ async function fetchAndStoreNews({ fullFetch = false } = {}) {
   return { inserted, fetched: rows.length, errors };
 }
 
+/**
+ * 分析积压队列:取近 24 小时内尚未分析过的文章(analyzed_at 为空),
+ * 优先带股票代码的,其次按发布时间倒序。超过每轮上限的文章会留在队列中逐轮消化。
+ */
+async function getAnalysisBacklog(limit) {
+  const since = new Date(Date.now() - 24 * 3600_000).toISOString();
+  const { data, error } = await supabase()
+    .from('news_articles')
+    .select('*')
+    .is('analyzed_at', null)
+    .gte('fetched_at', since)
+    .order('published_at', { ascending: false, nullsFirst: false })
+    .limit(limit * 3);
+  if (error) throw new Error(`读取分析队列失败: ${error.message}`);
+  return (data || [])
+    .sort((a, b) => {
+      const symDiff = (b.symbols?.length ? 1 : 0) - (a.symbols?.length ? 1 : 0);
+      if (symDiff !== 0) return symDiff;
+      return new Date(b.published_at || 0) - new Date(a.published_at || 0);
+    })
+    .slice(0, limit);
+}
+
+/** 标记文章已分析(含判定为不相关),使其退出积压队列;分析失败的不标记,下轮重试 */
+async function markAnalyzed(articleId) {
+  const { error } = await supabase()
+    .from('news_articles')
+    .update({ analyzed_at: new Date().toISOString() })
+    .eq('id', articleId);
+  // analyzed_at 列不存在(未执行 004 迁移)时静默跳过,此时积压队列本身也不可用
+  if (error && !/analyzed_at/.test(error.message)) {
+    console.warn(`[cycle] 标记文章 ${articleId} 已分析失败: ${error.message}`);
+  }
+}
+
 /** 对一篇新文章执行 DeepSeek 分析并入库,返回分析行(不相关/中性返回 null) */
 async function analyzeAndStore(article) {
   const analysis = await analyzeArticle(article);
@@ -150,18 +185,26 @@ export async function runCycle({ fullFetch = false } = {}) {
       broadcast('news', { count: inserted.length });
     }
 
-    // 优先分析带股票代码的新闻,其次按发布时间倒序
-    const toAnalyze = inserted
-      .sort((a, b) => {
-        const symDiff = (b.symbols?.length ? 1 : 0) - (a.symbols?.length ? 1 : 0);
-        if (symDiff !== 0) return symDiff;
-        return new Date(b.published_at || 0) - new Date(a.published_at || 0);
-      })
-      .slice(0, config.maxAnalyzePerCycle);
+    // 从积压队列取待分析文章(不局限于本轮新增,超上限的文章逐轮消化)
+    let toAnalyze;
+    try {
+      toAnalyze = await getAnalysisBacklog(config.maxAnalyzePerCycle);
+    } catch (err) {
+      // 兼容尚未执行 004 迁移的数据库:退回只分析本轮新增
+      console.warn(`[cycle] 积压队列不可用(${err.message}),退回仅分析本轮新增`);
+      toAnalyze = inserted
+        .sort((a, b) => {
+          const symDiff = (b.symbols?.length ? 1 : 0) - (a.symbols?.length ? 1 : 0);
+          if (symDiff !== 0) return symDiff;
+          return new Date(b.published_at || 0) - new Date(a.published_at || 0);
+        })
+        .slice(0, config.maxAnalyzePerCycle);
+    }
 
     for (const article of toAnalyze) {
       try {
         const analysisRow = await analyzeAndStore(article);
+        await markAnalyzed(article.id);
         summary.analyzed += 1;
         if (!analysisRow) continue;
         broadcast('analysis', {
