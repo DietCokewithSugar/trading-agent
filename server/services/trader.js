@@ -1,8 +1,9 @@
 import { supabase } from '../db.js';
 import { config } from '../config.js';
 import { getQuote, getProfile } from './fmp.js';
-import { decideTrade } from './deepseek.js';
+import { decideTrade, reviewProposedTrade } from './deepseek.js';
 import { getPortfolio, getValuation } from './portfolio.js';
+import { reflectOnClosedTrade, getMemories } from './memoryService.js';
 
 function round4(n) {
   return Math.round(n * 10000) / 10000;
@@ -15,13 +16,52 @@ function round2(n) {
 // 下单段在此串行化,避免「读组合 → 算现金 → 写回」交错导致的资金竞态;
 // 数据库侧 execute_trade 的行锁是第二道防线。
 let tradeChain = Promise.resolve();
-function withTradeLock(fn) {
+export function withTradeLock(fn) {
   const run = tradeChain.then(fn, fn);
   tradeChain = run.then(
     () => {},
     () => {}
   );
   return run;
+}
+
+/** 风控官的组合级上下文:持仓/行业权重 + 最近卖出盈亏(在交易锁外构建) */
+async function buildRiskContext(valuation) {
+  const total = valuation.total_value;
+  const positionWeights = valuation.positions.map((p) => ({
+    代码: p.symbol,
+    权重百分比: total > 0 ? Math.round((p.market_value / total) * 1000) / 10 : 0,
+  }));
+
+  // 行业分布:公司档案缓存 24 小时,这里基本不产生额外 FMP 请求
+  const sectorValues = new Map();
+  for (const p of valuation.positions) {
+    const profile = await getProfile(p.symbol).catch(() => null);
+    const sector = profile?.sector || '未知';
+    sectorValues.set(sector, (sectorValues.get(sector) || 0) + p.market_value);
+  }
+  const sectorWeights = [...sectorValues.entries()].map(([sector, value]) => ({
+    行业: sector,
+    权重百分比: total > 0 ? Math.round((value / total) * 1000) / 10 : 0,
+  }));
+
+  // 最近 5 笔卖出盈亏:连续亏损时风控官应整体降敞口
+  let recentSells = [];
+  const { data: sells, error } = await supabase()
+    .from('trades')
+    .select('symbol, realized_pnl, created_at')
+    .eq('side', 'sell')
+    .not('realized_pnl', 'is', null)
+    .order('created_at', { ascending: false })
+    .limit(5);
+  if (!error) {
+    recentSells = (sells || []).map((t) => ({
+      代码: t.symbol,
+      盈亏: Number(t.realized_pnl),
+    }));
+  }
+
+  return { positionWeights, sectorWeights, recentSells };
 }
 
 /** execute_trade RPC 尚未部署(未执行 004 迁移)时的判定 */
@@ -57,6 +97,8 @@ export async function handleSignal(article, analysisRow) {
   const price = quote.effective_price ?? quote.price;
 
   const valuation = await getValuation();
+  // 历史教训(FinMem 式记忆):该股票及全局的平仓复盘结论,注入决策上下文
+  const memories = await getMemories(symbol);
   const decision = await decideTrade({
     analysis: analysisRow,
     article,
@@ -67,6 +109,7 @@ export async function handleSignal(article, analysisRow) {
       totalValue: valuation.total_value,
       positions: valuation.positions,
     },
+    memories,
   });
 
   if (!decision.symbolValid) {
@@ -74,9 +117,85 @@ export async function handleSignal(article, analysisRow) {
     return null;
   }
   console.log(`[trader] ${symbol} 决策: ${decision.action} fraction=${decision.fraction}`);
-  if (decision.action === 'hold' || decision.fraction <= 0) return null;
+  if (decision.action === 'hold' || decision.fraction <= 0) {
+    // 可观测性:一档利空 + 已持仓却选择不动,值得人工复核
+    const held = valuation.positions.some((p) => p.symbol === symbol);
+    if (held && analysisRow.sentiment === 'bearish' && analysisRow.tier === 1) {
+      console.warn(`[trader] ${symbol} 一档利空且已持仓但决策为 hold: ${decision.reason}`);
+    }
+    return null;
+  }
 
   if (decision.action === 'buy') {
+    // 仓位缩放链(按序叠加):LLM fraction → 档位/置信度缩放 → 风控官 scale → 硬性风控帽。
+    // 信号档位越低、置信度越低,实际动用的资金越少(Lopez-Lira:LLM 信号强度应映射到仓位)。
+    const tierMult = config.tierSizeMultipliers[analysisRow.tier] ?? 0.5;
+    const conf =
+      analysisRow.confidence === null || analysisRow.confidence === undefined
+        ? null
+        : Number(analysisRow.confidence);
+    // 置信度 0.5 → 0.5 倍,1.0 → 1 倍;缺失按 0.7 倍处理
+    const confMult = conf === null ? 0.7 : Math.min(Math.max(conf, 0.5), 1);
+    const sized = round4(decision.fraction * tierMult * confMult);
+    if (sized !== decision.fraction) {
+      console.log(
+        `[trader] ${symbol} 仓位缩放: ${decision.fraction} × 档位${tierMult} × 置信度${confMult} → ${sized}`
+      );
+      decision.fraction = sized;
+    }
+
+    // 风控官审批(TradingAgents 式独立风控):站在组合角度复核这笔买入,
+    // 可放行/缩仓/否决。审批调用失败时 fail-closed 放弃买入(与去重失败即跳过的约定一致)。
+    if (config.enableRiskOfficer) {
+      try {
+        const context = await buildRiskContext(valuation);
+        const verdict = await reviewProposedTrade({
+          proposal: {
+            symbol,
+            price,
+            fraction: decision.fraction,
+            estimatedSpend: round2(decision.fraction * valuation.cash),
+            stopLossPercent: decision.stopLossPercent,
+            takeProfitPercent: decision.takeProfitPercent,
+            reason: decision.reason,
+          },
+          analysis: analysisRow,
+          portfolio: {
+            cash: valuation.cash,
+            totalValue: valuation.total_value,
+            positionWeights: context.positionWeights,
+            sectorWeights: context.sectorWeights,
+            recentSells: context.recentSells,
+          },
+          memories,
+        });
+        if (!verdict.approve) {
+          console.warn(`[riskofficer] 否决 ${symbol} 买入: ${verdict.reason}`);
+          return null;
+        }
+        if (verdict.scale < 1) {
+          const scaled = round4(decision.fraction * verdict.scale);
+          console.log(
+            `[riskofficer] ${symbol} 缩仓 ×${verdict.scale}: ${decision.fraction} → ${scaled}(${verdict.reason})`
+          );
+          decision.fraction = scaled;
+        }
+        // 只接受比交易员方案更紧的止损
+        if (
+          verdict.adjustedStopLossPercent !== null &&
+          verdict.adjustedStopLossPercent < decision.stopLossPercent
+        ) {
+          decision.stopLossPercent = verdict.adjustedStopLossPercent;
+        }
+        if (verdict.reason) {
+          decision.reason = `${decision.reason};风控官:${verdict.reason}`.slice(0, 300);
+        }
+      } catch (err) {
+        console.warn(`[riskofficer] ${symbol} 审批失败,放弃本次买入: ${err.message}`);
+        return null;
+      }
+    }
+    if (decision.fraction <= 0) return null;
     return executeBuy({ symbol, price, decision, analysisRow, article });
   }
   return executeSellOrder({
@@ -198,7 +317,7 @@ export async function executeSellOrder({
   news_id = null,
   analysis_id = null,
 }) {
-  return withTradeLock(async () => {
+  const trade = await withTradeLock(async () => {
     // 持仓与现金以下单时刻的最新状态为准
     const val = await getValuation();
 
@@ -237,6 +356,15 @@ export async function executeSellOrder({
     console.warn('[trader] execute_trade RPC 不可用,退回非事务路径(请尽快执行 004 迁移)');
     return legacySell({ symbol, price, quantity, amount, reason, trigger, news_id, analysis_id, val, position });
   });
+
+  // 平仓复盘:在交易锁外异步执行(LLM 调用可达 90 秒,绝不阻塞下单链路),
+  // 覆盖全部卖出路径(新闻信号/自动止损/自动止盈/持仓复查)
+  if (trade && trade.realized_pnl !== null && trade.realized_pnl !== undefined) {
+    reflectOnClosedTrade(trade).catch((err) =>
+      console.warn(`[memory] ${symbol} 平仓复盘失败: ${err.message}`)
+    );
+  }
+  return trade;
 }
 
 /** 兼容尚未执行 004 迁移的数据库:旧的非事务卖出路径 */

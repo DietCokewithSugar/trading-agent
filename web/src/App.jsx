@@ -5,6 +5,7 @@ import NewsFeed from './components/NewsFeed.jsx';
 import TradesPage from './components/TradesPage.jsx';
 import Toasts from './components/Toasts.jsx';
 import SymbolModal from './components/SymbolModal.jsx';
+import AdminPage from './components/AdminPage.jsx';
 
 const TABS = [
   { key: 'dashboard', label: '仪表盘' },
@@ -15,13 +16,14 @@ const TABS = [
 // SSE 断线时的兜底轮询间隔
 const FALLBACK_REFRESH_MS = 60_000;
 
-export default function App() {
+function MainApp() {
   const [tab, setTab] = useState('dashboard');
   const [portfolio, setPortfolio] = useState(null);
   const [snapshots, setSnapshots] = useState([]);
   const [trades, setTrades] = useState([]);
   const [news, setNews] = useState([]);
   const [stats, setStats] = useState(null);
+  const [performance, setPerformance] = useState(null);
   const [status, setStatus] = useState(null);
   const [error, setError] = useState(null);
   const [triggering, setTriggering] = useState(false);
@@ -40,13 +42,14 @@ export default function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [p, s, t, n, st, stt] = await Promise.all([
+      const [p, s, t, n, st, stt, perf] = await Promise.all([
         api.portfolio(),
         api.snapshots(),
         api.trades(),
         api.news(),
         api.status(),
         api.stats(),
+        api.performance().catch(() => null),
       ]);
       setPortfolio(p);
       setSnapshots(s);
@@ -54,6 +57,7 @@ export default function App() {
       setNews(n);
       setStatus(st);
       setStats(stt);
+      if (perf) setPerformance(perf);
       setError(null);
     } catch (err) {
       setError(err.message);
@@ -94,11 +98,18 @@ export default function App() {
       api.trades().then(setTrades).catch(() => {});
       api.portfolio().then(setPortfolio).catch(() => {});
       api.stats().then(setStats).catch(() => {});
+      api.performance().then(setPerformance).catch(() => {});
       try {
         const t = JSON.parse(e.data);
         const verb = t.side === 'buy' ? '买入' : '卖出';
         const prefix =
-          t.trigger === 'stop_loss' ? '止损' : t.trigger === 'take_profit' ? '止盈' : '';
+          t.trigger === 'stop_loss'
+            ? '止损'
+            : t.trigger === 'take_profit'
+              ? '止盈'
+              : t.trigger === 'review'
+                ? '复查'
+                : '';
         pushToast(
           `${prefix}${verb} ${t.symbol} ${fmtNum(t.quantity, 4)} 股 @ ${fmtMoney(t.price)}`,
           t.side === 'buy' ? 'toast-up' : 'toast-down'
@@ -106,9 +117,14 @@ export default function App() {
       } catch { /* 忽略畸形数据 */ }
     });
     es.addEventListener('cycle', () => api.status().then(setStatus).catch(() => {}));
+    // 管理后台执行了全量数据重置:全部数据作废,整体刷新
+    es.addEventListener('reset', () => {
+      refresh();
+      pushToast('数据已重置,账户恢复初始状态');
+    });
 
     return () => es.close();
-  }, [pushToast]);
+  }, [pushToast, refresh]);
 
   const triggerCycle = async () => {
     setTriggering(true);
@@ -192,6 +208,7 @@ export default function App() {
             snapshots={snapshots}
             trades={trades}
             stats={stats}
+            performance={performance}
             status={status}
             onSymbolClick={setActiveSymbol}
           />
@@ -208,4 +225,16 @@ export default function App() {
       {activeSymbol && <SymbolModal symbol={activeSymbol} onClose={() => setActiveSymbol(null)} />}
     </div>
   );
+}
+
+/** 根组件:hash 为 #/admin 时进入隐藏管理页,其余渲染主面板 */
+export default function App() {
+  const [hash, setHash] = useState(window.location.hash);
+  useEffect(() => {
+    const onHash = () => setHash(window.location.hash);
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
+  if (hash === '#/admin') return <AdminPage />;
+  return <MainApp />;
 }

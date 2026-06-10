@@ -42,13 +42,48 @@
 3. 重复报道只累计报道数,不再触发交易;只有真正的新事件才放行;
 4. 新事件放行前再过一道同向交易冷却期(`TRADE_COOLDOWN_MINUTES`,默认 30 分钟),作为 LLM 误判的兜底;去重检查全部不可用时保守跳过,宁可错过也不重复下单。
 
-### 止损 / 止盈
+### 止损 / 止盈 / 移动止损
 
 每次买入时,DeepSeek 会根据新闻强度与股票波动性同时设定**止损价**(成本价下方 3%~15%)和**止盈价**(上方 5%~30%),存储在持仓上。服务端每 `RISK_CHECK_SECONDS`(默认 30 秒)监控一次持仓价格(含盘前盘后),跌破止损价或触及止盈价即自动全仓卖出,交易记录中会标注「自动止损 / 自动止盈」及详细原因。加仓时按新的平均成本重新设定。在本功能上线前已存在的持仓没有止损价,可在 Supabase 中手动 `update positions set stop_loss=..., take_profit=...` 补设。
+
+**移动止损**(007 迁移,`ENABLE_TRAILING_STOP` 默认开):股价创出建仓后新高时,止损价按买入时设定的止损距离跟随上抬(峰值价 × (1 − 原止损距离)),只升不降、止盈价不动,浮盈越大保护越紧。
+
+### 仓位缩放与每日持仓复查
+
+- **按信号质量缩放仓位**(参考 [Lopez-Lira & Tang](https://arxiv.org/abs/2304.07619):信号强度应映射到仓位):在 LLM 给出的买入比例之上,按档位(一档 ×1.0、二档 ×0.7)与置信度(0.5→×0.5,1.0→×1.0)叠加缩放,最终仍受硬性风控帽(单股 ≤25%、单笔 ≤20%)约束;
+- **每日持仓复查**(`ENABLE_POSITION_REVIEW` 默认开):新闻驱动的买入论点有时效性。每个交易日美东 `POSITION_REVIEW_HOUR`(默认 14)点后,DeepSeek 用**一次调用**整体评估全部持仓——论点已失效的主动卖出(交易标注「持仓复查」)、浮盈较大的收紧止损、健康的维持持有,防止过期论点的持仓长期滞留。
 
 ### 盘前盘后价格
 
 非盘中时段,系统通过 FMP 的 aftermarket-trade 接口获取盘前(美东 4:00–9:30)/盘后(16:00–20:00)最新成交价,用于估值、模拟成交和止损监控;页面持仓表会显示「盘前 / 盘后」徽章及相对收盘价的涨跌幅。若订阅不含该端点,自动退回收盘价。
+
+### 风控官(TradingAgents 式独立审批)
+
+参考 [TradingAgents](https://arxiv.org/abs/2412.20138) 的多角色协作设计:每笔**买入**在执行前,会由一个独立于交易员的"风控官"角色做最终审批(单次 DeepSeek 调用,内含多空双方论证)。风控官看到的是交易员看不到的组合全景——各持仓/行业权重、最近 5 笔卖出的盈亏(连败应降敞口)、历史复盘教训——并给出三种裁决:**放行**、**缩仓**(scale 0~1)或**否决**,还可建议更紧的止损。裁决理由会追加到交易记录的决策依据中。审批调用失败时遵循系统的 fail-closed 约定:放弃买入,宁可错过不可冒进;卖出不经风控官(卖出本身就是降风险)。`ENABLE_RISK_OFFICER=false` 可关闭。
+
+仓位最终缩放链:LLM 给出 fraction → 档位/置信度缩放 → 风控官 scale → 硬性风控帽(单股 ≤25%、单笔 ≤20%、最小订单 $50)。
+
+### 交易记忆与复盘(FinMem 式反思)
+
+参考 [FinMem](https://arxiv.org/abs/2311.13743) / FinAgent 的分层记忆与反思设计:每当一笔持仓平仓(无论是利空卖出、自动止损还是止盈),DeepSeek 会复盘这笔交易——买入论点是否兑现、为何盈利/亏损——并提炼一条**可迁移的经验教训**存入 `trade_reflections` 表(006 迁移)。后续做交易决策时,系统会检索该股票最近的复盘 + 全局最重要的教训(按 importance 排序,最多 5 条)注入决策上下文,让 AI 避免在同类情形上重复犯错。复盘调用只在平仓时发生(频率低、成本可控),且异步执行绝不阻塞下单;`ENABLE_REFLECTION=false` 可关闭。
+
+### 业绩指标与 SPY 基准对比
+
+参考量化研究的标准评估方法(累计收益、夏普比率、最大回撤、与市场基准对比),仪表盘新增:
+
+- **累计收益率**:相对初始资金的总收益,并给出相对同期 SPY 买入持有策略的**超额收益**;
+- **年化夏普比率**:净值按美东交易日重采样(每日取最后一条快照)后,用日收益率均值/标准差 × √252 计算。账户运行不足 3 个交易日时显示「数据不足」;
+- **净值图 SPY 基准线**:虚线展示「同期把初始资金全部买入 SPY」的净值走势(数据来自 FMP 历史日线,缓存 1 小时),直观回答"AI 跑没跑赢大盘"。
+
+### 管理后台(#/admin)
+
+访问 `https://你的域名/#/admin` 进入隐藏管理页,输入 `ADMIN_TOKEN` 登录后可:
+
+- 查看调度运行状态(交易轮、上次运行、SSE 在线数等);
+- 手动触发一轮全源「抓取 → 分析 → 交易」;
+- **初始化所有数据**:清空全部新闻、AI 分析、事件、交易记录、持仓与净值快照,现金恢复为 `INITIAL_CAPITAL`。适用于持仓数据已脏、想从头开始的场景。操作不可恢复,页面要求输入 `RESET` 二次确认。
+
+安全设计:管理接口(`/api/admin/*`)在服务端**强制鉴权**——未配置 `ADMIN_TOKEN` 时整组接口直接禁用(503),令牌错误返回 403;重置执行期间自动暂停新闻轮询与止损监控,并等待运行中的交易轮结束,绝不与交易并发删库。重置在数据库端通过 `admin_reset_data` 函数(005 迁移)单事务完成;尚未执行 005 迁移的库自动退回逐表删除。
 
 ## 技术栈
 
@@ -64,7 +99,7 @@
 ### 1. 初始化 Supabase
 
 1. 在 [supabase.com](https://supabase.com) 创建项目;
-2. 打开 **SQL Editor**,执行仓库中的 [`supabase/schema.sql`](supabase/schema.sql);**已有部署升级时**,改为执行 `supabase/migrations/` 下的增量脚本(如 [`002_stops_and_stats.sql`](supabase/migrations/002_stops_and_stats.sql)、[`003_news_events.sql`](supabase/migrations/003_news_events.sql)、[`004_atomic_trade.sql`](supabase/migrations/004_atomic_trade.sql));
+2. 打开 **SQL Editor**,执行仓库中的 [`supabase/schema.sql`](supabase/schema.sql);**已有部署升级时**,改为执行 `supabase/migrations/` 下的增量脚本(如 [`002_stops_and_stats.sql`](supabase/migrations/002_stops_and_stats.sql)、[`003_news_events.sql`](supabase/migrations/003_news_events.sql)、[`004_atomic_trade.sql`](supabase/migrations/004_atomic_trade.sql)、[`005_admin_reset.sql`](supabase/migrations/005_admin_reset.sql)、[`006_trade_reflections.sql`](supabase/migrations/006_trade_reflections.sql)、[`007_position_management.sql`](supabase/migrations/007_position_management.sql));
 3. 在 **Project Settings → API** 记下 `Project URL` 和 `service_role` key。
 
 ### 2. 部署到 Render
@@ -121,7 +156,12 @@ cd web && npm run dev      # 终端 2:启动 Vite :5173(已配置 /api 代理)
 | `TRADE_COOLDOWN_MINUTES` | `30` | 同一股票同方向新闻交易的冷却期(分钟),事件去重的兜底防线 |
 | `WATCHLIST` | 七巨头 | Yahoo RSS 抓取的关注列表,持仓自动加入 |
 | `ENABLE_YAHOO` | `true` | 是否启用 Yahoo Finance RSS 补充源 |
-| `ADMIN_TOKEN` | 空 | 设置后手动触发接口需要鉴权 |
+| `ENABLE_REFLECTION` | `true` | 平仓后是否复盘并沉淀经验教训(注入后续决策),需执行 006 迁移 |
+| `ENABLE_TRAILING_STOP` | `true` | 移动止损:创新高后止损价跟随上抬,需执行 007 迁移 |
+| `ENABLE_POSITION_REVIEW` | `true` | 每日持仓复查:论点失效的持仓主动卖出/收紧止损 |
+| `POSITION_REVIEW_HOUR` | `14` | 持仓复查触发时间(美东 24 小时制,盘中) |
+| `ENABLE_RISK_OFFICER` | `true` | 风控官:买入前组合级复核(放行/缩仓/否决),失败放弃买入 |
+| `ADMIN_TOKEN` | 空 | 设置后手动触发接口需要鉴权;同时是管理后台(`#/admin`)的登录口令,未设置时管理接口整组禁用 |
 
 ## API 一览
 
@@ -133,15 +173,30 @@ cd web && npm run dev      # 终端 2:启动 Vite :5173(已配置 /api 代理)
 | `GET /api/news` | 新闻流(含 DeepSeek 分析结果) |
 | `GET /api/stream` | SSE 实时推送流(news / analysis / trade / portfolio / snapshot / cycle) |
 | `GET /api/stats` | 组合统计(今日盈亏、已实现盈亏、胜率、最大回撤) |
+| `GET /api/performance` | 业绩指标(夏普比率、累计收益率、SPY 基准对比与超额收益) |
 | `GET /api/symbol/:symbol` | 单只股票详情(报价、持仓、分析、交易历史) |
 | `GET /api/status` | 调度器状态 |
 | `POST /api/run-cycle` | 手动触发一轮抓取/分析/交易(未设 `ADMIN_TOKEN` 时全局 120 秒冷却,防滥用) |
 | `GET /api/health` | 健康检查 |
+| `GET /api/admin/verify` | 管理:校验令牌(以下均需 `x-admin-token` 请求头) |
+| `GET /api/admin/status` | 管理:调度与运行状态 |
+| `POST /api/admin/run-cycle` | 管理:手动触发一轮(带鉴权,无冷却) |
+| `POST /api/admin/reset` | 管理:全量数据初始化(body 需 `{"confirm":"RESET"}`) |
 
 ## 常见问题
 
 **部署后日志出现 `Node.js 20 detected without native WebSocket support` 警告?**
 这是 `@supabase/supabase-js` 的 Realtime 模块在 Node < 22 下的提示。本项目不使用 Realtime 功能,该警告无害;但建议使用 Node 22+(`render.yaml` 已配置 `NODE_VERSION=22`)。如果你的 Render 服务是在旧配置下创建的,请到服务的 **Environment** 页将 `NODE_VERSION` 改为 `22` 并手动重新部署即可消除警告。
+
+## 设计参考
+
+系统的核心机制参考了以下研究与开源项目:
+
+- [Can ChatGPT Forecast Stock Price Movements?](https://arxiv.org/abs/2304.07619)(Lopez-Lira & Tang)— LLM 新闻信号的有效性与信号强度-仓位映射
+- [TradingAgents: Multi-Agents LLM Financial Trading Framework](https://arxiv.org/abs/2412.20138) — 多角色协作与独立风控审批
+- [FinMem: A Performance-Enhanced LLM Trading Agent with Layered Memory](https://arxiv.org/abs/2311.13743) — 交易记忆与反思机制
+- [Large Language Model Agent in Financial Trading: A Survey](https://arxiv.org/abs/2408.06361) — 评估指标与架构综述
+- [virattt/ai-hedge-fund](https://github.com/virattt/ai-hedge-fund) — 多角色 AI 投资组合的开源实践
 
 ## 免责声明
 

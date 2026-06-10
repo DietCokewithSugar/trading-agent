@@ -4,8 +4,38 @@ import { fmtMoney, fmtPercent } from '../api.js';
 
 const PIE_COLORS = ['#6f8ce8', '#e0524e', '#2fa572', '#c9924d', '#9b7fd4', '#4fb3c9', '#c76fa8', '#7a8294'];
 
-export default function StatsCards({ stats, portfolio }) {
+export default function StatsCards({ stats, performance, portfolio }) {
   const cards = [
+    {
+      label: '累计收益率',
+      value:
+        performance?.cumulative_return_percent !== null &&
+        performance?.cumulative_return_percent !== undefined
+          ? fmtPercent(performance.cumulative_return_percent)
+          : '—',
+      sub:
+        performance?.benchmark?.excess_return_percent !== null &&
+        performance?.benchmark?.excess_return_percent !== undefined
+          ? `对比 SPY ${fmtPercent(performance.benchmark.excess_return_percent)}`
+          : '暂无 SPY 基准数据',
+      tone:
+        performance?.cumulative_return_percent > 0
+          ? 'up'
+          : performance?.cumulative_return_percent < 0
+            ? 'down'
+            : '',
+    },
+    {
+      label: '夏普比率(年化)',
+      value:
+        performance?.sharpe_ratio !== null && performance?.sharpe_ratio !== undefined
+          ? performance.sharpe_ratio.toFixed(2)
+          : '数据不足',
+      sub: performance?.trading_days
+        ? `基于 ${performance.trading_days} 个交易日净值`
+        : '需至少 3 个交易日数据',
+      tone: performance?.sharpe_ratio > 1 ? 'up' : '',
+    },
     {
       label: '今日盈亏',
       value: stats?.day_pnl !== null && stats?.day_pnl !== undefined ? fmtMoney(stats.day_pnl) : '—',

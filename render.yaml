@@ -35,5 +35,17 @@ services:
         value: "100000"
       - key: TRADE_TIER_THRESHOLD
         value: "2"
+      - key: ENABLE_REFLECTION
+        value: "true"
+      - key: ENABLE_TRAILING_STOP
+        value: "true"
+      - key: ENABLE_POSITION_REVIEW
+        value: "true"
+      - key: POSITION_REVIEW_HOUR
+        value: "14"
+      - key: ENABLE_RISK_OFFICER
+        value: "true"
       - key: WATCHLIST
         value: "AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA"
+      - key: ADMIN_TOKEN
+        sync: false # 管理后台(#/admin)登录口令,在 Render 控制台填写

@@ -4,12 +4,14 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { config, assertConfig } from './config.js';
 import apiRouter from './routes/api.js';
+import adminRouter from './routes/admin.js';
 import { startScheduler } from './scheduler.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const app = express();
 app.use(express.json());
+app.use('/api/admin', adminRouter);
 app.use('/api', apiRouter);
 
 // 托管前端构建产物

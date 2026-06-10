@@ -642,6 +642,41 @@ a { color: var(--accent); }
 }
 .modal-item:last-child { border-bottom: none; }
 
+/* ---- 管理后台 ---- */
+a.btn {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+}
+.btn-danger {
+  background: rgba(224, 82, 78, 0.92);
+  color: #fff;
+}
+.btn-danger:hover {
+  background: #e0524e;
+  opacity: 1;
+}
+.admin-login {
+  max-width: 460px;
+}
+.admin-form {
+  display: flex;
+  gap: 10px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+.admin-danger {
+  border-color: rgba(224, 82, 78, 0.45);
+}
+.admin-message {
+  margin-top: 14px;
+  padding: 9px 14px;
+  background: rgba(111, 140, 232, 0.1);
+  border: 1px solid rgba(111, 140, 232, 0.4);
+  border-radius: 8px;
+  font-size: 0.85rem;
+}
+
 /* ---- 响应式 / 可访问性 ---- */
 @media (max-width: 600px) {
   .app {

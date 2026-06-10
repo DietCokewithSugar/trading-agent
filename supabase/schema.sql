@@ -52,6 +52,7 @@ create table if not exists positions (
   avg_cost numeric not null,
   stop_loss numeric,
   take_profit numeric,
+  peak_price numeric,           -- 建仓后的最高价,移动止损用(只升不降)
   opened_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -226,6 +227,66 @@ $$;
 -- 该函数会改写资金与持仓,只允许服务端(service_role)调用
 revoke all on function execute_trade(text, text, numeric, numeric, numeric, text, text, bigint, bigint, numeric, numeric) from public;
 grant execute on function execute_trade(text, text, numeric, numeric, numeric, text, text, bigint, bigint, numeric, numeric) to service_role;
+
+-- 管理后台全量数据重置:清空所有业务数据,现金恢复为初始资金。
+-- truncate ... cascade 会一并清空引用这些表的从表(如 trade_reflections)。
+create or replace function admin_reset_data(p_initial_capital numeric default null)
+returns void
+language plpgsql
+as $$
+declare
+  v_capital numeric;
+begin
+  truncate table
+    trades,
+    news_events,
+    news_analyses,
+    news_articles,
+    portfolio_snapshots,
+    positions
+  restart identity cascade;
+
+  -- 优先用调用方传入的初始资金(来自服务端 INITIAL_CAPITAL 配置),否则沿用账户原值
+  select coalesce(p_initial_capital, initial_capital) into v_capital
+  from portfolio_state where id = 1;
+  if not found then
+    v_capital := coalesce(p_initial_capital, 100000);
+    insert into portfolio_state (id, cash, initial_capital)
+    values (1, v_capital, v_capital);
+  else
+    update portfolio_state
+      set cash = v_capital, initial_capital = v_capital, updated_at = now()
+      where id = 1;
+  end if;
+end;
+$$;
+
+-- 该函数会清空全部数据,只允许服务端(service_role)调用
+revoke all on function admin_reset_data(numeric) from public;
+grant execute on function admin_reset_data(numeric) to service_role;
+
+-- 交易记忆与反思(参考 FinMem/FinAgent:平仓后复盘,经验注入后续决策)
+create table if not exists trade_reflections (
+  id bigint generated always as identity primary key,
+  trade_id bigint references trades(id) on delete set null,
+  symbol text not null,
+  trigger text,                 -- 平仓触发方式: news / stop_loss / take_profit / review
+  entry_price numeric,          -- 持仓平均成本
+  exit_price numeric,           -- 卖出价
+  realized_pnl numeric,
+  pnl_percent numeric,
+  holding_minutes int,          -- 持有时长(分钟)
+  thesis text,                  -- 原始买入论点(买入时的决策理由)
+  outcome_summary text,         -- 结果复盘
+  lesson text not null,         -- 经验教训(注入后续交易决策)
+  importance numeric,           -- 0~1,检索排序用,亏损越大/教训越普适越高
+  model text,
+  created_at timestamptz not null default now()
+);
+create index if not exists idx_reflections_symbol on trade_reflections (symbol, created_at desc);
+
+alter table trade_reflections enable row level security;
+create policy "public read trade_reflections" on trade_reflections for select using (true);
 
 -- 初始资金 10 万美元(服务端也会在缺失时自动初始化)
 insert into portfolio_state (id, cash, initial_capital)

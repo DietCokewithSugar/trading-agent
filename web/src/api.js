@@ -13,6 +13,7 @@ export const api = {
   trades: (limit = 100, offset = 0) => get(`/trades?limit=${limit}&offset=${offset}`),
   news: (limit = 60, offset = 0) => get(`/news?limit=${limit}&offset=${offset}`),
   stats: () => get('/stats'),
+  performance: () => get('/performance'),
   symbol: (symbol) => get(`/symbol/${encodeURIComponent(symbol)}`),
   status: () => get('/status'),
   runCycle: async () => {
@@ -23,6 +24,31 @@ export const api = {
     }
     return res.json();
   },
+};
+
+/** 管理接口:所有请求携带 x-admin-token 请求头 */
+async function adminRequest(path, { method = 'GET', token, body } = {}) {
+  const res = await fetch(`/api/admin${path}`, {
+    method,
+    headers: {
+      'x-admin-token': token || '',
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `请求失败: ${res.status}`);
+  }
+  return res.json();
+}
+
+export const adminApi = {
+  verify: (token) => adminRequest('/verify', { token }),
+  status: (token) => adminRequest('/status', { token }),
+  runCycle: (token) => adminRequest('/run-cycle', { method: 'POST', token }),
+  reset: (token) =>
+    adminRequest('/reset', { method: 'POST', token, body: { confirm: 'RESET' } }),
 };
 
 export function fmtMoney(n, digits = 2) {
@@ -76,4 +102,5 @@ export const SESSION_LABELS = {
 export const TRIGGER_LABELS = {
   stop_loss: '自动止损',
   take_profit: '自动止盈',
+  review: '持仓复查',
 };

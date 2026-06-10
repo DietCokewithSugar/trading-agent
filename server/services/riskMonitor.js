@@ -1,9 +1,64 @@
+import { supabase } from '../db.js';
+import { config } from '../config.js';
 import { getQuote, getMarketSession } from './fmp.js';
 import { getPortfolio } from './portfolio.js';
 import { executeSellOrder } from './trader.js';
 import { broadcast } from './bus.js';
+import { isHalted } from './halt.js';
 
 let running = false;
+
+function round4(n) {
+  return Math.round(n * 10000) / 10000;
+}
+
+// peak_price 列缺失(未执行 007 迁移)时停用移动止损,只警告一次
+let trailingUnavailable = false;
+
+/**
+ * 移动止损:股价创出建仓后新高时,按"峰值价 × (1 - 原止损距离)"上抬止损价。
+ * 止损只升不降,止盈价不动;新止损至少高出现值 0.5% 才落库,避免高频写。
+ * 返回本次检查应使用的止损价。
+ * 注:盘前盘后采用 effective_price,极端情况下稀疏成交可能推高峰值,
+ * 模拟盘可接受,换取隔夜跳空前更紧的保护。
+ */
+async function maybeTrailStop(pos, price) {
+  const stop = Number(pos.stop_loss);
+  if (trailingUnavailable || !config.enableTrailingStop || !(stop > 0)) return stop;
+
+  const base =
+    pos.peak_price !== null && pos.peak_price !== undefined
+      ? Number(pos.peak_price)
+      : Number(pos.avg_cost);
+  if (!(base > 0) || price <= base) return stop;
+
+  // 止损距离:由当前基准价与止损价反推,首次即买入时设定的百分比,之后保持不变
+  const distance = (base - stop) / base;
+  if (distance <= 0 || distance >= 1) return stop;
+
+  const newStop = round4(price * (1 - distance));
+  if (newStop < stop * 1.005) return stop;
+
+  const { error } = await supabase()
+    .from('positions')
+    .update({
+      peak_price: round4(price),
+      stop_loss: newStop,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('symbol', pos.symbol);
+  if (error) {
+    if (/peak_price/.test(error.message)) {
+      trailingUnavailable = true;
+      console.warn('[risk] peak_price 列不可用,移动止损停用(请执行 007 迁移)');
+    } else {
+      console.warn(`[risk] ${pos.symbol} 移动止损更新失败: ${error.message}`);
+    }
+    return stop;
+  }
+  console.log(`[risk] ${pos.symbol} 移动止损上抬: $${stop} → $${newStop}(峰值 $${price})`);
+  return newStop;
+}
 
 /**
  * 止损/止盈监控:遍历持仓,现价(含盘前盘后)跌破止损价或触及止盈价时自动全仓卖出。
@@ -11,13 +66,14 @@ let running = false;
  */
 export async function checkStops() {
   if (running) return;
+  if (isHalted()) return;
   if (getMarketSession() === 'closed') return;
   running = true;
 
   try {
     const { positions } = await getPortfolio();
     for (const pos of positions) {
-      const stopLoss = pos.stop_loss !== null && pos.stop_loss !== undefined ? Number(pos.stop_loss) : null;
+      let stopLoss = pos.stop_loss !== null && pos.stop_loss !== undefined ? Number(pos.stop_loss) : null;
       const takeProfit =
         pos.take_profit !== null && pos.take_profit !== undefined ? Number(pos.take_profit) : null;
       if (stopLoss === null && takeProfit === null) continue;
@@ -25,6 +81,11 @@ export async function checkStops() {
       const quote = await getQuote(pos.symbol, 25_000);
       if (!quote) continue;
       const price = quote.effective_price ?? quote.price;
+
+      // 创新高时先上抬移动止损,再用新止损价做触发判断
+      if (stopLoss !== null) {
+        stopLoss = await maybeTrailStop(pos, price);
+      }
       const cost = Number(pos.avg_cost);
       const pnlPercent = (((price - cost) / cost) * 100).toFixed(1);
 

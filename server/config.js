@@ -52,6 +52,21 @@ export const config = {
   // 同一股票同方向新闻交易的冷却期(分钟),作为事件去重的兜底防线
   tradeCooldownMinutes: num(process.env.TRADE_COOLDOWN_MINUTES, 30),
 
+  // 平仓后是否用 DeepSeek 复盘并沉淀经验教训(注入后续交易决策)
+  enableReflection: process.env.ENABLE_REFLECTION !== 'false',
+
+  // 仓位缩放:按信号档位的买入金额乘数(一档全额、二档七折,其余对半;
+  // 在 LLM 给出的 fraction 之上叠加,最终仍受硬性风控帽约束)
+  tierSizeMultipliers: { 1: 1.0, 2: 0.7 },
+  // 移动止损:股价创新高后止损价跟随上抬(只升不降),需执行 007 迁移
+  enableTrailingStop: process.env.ENABLE_TRAILING_STOP !== 'false',
+  // 每日持仓复查:每个交易日由 DeepSeek 整体评估一次持仓(论点是否失效、是否收紧止损)
+  enablePositionReview: process.env.ENABLE_POSITION_REVIEW !== 'false',
+  // 持仓复查的触发时间(美东 24 小时制,盘中该小时之后执行,每天一次)
+  positionReviewHour: num(process.env.POSITION_REVIEW_HOUR, 14),
+  // 风控官:买入执行前由独立 LLM 角色做组合级复核(放行/缩仓/否决),失败时放弃买入
+  enableRiskOfficer: process.env.ENABLE_RISK_OFFICER !== 'false',
+
   // 关注列表(用于 Yahoo RSS 抓取),持仓股票会自动加入
   watchlist: (process.env.WATCHLIST || 'AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA')
     .split(',')
