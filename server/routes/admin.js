@@ -4,6 +4,7 @@ import { runCycle, cycleStatus } from '../services/newsService.js';
 import { resetAllData } from '../services/adminService.js';
 import { clientCount } from '../services/bus.js';
 import { isHalted } from '../services/halt.js';
+import { safeTokenEqual, createAuthRateLimiter } from '../services/authGuard.js';
 
 const router = Router();
 
@@ -17,12 +18,16 @@ function asyncHandler(fn) {
   };
 }
 
+// 失败限流在鉴权之前:防止 token 被在线暴力破解
+router.use(createAuthRateLimiter('admin'));
+
 // 管理接口一律要求鉴权:未配置 ADMIN_TOKEN 时整组接口不可用(拒绝裸奔的危险操作)
 router.use((req, res, next) => {
   if (!config.adminToken) {
     return res.status(503).json({ error: '服务端未配置 ADMIN_TOKEN,管理功能不可用' });
   }
-  if (req.headers['x-admin-token'] !== config.adminToken) {
+  if (!safeTokenEqual(req.headers['x-admin-token'], config.adminToken)) {
+    console.warn(`[admin] x-admin-token 校验失败 ip=${req.ip} path=${req.path}`);
     return res.status(403).json({ error: '需要有效的 x-admin-token' });
   }
   next();

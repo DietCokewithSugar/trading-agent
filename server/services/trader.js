@@ -4,6 +4,7 @@ import { getQuote, getProfile } from './fmp.js';
 import { decideTrade, reviewProposedTrade } from './deepseek.js';
 import { getPortfolio, getValuation } from './portfolio.js';
 import { reflectOnClosedTrade, getMemories } from './memoryService.js';
+import { computeFill } from './execution.js';
 
 function round4(n) {
   return Math.round(n * 10000) / 10000;
@@ -74,6 +75,30 @@ function logTrade(trade) {
     `[trader] 成交: ${trade.side === 'buy' ? '买入' : '卖出'} ${trade.symbol} ${trade.quantity} 股 @ $${trade.price}`
   );
   return trade;
+}
+
+// 008 迁移未执行(trades 缺 quote_price/slippage_bps 列)时只告警一次
+let fillColumnsMissing = false;
+
+/** 成交后补写滑点明细(市场参考价 + 施加的滑点),best-effort:列缺失时降级忽略 */
+async function recordFillDetails(trade, refPrice, slippageBps) {
+  if (!trade || fillColumnsMissing) return trade;
+  const { data, error } = await supabase()
+    .from('trades')
+    .update({ quote_price: round4(refPrice), slippage_bps: slippageBps })
+    .eq('id', trade.id)
+    .select()
+    .single();
+  if (error) {
+    if (/quote_price|slippage_bps|column|schema/i.test(error.message)) {
+      fillColumnsMissing = true;
+      console.warn('[trader] trades 缺少滑点明细列,已降级不记录(请执行 008 迁移)');
+    } else {
+      console.warn(`[trader] 写入滑点明细失败: ${error.message}`);
+    }
+    return trade;
+  }
+  return data;
 }
 
 /**
@@ -211,8 +236,25 @@ export async function handleSignal(article, analysisRow) {
 
 async function executeBuy({ symbol, price, decision, analysisRow, article }) {
   return withTradeLock(async () => {
-    // 下单前重取组合状态:DeepSeek 决策耗时较长,决策前的快照可能已过期
+    // 下单前重取组合状态与最新报价:DeepSeek 决策(最长两次 90s 调用)耗时较长,
+    // 决策前的估值与价格都可能已过期,绝不能按"消息发布瞬间的价格"成交
     const valuation = await getValuation();
+    const quote = await getQuote(symbol, 0).catch(() => null);
+    if (!quote) {
+      console.warn(`[trader] ${symbol} 下单时无法获取最新报价,放弃买入(fail-closed)`);
+      return null;
+    }
+
+    // 漂移熔断:最新价相对决策时价格偏移过大,LLM 决策依据已失效
+    //(上漂=追 spike 顶部,下漂=行情已反转),放弃本次买入
+    const fresh = quote.effective_price ?? quote.price;
+    const driftPct = Math.abs(fresh / price - 1) * 100;
+    if (driftPct > config.buyPriceDriftAbortPercent) {
+      console.warn(
+        `[trader] ${symbol} 下单时价格漂移 ${round2(driftPct)}%($${price} → $${fresh})超过阈值 ${config.buyPriceDriftAbortPercent}%,放弃买入`
+      );
+      return null;
+    }
 
     // 风控:单笔买入金额 ≤ min(决策比例×现金, 总资产×maxBuyCashFraction, 剩余现金)
     let spend = Math.min(
@@ -232,14 +274,22 @@ async function executeBuy({ symbol, price, decision, analysisRow, article }) {
       return null;
     }
 
-    const quantity = round4(spend / price);
-    const amount = round2(quantity * price);
+    // 模拟成交:在最新价上施加不利滑点(点差/时段/波动/订单冲击)
+    const profile = await getProfile(symbol).catch(() => null);
+    const fill = computeFill({ side: 'buy', quote, profile, notional: spend });
+    if (fill.slippageBps > 0) {
+      console.log(
+        `[trader] ${symbol} 买入滑点 ${fill.slippageBps}bp: $${fill.refPrice} → $${fill.fillPrice}`
+      );
+    }
+    const quantity = round4(spend / fill.fillPrice);
+    const amount = round2(quantity * fill.fillPrice);
 
     const { data, error } = await supabase().rpc('execute_trade', {
       p_symbol: symbol,
       p_side: 'buy',
       p_quantity: quantity,
-      p_price: round4(price),
+      p_price: round4(fill.fillPrice),
       p_amount: amount,
       p_reason: decision.reason,
       p_trigger: 'news',
@@ -248,15 +298,25 @@ async function executeBuy({ symbol, price, decision, analysisRow, article }) {
       p_stop_loss_percent: decision.stopLossPercent,
       p_take_profit_percent: decision.takeProfitPercent,
     });
-    if (!error) return logTrade(data);
+    if (!error) return logTrade(await recordFillDetails(data, fill.refPrice, fill.slippageBps));
     if (!isMissingTradeRpc(error)) throw new Error(`买入 ${symbol} 失败: ${error.message}`);
     console.warn('[trader] execute_trade RPC 不可用,退回非事务路径(请尽快执行 004 迁移)');
-    return legacyBuy({ symbol, price, quantity, amount, decision, valuation, analysisRow, article });
+    return legacyBuy({
+      symbol,
+      price: fill.fillPrice,
+      quantity,
+      amount,
+      decision,
+      valuation,
+      analysisRow,
+      article,
+      fill,
+    });
   });
 }
 
 /** 兼容尚未执行 004 迁移的数据库:旧的非事务买入路径 */
-async function legacyBuy({ symbol, price, quantity, amount, decision, valuation, analysisRow, article }) {
+async function legacyBuy({ symbol, price, quantity, amount, decision, valuation, analysisRow, article, fill = null }) {
   const db = supabase();
 
   const { error: cashErr } = await db
@@ -301,12 +361,15 @@ async function legacyBuy({ symbol, price, quantity, amount, decision, valuation,
     news_id: article.id,
     analysis_id: analysisRow.id,
     realized_pnl: null,
+    ...(fill ? { quote_price: round4(fill.refPrice), slippage_bps: fill.slippageBps } : {}),
   });
 }
 
 /**
- * 执行卖出并落库。新闻信号卖出与自动止损/止盈共用。
- * trigger: 'news' | 'stop_loss' | 'take_profit'
+ * 执行卖出并落库。新闻信号卖出与自动止损/止盈/持仓复查共用。
+ * price 为决策参考价;下单时会重取最新报价并施加滑点成交,
+ * 重取失败时降级用参考价继续(止损单必须能执行,不可 fail-closed)。
+ * trigger: 'news' | 'stop_loss' | 'take_profit' | 'review'
  */
 export async function executeSellOrder({
   symbol,
@@ -332,7 +395,24 @@ export async function executeSellOrder({
     if (position.quantity - quantity < 0.0001 || fraction >= 0.99) {
       quantity = position.quantity;
     }
-    const amount = round2(quantity * price);
+
+    // 下单时重取最新报价并施加不利滑点;riskMonitor 刚取过时命中 5s 缓存,不耗配额
+    const quote = await getQuote(symbol, 5_000).catch(() => null);
+    let fill;
+    if (quote) {
+      const refPrice = quote.effective_price ?? quote.price;
+      fill = computeFill({ side: 'sell', quote, profile: await getProfile(symbol).catch(() => null), notional: quantity * refPrice });
+      if (fill.slippageBps > 0) {
+        console.log(
+          `[trader] ${symbol} 卖出滑点 ${fill.slippageBps}bp: $${fill.refPrice} → $${fill.fillPrice}`
+        );
+      }
+    } else {
+      console.warn(`[trader] ${symbol} 下单时无法获取最新报价,降级按决策参考价 $${price} 成交`);
+      fill = { fillPrice: round4(price), slippageBps: null, refPrice: price };
+    }
+
+    const amount = round2(quantity * fill.fillPrice);
     if (amount < config.minOrderAmount && quantity < position.quantity) {
       console.log(`[trader] ${symbol} 卖出金额 ${amount} 低于下限,跳过`);
       return null;
@@ -342,7 +422,7 @@ export async function executeSellOrder({
       p_symbol: symbol,
       p_side: 'sell',
       p_quantity: quantity,
-      p_price: round4(price),
+      p_price: round4(fill.fillPrice),
       p_amount: amount,
       p_reason: reason,
       p_trigger: trigger,
@@ -351,10 +431,10 @@ export async function executeSellOrder({
       p_stop_loss_percent: null,
       p_take_profit_percent: null,
     });
-    if (!error) return logTrade(data);
+    if (!error) return logTrade(await recordFillDetails(data, fill.refPrice, fill.slippageBps));
     if (!isMissingTradeRpc(error)) throw new Error(`卖出 ${symbol} 失败: ${error.message}`);
     console.warn('[trader] execute_trade RPC 不可用,退回非事务路径(请尽快执行 004 迁移)');
-    return legacySell({ symbol, price, quantity, amount, reason, trigger, news_id, analysis_id, val, position });
+    return legacySell({ symbol, price: fill.fillPrice, quantity, amount, reason, trigger, news_id, analysis_id, val, position, fill });
   });
 
   // 平仓复盘:在交易锁外异步执行(LLM 调用可达 90 秒,绝不阻塞下单链路),
@@ -368,7 +448,7 @@ export async function executeSellOrder({
 }
 
 /** 兼容尚未执行 004 迁移的数据库:旧的非事务卖出路径 */
-async function legacySell({ symbol, price, quantity, amount, reason, trigger, news_id, analysis_id, val, position }) {
+async function legacySell({ symbol, price, quantity, amount, reason, trigger, news_id, analysis_id, val, position, fill = null }) {
   const db = supabase();
   const realizedPnl = round2((price - position.avg_cost) * quantity);
 
@@ -399,11 +479,17 @@ async function legacySell({ symbol, price, quantity, amount, reason, trigger, ne
     news_id,
     analysis_id,
     realized_pnl: realizedPnl,
+    ...(fill ? { quote_price: round4(fill.refPrice), slippage_bps: fill.slippageBps } : {}),
   });
 }
 
 async function insertTrade(db, trade) {
-  const { data, error } = await db.from('trades').insert(trade).select().single();
+  let { data, error } = await db.from('trades').insert(trade).select().single();
+  if (error && 'quote_price' in trade) {
+    // 008 迁移未执行:去掉滑点明细字段重试(迁移容忍)
+    const { quote_price, slippage_bps, ...rest } = trade;
+    ({ data, error } = await db.from('trades').insert(rest).select().single());
+  }
   if (error) throw new Error(`写入交易记录失败: ${error.message}`);
   return logTrade(data);
 }

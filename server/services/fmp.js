@@ -1,4 +1,5 @@
 import { config } from '../config.js';
+import { isHoliday, isEarlyClose } from './marketCalendar.js';
 
 const BASE = 'https://financialmodelingprep.com/stable';
 
@@ -36,13 +37,17 @@ export async function getPressReleases(limit = 20) {
 
 /**
  * 当前美股市场时段(美东时间):
- * pre 盘前 4:00–9:30 / regular 盘中 9:30–16:00 / post 盘后 16:00–20:00 / closed 休市
- * 注:不含交易所假日判断,假日会被视为对应时段,但价格不变、无害。
+ * pre 盘前 4:00–9:30 / regular 盘中 9:30–16:00 / post 盘后 16:00–20:00 / closed 休市。
+ * 周末与交易所假日(marketCalendar.js 规则计算)直接 closed;
+ * 半日市(7/3、感恩节次日、12/24)盘中 9:30–13:00,盘后 13:00–17:00。
  */
 export function getMarketSession(date = new Date()) {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York',
     weekday: 'short',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
     hourCycle: 'h23',
@@ -50,10 +55,14 @@ export function getMarketSession(date = new Date()) {
   const get = (type) => parts.find((p) => p.type === type)?.value;
   const weekday = get('weekday');
   if (weekday === 'Sat' || weekday === 'Sun') return 'closed';
+  const dateStr = `${get('year')}-${get('month')}-${get('day')}`;
+  if (isHoliday(dateStr)) return 'closed';
   const minutes = Number(get('hour')) * 60 + Number(get('minute'));
+  const regularEnd = isEarlyClose(dateStr) ? 780 : 960; // 半日市 13:00 收盘
+  const postEnd = isEarlyClose(dateStr) ? 1020 : 1200; // 半日市盘后至 17:00
   if (minutes >= 240 && minutes < 570) return 'pre';
-  if (minutes >= 570 && minutes < 960) return 'regular';
-  if (minutes >= 960 && minutes < 1200) return 'post';
+  if (minutes >= 570 && minutes < regularEnd) return 'regular';
+  if (minutes >= regularEnd && minutes < postEnd) return 'post';
   return 'closed';
 }
 
@@ -165,6 +174,38 @@ export async function getHistoricalPrices(symbol, from, to, maxAgeMs = 3600_000)
     .sort((a, b) => (a.date < b.date ? -1 : 1));
   historyCache.set(key, { rows, at: Date.now() });
   return rows;
+}
+
+/**
+ * 股息调整后的历史日线(总回报口径,股息再投资),用于 SPY 基准——
+ * 纯价格序列会漏掉约 1.3% 的年化股息,凭空送策略超额收益。
+ * 返回 { rows: [{ date, price, volume }], adjusted };端点失败时
+ * 回退到未调整的 light 端点并标记 adjusted=false。
+ */
+export async function getHistoricalPricesAdjusted(symbol, from, to, maxAgeMs = 3600_000) {
+  const key = `${symbol.toUpperCase()}:${from}:${to}:adj`;
+  const cached = historyCache.get(key);
+  if (cached && Date.now() - cached.at < maxAgeMs) return cached.rows;
+
+  let result;
+  try {
+    const data = await fmpGet('/historical-price-eod/dividend-adjusted', {
+      symbol: symbol.toUpperCase(),
+      from,
+      to,
+    });
+    const rows = (Array.isArray(data) ? data : [])
+      .filter((r) => r && r.date && typeof r.adjClose === 'number')
+      .map((r) => ({ date: r.date, price: r.adjClose, volume: r.volume }))
+      .sort((a, b) => (a.date < b.date ? -1 : 1));
+    if (!rows.length) throw new Error('股息调整端点返回为空');
+    result = { rows, adjusted: true };
+  } catch (err) {
+    console.warn(`[fmp] ${symbol} 股息调整历史价不可用(${err.message}),回退未调整价格`);
+    result = { rows: await getHistoricalPrices(symbol, from, to, maxAgeMs), adjusted: false };
+  }
+  historyCache.set(key, { rows: result, at: Date.now() });
+  return result;
 }
 
 /** 清空进程内缓存(管理后台数据重置时调用,确保重置后拿到的都是新数据) */

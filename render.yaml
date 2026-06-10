@@ -45,6 +45,14 @@ services:
         value: "14"
       - key: ENABLE_RISK_OFFICER
         value: "true"
+      - key: ENABLE_SLIPPAGE
+        value: "true"
+      - key: SLIPPAGE_MAX_BPS
+        value: "150"
+      - key: COMMISSION_BPS
+        value: "0"
+      - key: BUY_PRICE_DRIFT_ABORT_PERCENT
+        value: "5"
       - key: WATCHLIST
         value: "AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA"
       - key: ADMIN_TOKEN
