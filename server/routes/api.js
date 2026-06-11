@@ -102,7 +102,7 @@ router.get(
   })
 );
 
-/** 宏观环境:当前 regime 与生效参数、近期宏观事件、经济日历/黑窗、候选池概览 */
+/** 宏观环境:当前 regime 与生效参数、近期宏观事件、经济日历/黑窗(候选池见 /api/pool) */
 router.get(
   '/macro',
   asyncHandler(async (req, res) => {
@@ -111,10 +111,9 @@ router.get(
     }
     const regime = getRegime();
     const params = getRegimeParams(regime.regime);
-    const [events, pool] = await Promise.all([
-      listRecentMacroEvents(config.macroEventValidityHours, 20).catch(() => null),
-      getPoolOverview(),
-    ]);
+    const events = await listRecentMacroEvents(config.macroEventValidityHours, 20).catch(
+      () => null
+    );
     const blackout = getBlackoutState();
     res.json({
       available: events !== null,
@@ -150,7 +149,6 @@ router.get(
           actual: ev.actual ?? null,
         })),
       },
-      pool: pool,
     });
   })
 );
@@ -164,6 +162,14 @@ async function getPoolOverview() {
   if (counts === null && top === null) return null;
   return { counts: counts || {}, top: top || [] };
 }
+
+/** 买入候选池概览(交易记录页):等待资金分配的利好信号;池不可用时 pool 为 null */
+router.get(
+  '/pool',
+  asyncHandler(async (req, res) => {
+    res.json({ pool: config.enableMacro ? await getPoolOverview() : null });
+  })
+);
 
 /** 单只股票详情:报价(含盘前盘后)、持仓、相关分析、交易历史 */
 router.get(

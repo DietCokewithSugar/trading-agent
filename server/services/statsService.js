@@ -122,16 +122,22 @@ function computeSharpe(daily) {
   return (mean / std) * Math.sqrt(252);
 }
 
+/** 净值走势图的参考基线:标普500(SPY)与黄金(GLD),均按"同期买入持有"口径 */
+const BENCHMARKS = [
+  { symbol: 'SPY', name: '标普500' },
+  { symbol: 'GLD', name: '黄金' },
+];
+
 /**
- * SPY 买入持有基准:从首个快照日到今天,按初始资金归一化。
+ * 买入持有基准:从首个快照日到今天,按初始资金归一化。
  * 用股息调整后的总回报序列(股息再投资),与策略的"全部盈亏都体现在净值里"
  * 口径一致;调整端点不可用时回退纯价格序列,basis 标记为 'price'。
  */
-async function getBenchmark(daily, initialCapital) {
+async function getBenchmark({ symbol, name }, daily, initialCapital) {
   if (!daily.length || !initialCapital) return null;
   const from = daily[0].date;
   const to = etDate(new Date().toISOString());
-  const { rows: prices, adjusted } = await getHistoricalPricesAdjusted('SPY', from, to);
+  const { rows: prices, adjusted } = await getHistoricalPricesAdjusted(symbol, from, to);
   if (prices.length < 2) return null;
 
   const base = prices[0].price;
@@ -141,7 +147,8 @@ async function getBenchmark(daily, initialCapital) {
     value: round2(initialCapital * (p.price / base)),
   }));
   return {
-    symbol: 'SPY',
+    symbol,
+    name,
     basis: adjusted ? 'total_return' : 'price',
     series,
     cumulative_return_percent: (prices[prices.length - 1].price / base - 1) * 100,
@@ -170,27 +177,35 @@ export async function getPerformance() {
       ? ((Number(latest.total_value) - initialCapital) / initialCapital) * 100
       : null;
 
-  // 基准拉取失败(FMP 限额/网络)不应影响其余指标
-  let benchmark = null;
-  try {
-    benchmark = await getBenchmark(daily, initialCapital);
-  } catch (err) {
-    console.warn(`[perf] 获取 SPY 基准失败: ${err.message}`);
-  }
+  // 基准拉取失败(数据源限额/网络)不应影响其余指标,单个基准失败也不影响其余基准
+  const benchmarks = (
+    await Promise.all(
+      BENCHMARKS.map((b) =>
+        getBenchmark(b, daily, initialCapital).catch((err) => {
+          console.warn(`[perf] 获取 ${b.symbol} 基准失败: ${err.message}`);
+          return null;
+        })
+      )
+    )
+  ).filter(Boolean);
+
+  // benchmark 字段保持旧形状(SPY + 超额收益),供累计收益率卡片等存量消费方使用
+  const spy = benchmarks.find((b) => b.symbol === 'SPY') || null;
 
   return {
     ...stats,
     sharpe_ratio: computeSharpe(daily),
     cumulative_return_percent: cumulativeReturn,
     trading_days: daily.length,
-    benchmark: benchmark
+    benchmark: spy
       ? {
-          ...benchmark,
+          ...spy,
           excess_return_percent:
             cumulativeReturn !== null
-              ? cumulativeReturn - benchmark.cumulative_return_percent
+              ? cumulativeReturn - spy.cumulative_return_percent
               : null,
         }
       : null,
+    benchmarks,
   };
 }

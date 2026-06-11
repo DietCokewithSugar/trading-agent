@@ -23,6 +23,7 @@ export const api = {
   performance: () => get('/performance'),
   signalStats: () => get('/signal-stats'),
   macro: () => get('/macro'),
+  pool: () => get('/pool'),
   pendingOrders: () => get('/pending-orders'),
   symbol: (symbol) => get(`/symbol/${encodeURIComponent(symbol)}`),
   status: () => get('/status'),

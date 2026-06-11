@@ -42,7 +42,10 @@ function TradeMarker(props) {
   );
 }
 
-export default function PnlChart({ snapshots, trades, initialCapital, benchmark }) {
+// 参考基线线色按 symbol 取色,未知基准回退灰色
+const BENCHMARK_COLORS = { SPY: CHART.benchmark, GLD: CHART.benchmarkGold };
+
+export default function PnlChart({ snapshots, trades, initialCapital, benchmarks }) {
   const [rangeKey, setRangeKey] = useState('all');
   const [rangeData, setRangeData] = useState(null);
 
@@ -92,26 +95,33 @@ export default function PnlChart({ snapshots, trades, initialCapital, benchmark 
     return { data, markers };
   }, [rows, trades]);
 
-  // SPY 买入持有基准(日线):1 天视图下日线粒度太粗,不展示
-  const benchmarkData = useMemo(() => {
-    if (rangeKey === '1d' || !benchmark?.series?.length || !data.length) return [];
+  // 买入持有参考基线(标普500/黄金,日线):1 天视图下日线粒度太粗,不展示
+  const benchmarkSeries = useMemo(() => {
+    if (rangeKey === '1d' || !benchmarks?.length || !data.length) return [];
     const minTime = data[0].time - 24 * 3600_000;
     const maxTime = data[data.length - 1].time + 24 * 3600_000;
-    return benchmark.series
-      .map((p) => ({
-        // 日线点定位到当日美股收盘附近(20:00 UTC)
-        time: new Date(`${p.date}T20:00:00Z`).getTime(),
-        benchmark: p.value,
+    return benchmarks
+      .filter((b) => b?.series?.length)
+      .map((b) => ({
+        symbol: b.symbol,
+        name: b.name || b.symbol,
+        rows: b.series
+          .map((p) => ({
+            // 日线点定位到当日美股收盘附近(20:00 UTC)
+            time: new Date(`${p.date}T20:00:00Z`).getTime(),
+            benchmark: p.value,
+          }))
+          .filter((p) => p.time >= minTime && p.time <= maxTime),
       }))
-      .filter((p) => p.time >= minTime && p.time <= maxTime);
-  }, [benchmark, data, rangeKey]);
+      .filter((b) => b.rows.length > 1);
+  }, [benchmarks, data, rangeKey]);
 
   // 自适应 Y 轴:窄幅波动时旧的「$xx.xk」格式会让所有刻度显示成同一个值,
   // 这里按实际数值跨度选择精度,并给上下各留 8% 空间
   const { yDomain, fmtTick } = useMemo(() => {
     const values = [
       ...data.map((d) => d.total),
-      ...benchmarkData.map((d) => d.benchmark),
+      ...benchmarkSeries.flatMap((b) => b.rows.map((d) => d.benchmark)),
     ].filter((v) => Number.isFinite(v));
     if (!values.length) {
       return { yDomain: ['auto', 'auto'], fmtTick: (v) => `$${(v / 1000).toFixed(1)}k` };
@@ -130,7 +140,7 @@ export default function PnlChart({ snapshots, trades, initialCapital, benchmark 
             ? (v) => `$${Math.round(v).toLocaleString('en-US')}`
             : (v) => `$${Number(v).toFixed(2)}`;
     return { yDomain: [lo - pad, hi + pad], fmtTick };
-  }, [data, benchmarkData]);
+  }, [data, benchmarkSeries]);
 
   return (
     <div>
@@ -142,7 +152,10 @@ export default function PnlChart({ snapshots, trades, initialCapital, benchmark 
           onChange={setRangeKey}
         />
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          ▲ 买入 ▼ 卖出(悬停看详情){benchmarkData.length > 1 ? ' · ┄ SPY 基准' : ''}
+          ▲ 买入 ▼ 卖出(悬停看详情)
+          {benchmarkSeries.length
+            ? ` · ┄ ${benchmarkSeries.map((b) => b.name).join(' / ')} 基准`
+            : ''}
         </Typography.Text>
       </div>
 
@@ -190,8 +203,8 @@ export default function PnlChart({ snapshots, trades, initialCapital, benchmark 
                     '总资产',
                   ];
                 }
-                if (name === 'benchmark') {
-                  return [fmtMoney(value), 'SPY 基准(同期买入持有)'];
+                if (props?.dataKey === 'benchmark') {
+                  return [fmtMoney(value), `${name} 基准(同期买入持有)`];
                 }
                 return null;
               }}
@@ -212,17 +225,19 @@ export default function PnlChart({ snapshots, trades, initialCapital, benchmark 
               strokeWidth={2}
               dot={false}
             />
-            {benchmarkData.length > 1 && (
+            {benchmarkSeries.map((b) => (
               <Line
-                data={benchmarkData}
+                key={b.symbol}
+                data={b.rows}
+                name={b.name}
                 type="monotone"
                 dataKey="benchmark"
-                stroke={CHART.benchmark}
+                stroke={BENCHMARK_COLORS[b.symbol] || CHART.benchmark}
                 strokeWidth={1.5}
                 strokeDasharray="5 4"
                 dot={false}
               />
-            )}
+            ))}
             <Scatter data={markers} dataKey="total" shape={<TradeMarker />} isAnimationActive={false} />
           </ComposedChart>
         </ResponsiveContainer>
