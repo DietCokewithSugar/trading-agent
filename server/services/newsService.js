@@ -6,6 +6,7 @@ import { getYahooNews } from './yahoo.js';
 import { analyzeArticle } from './deepseek.js';
 import { resolveEvent, markEventTraded } from './eventService.js';
 import { isMacroCandidate, processMacroArticle } from './macroService.js';
+import { recomputeRegime } from './macroRegime.js';
 import { scoreSource, computeFinalConfidence, isPressRelease } from './credibility.js';
 import { recordSignalPrice } from './signalReturns.js';
 import { handleSignal } from './trader.js';
@@ -302,7 +303,10 @@ export async function runCycle({ fullFetch = false, trigger = 'scheduler' } = {}
           const macroEvent = await processMacroArticle(article);
           await markAnalyzed(article.id);
           summary.analyzed += 1;
-          if (macroEvent) summary.macroEvents += 1;
+          if (macroEvent) {
+            summary.macroEvents += 1;
+            await recomputeRegime('event'); // 新宏观事件立即重算环境(失败只告警)
+          }
           continue;
         }
 

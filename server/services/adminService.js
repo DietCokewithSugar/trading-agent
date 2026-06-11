@@ -8,6 +8,8 @@ import { broadcast } from './bus.js';
 import { isHalted, setHalted } from './halt.js';
 import { resetMetrics } from './metrics.js';
 import { resetRiskControlState } from './riskControls.js';
+import { resetRegimeState } from './macroRegime.js';
+import { resetCalendarState } from './macroCalendar.js';
 
 /** admin_reset_data RPC 尚未部署(未执行 005 迁移)时的判定 */
 function isMissingResetRpc(error) {
@@ -140,6 +142,8 @@ export async function resetAllData() {
     clearCaches();
     resetMetrics();
     resetRiskControlState();
+    resetRegimeState();
+    resetCalendarState();
     cycleStatus.lastResult = null;
     cycleStatus.lastError = null;
     cycleStatus.lastRunAt = null;
