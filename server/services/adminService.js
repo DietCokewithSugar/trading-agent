@@ -1,6 +1,7 @@
 import { supabase } from '../db.js';
 import { config } from '../config.js';
 import { cycleStatus } from './newsService.js';
+import { allocatorStatus } from './allocator.js';
 import { withTradeLock } from './trader.js';
 import { clearCaches } from './fmp.js';
 import { getValuation } from './portfolio.js';
@@ -20,10 +21,10 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** 等待运行中的交易轮结束(最多 maxWaitMs),保证重置不与抓取/分析/交易并发 */
+/** 等待运行中的交易轮与资金分配轮结束(最多 maxWaitMs),保证重置不与抓取/分析/交易并发 */
 async function drainRunningCycle(maxWaitMs = 60_000) {
   const start = Date.now();
-  while (cycleStatus.running) {
+  while (cycleStatus.running || allocatorStatus.running) {
     if (Date.now() - start > maxWaitMs) return false;
     await sleep(500);
   }

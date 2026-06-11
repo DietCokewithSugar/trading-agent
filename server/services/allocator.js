@@ -1,8 +1,30 @@
 // 资金分配器:候选池统一打分排序 → 冲突消解 → 按分数高低把资金分给最优信号。
 // 解决"先到的新闻把现金买光"的路径依赖:谁分高谁先买,资金不足的标记
 // capital_constrained 留池,下一轮(或卖出释放现金后)自动复评。
+// 节奏(用户指定):非盘中只入池持续排序;开盘首轮立即清算隔夜候选,
+// 盘中每 ALLOCATION_INTERVAL_MINUTES 一轮。LLM 交易决策只对每轮头部候选发生。
 // 本文件上半部为纯函数(打分/合并/排名,node:test 直接测),下半部为编排薄层。
-import { tierScore } from './conflictResolver.js';
+import { supabase } from '../db.js';
+import { config } from '../config.js';
+import { getMarketSession } from './fmp.js';
+import { isHalted } from './halt.js';
+import { etDayKey } from './metrics.js';
+import { broadcast } from './bus.js';
+import { getRegime, getRegimeParams, sectorMultiplier } from './macroRegime.js';
+import { listRecentMacroEvents } from './macroService.js';
+import { getBlackoutState } from './macroCalendar.js';
+import { resolveConflicts, tierScore } from './conflictResolver.js';
+import {
+  isPoolAvailable,
+  listActiveCandidates,
+  updateCandidate,
+  expireStale,
+  cancelLowScore,
+  cancelSiblings,
+  countByStatus,
+} from './candidateStore.js';
+import { executeCandidate } from './trader.js';
+import { getPortfolio } from './portfolio.js';
 
 export { tierScore };
 
@@ -67,4 +89,265 @@ export function rankCandidates(candidates) {
  */
 export function planAllocations({ ranked, maxPerRun = 3, minScore = 0.05 } = {}) {
   return (ranked || []).filter((c) => (c.score || 0) >= minScore).slice(0, Math.max(maxPerRun, 0));
+}
+
+// ── 编排薄层 ──
+
+/** 分配器运行状态(adminService 重置前 drain 用) */
+export const allocatorStatus = {
+  running: false,
+  lastRunAt: null, // 毫秒时间戳
+  lastRunDay: null, // 美东日(开盘首跑判定)
+  lastResult: null,
+};
+
+/** 资金/配额类拒绝:候选标记 capital_constrained 留池,卖出释放现金或次日配额恢复后复评 */
+const CAPITAL_REASONS = new Set(['cash_reserve', 'daily_budget', 'gross_exposure', 'new_position_quota']);
+/** 全局临时状态:本轮直接停止执行,候选保持原状态等下一轮 */
+const GLOBAL_TRANSIENT_REASONS = new Set(['trading_halted', 'daily_loss_halt', 'macro_shock']);
+
+/**
+ * 调度器每分钟调用:盘中按 ALLOCATION_INTERVAL_MINUTES 限速,
+ * 开盘后的第一个 tick 立即执行(清算隔夜积累的候选)。非盘中不执行。
+ */
+export async function maybeRunAllocation() {
+  if (!config.enableMacro || !isPoolAvailable()) return;
+  if (getMarketSession() !== 'regular') return;
+  const today = etDayKey();
+  const firstRunOfDay = allocatorStatus.lastRunDay !== today;
+  const intervalMs = Math.max(config.allocationIntervalMinutes, 1) * 60_000;
+  if (!firstRunOfDay && Date.now() - (allocatorStatus.lastRunAt || 0) < intervalMs) return;
+  await runAllocation({ trigger: firstRunOfDay ? 'open' : 'interval' });
+}
+
+/** 执行一轮资金分配。任何失败只告警,绝不向调度器抛出 */
+export async function runAllocation({ trigger = 'manual' } = {}) {
+  if (allocatorStatus.running || isHalted()) return;
+  if (!config.enableMacro || !isPoolAvailable()) return;
+  allocatorStatus.running = true;
+  const startedAt = Date.now();
+  try {
+    await expireStale();
+    const candidates = await listActiveCandidates();
+    // 节奏标记在加载后就绪时更新:本轮无论结果如何都算跑过
+    allocatorStatus.lastRunAt = startedAt;
+    allocatorStatus.lastRunDay = etDayKey();
+    if (!candidates || !candidates.length) return;
+
+    const regime = getRegime();
+    const params = getRegimeParams(regime.regime);
+
+    // 宏观冲击:不执行任何买入,低分候选直接取消,高分候选留池待冲击解除
+    if (regime.regime === 'macro_shock') {
+      await cancelLowScore(0.3, '宏观冲击期间取消低分候选');
+      console.log(`[allocator] 宏观冲击状态,本轮不执行买入(${candidates.length} 个候选留池)`);
+      return;
+    }
+
+    // 重大数据发布黑窗:候选原样留池,本轮整体不买(卖出/止损不经此路径)
+    const blackout = getBlackoutState();
+    if (blackout.inBlackout) {
+      console.log(
+        `[allocator] 数据发布黑窗(${blackout.event?.event || '未知事件'},至 ${blackout.until}),本轮不执行买入`
+      );
+      return;
+    }
+
+    // 上下文:近期宏观事件(行业乘数)、持仓、待开盘卖单、冲突窗口内的利空信号
+    const now = new Date();
+    const symbols = [...new Set(candidates.map((c) => c.symbol))];
+    const [macroEvents, { positions }, sellOrders, opposing] = await Promise.all([
+      listRecentMacroEvents(config.macroEventValidityHours).catch(() => []),
+      getPortfolio(),
+      loadPendingSellOrders(symbols),
+      loadOpposingSignals(symbols, now),
+    ]);
+    const events = macroEvents || [];
+
+    // 刷新分数(时效衰减 × 宏观乘数 × 行业乘数)并按 regime 过滤档位/置信度
+    const allowedTiers = new Set(params.allowedTiers || []);
+    const scored = [];
+    for (const candidate of candidates) {
+      const sectorMult = sectorMultiplier(candidate.sector, events, now, {
+        validityHours: config.macroEventValidityHours,
+      });
+      const score = scoreCandidate(candidate, {
+        now,
+        macroMultiplier: params.macroMultiplier,
+        sectorMult,
+      });
+      if (
+        !allowedTiers.has(candidate.tier) ||
+        (params.minConfidence && Number(candidate.confidence || 0) < params.minConfidence)
+      ) {
+        // 非终态:regime 变化后自动回到排名
+        await updateCandidate(candidate.id, {
+          current_score: score,
+          status: 'macro_filtered',
+          status_reason: `当前宏观环境(${regime.regime})只允许档位 ${[...allowedTiers].join('/') || '无'}${params.minConfidence ? ` 且置信度≥${params.minConfidence}` : ''}`,
+        });
+        continue;
+      }
+      await updateCandidate(candidate.id, { current_score: score });
+      // 曾被宏观过滤/冲突搁置的候选回到待分配(冲突由下方 resolveConflicts 重新判定)
+      scored.push({ ...candidate, score, sectorMult });
+    }
+    if (!scored.length) return;
+
+    // 冲突消解(每轮全量重判:冲突窗口滑动,出窗后自动解除搁置)
+    const conflicts = resolveConflicts({
+      buyCandidates: scored,
+      pendingSellOrders: sellOrders,
+      recentOpposingSignals: opposing,
+      positions,
+      regime: regime.regime,
+      cfg: { dominanceRatio: 1.5, conflictScale: 0.5 },
+    });
+    for (const { candidate, reason } of conflicts.held) {
+      if (candidate.status !== 'conflict_hold') {
+        await updateCandidate(candidate.id, { status: 'conflict_hold', status_reason: reason });
+      }
+    }
+    for (const { candidate, reason } of conflicts.cancelled) {
+      await updateCandidate(candidate.id, { status: 'cancelled', status_reason: reason });
+    }
+    const scaleById = new Map();
+    const runnable = [...conflicts.allowed];
+    for (const { candidate, scale, reason } of conflicts.reducedSize) {
+      scaleById.set(candidate.id, { scale, note: reason });
+      runnable.push(candidate);
+    }
+    // 曾被搁置/过滤但本轮重新可跑的候选恢复 pending
+    for (const candidate of runnable) {
+      if (candidate.status !== 'pending') {
+        await updateCandidate(candidate.id, { status: 'pending', status_reason: '复评后恢复待分配' });
+      }
+    }
+
+    // 同票合并 → 排名 → 取前 N 执行
+    const { merged } = mergeBySymbol(runnable);
+    const planned = planAllocations({
+      ranked: rankCandidates(merged),
+      maxPerRun: config.maxAllocationsPerRun,
+    });
+    if (!planned.length) return;
+    console.log(
+      `[allocator] 本轮(${trigger})候选 ${candidates.length} → 可执行 ${merged.length},执行前 ${planned.length} 个: ${planned.map((c) => `${c.symbol}(${c.score})`).join(' ')}`
+    );
+
+    let allocated = 0;
+    let halted = false;
+    for (let i = 0; i < planned.length; i += 1) {
+      const candidate = planned[i];
+      const conflictScale = scaleById.get(candidate.id);
+      const macroContext = {
+        regime: regime.regime,
+        riskScore: Number(regime.risk_score),
+        recentEvents: events.slice(0, 3),
+        sectorImpact:
+          candidate.sectorMult > 1 ? 'bullish' : candidate.sectorMult < 1 ? 'bearish' : null,
+        conflictNote: conflictScale ? '同票近期存在反向信号(已缩仓)' : null,
+      };
+      let result;
+      try {
+        result = await executeCandidate(candidate, {
+          macroContext,
+          extraScale: conflictScale ? conflictScale.scale : 1,
+        });
+      } catch (err) {
+        console.warn(`[allocator] ${candidate.symbol} 执行失败(候选留池): ${err.message}`);
+        continue;
+      }
+
+      if (result?.trade) {
+        allocated += 1;
+        await updateCandidate(candidate.id, {
+          status: 'allocated',
+          trade_id: result.trade.id,
+          status_reason: null,
+          macro_regime: regime.regime,
+        });
+        await cancelSiblings(candidate.symbol, candidate.id, '同票候选已成交,合并取消');
+        broadcast('trade', result.trade);
+        continue;
+      }
+      const reason = result?.reason || 'unknown';
+      if (CAPITAL_REASONS.has(reason)) {
+        // 资金/配额耗尽:本候选与排名靠后的全部标记 capital_constrained,留池复评
+        for (const rest of planned.slice(i)) {
+          await updateCandidate(rest.id, {
+            status: 'capital_constrained',
+            status_reason: result.reject,
+          });
+        }
+        console.log(`[allocator] 资金/配额受限(${reason}),其余候选留池等待资金释放`);
+        break;
+      }
+      if (GLOBAL_TRANSIENT_REASONS.has(reason)) {
+        console.log(`[allocator] 全局暂停(${reason}),本轮停止执行`);
+        halted = true;
+        break;
+      }
+      if (result?.transient) {
+        // 个体临时失败(报价缺失/价格漂移):保持现状,下一轮重试
+        console.log(`[allocator] ${candidate.symbol} 暂缓(${reason}),候选留池`);
+        continue;
+      }
+      await updateCandidate(candidate.id, { status: 'rejected', status_reason: result?.reject || reason });
+    }
+
+    allocatorStatus.lastResult = {
+      trigger,
+      at: new Date(startedAt).toISOString(),
+      candidates: candidates.length,
+      planned: planned.length,
+      allocated,
+      halted,
+      durationMs: Date.now() - startedAt,
+    };
+    console.log(
+      `[allocator] 本轮完成: 成交 ${allocated}/${planned.length},用时 ${Date.now() - startedAt}ms`
+    );
+    broadcast('macro', { pool: await countByStatus() });
+  } catch (err) {
+    console.error(`[allocator] 本轮分配失败: ${err.message}`);
+  } finally {
+    allocatorStatus.running = false;
+  }
+}
+
+/** 候选同票的待开盘卖单(冲突消解输入);查询失败按空处理 */
+async function loadPendingSellOrders(symbols) {
+  if (!symbols.length) return [];
+  try {
+    const { data, error } = await supabase()
+      .from('pending_orders')
+      .select('symbol, side, status')
+      .eq('side', 'sell')
+      .eq('status', 'pending')
+      .in('symbol', symbols);
+    if (error) return [];
+    return data || [];
+  } catch {
+    return [];
+  }
+}
+
+/** 冲突窗口内候选同票的利空信号(冲突消解输入);查询失败按空处理 */
+async function loadOpposingSignals(symbols, now) {
+  if (!symbols.length) return [];
+  try {
+    const since = new Date(now.getTime() - config.conflictWindowMinutes * 60_000).toISOString();
+    const { data, error } = await supabase()
+      .from('news_analyses')
+      .select('symbol, sentiment, tier, confidence, final_confidence, created_at')
+      .eq('sentiment', 'bearish')
+      .in('symbol', symbols)
+      .gte('created_at', since)
+      .limit(100);
+    if (error) return [];
+    return data || [];
+  } catch {
+    return [];
+  }
 }

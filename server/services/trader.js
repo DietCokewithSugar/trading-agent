@@ -23,6 +23,9 @@ import { computeFill } from './execution.js';
 import { checkBuyEligibility } from './eligibility.js';
 import { scaleFraction } from './sizing.js';
 import { enqueuePendingOrder } from './openQueue.js';
+import { enqueueCandidate, holdBuyCandidates, isPoolAvailable } from './candidateStore.js';
+import { scoreCandidate } from './allocator.js';
+import { checkTradeCooldown } from './eventService.js';
 
 function round4(n) {
   return Math.round(n * 10000) / 10000;
@@ -160,14 +163,6 @@ async function recordFillDetails(trade, fill, extras = {}) {
 export async function handleSignal(article, analysisRow) {
   const symbol = analysisRow.symbol;
 
-  // 人工交易暂停开关(kill switch):只拦做多信号,连报价/档案/LLM 请求都不发起。
-  // 卖向信号与保护性卖出(止损/止盈/复查)完全不经此检查
-  if (analysisRow.sentiment === 'bullish' && isTradingHalted()) {
-    console.log(`[trader] ${symbol} 交易暂停开关已开启(人工),跳过做多信号`);
-    recordReject('trading_halted');
-    return null;
-  }
-
   const [quote, profile] = await Promise.all([getQuote(symbol), getProfile(symbol)]);
   if (!quote) {
     console.warn(`[trader] ${symbol} 无法获取报价,跳过`);
@@ -182,15 +177,33 @@ export async function handleSignal(article, analysisRow) {
   }
   const price = quote.effective_price ?? quote.price;
 
-  // 标的准入门槛(只拦做多):最小市值/最低股价/最低日均美元成交额,
-  // 在 LLM 决策之前硬性拦截,微盘/低流动性的利好新闻连决策调用都不值得发起
   if (analysisRow.sentiment === 'bullish') {
+    // 标的准入门槛(只拦做多):最小市值/最低股价/最低日均美元成交额,
+    // 入池/决策之前硬性拦截,微盘/低流动性的利好新闻连候选资格都没有
     const gate = checkBuyEligibility({ profile, price });
     if (!gate.ok) {
       console.log(`[trader] ${symbol} 未过标的准入门槛,跳过: ${gate.reason}`);
       recordReject('eligibility_gate');
       return null;
     }
+
+    // 候选入池(014):利好信号不再先到先得即时成交,而是进候选池由资金分配器
+    // 统一打分排序后分配资金——信号时刻不发起任何 LLM 交易决策调用。
+    // 入池失败(表缺失/未启用宏观)退回下方的旧即时交易路径,信号不丢
+    const pooled = await poolBullishSignal({ article, analysisRow, profile });
+    if (pooled) return { pooled: true, candidate: pooled };
+
+    // ── 以下为旧即时交易路径(候选池不可用时的退路)──
+    // 人工交易暂停开关:确定性预检先行,省一次 LLM 决策调用
+    if (isTradingHalted()) {
+      console.log(`[trader] ${symbol} 交易暂停开关已开启(人工),跳过做多信号`);
+      recordReject('trading_halted');
+      return null;
+    }
+  } else if (analysisRow.sentiment === 'bearish') {
+    // 同票多空冲突:利空信号到达即冻结池中买入候选(conflict_hold 非终态,
+    // 信号出冲突窗口后由分配器复评;fail-open,失败仅告警)
+    await holdBuyCandidates(symbol, '同票利空信号触发冲突搁置');
   }
 
   const valuation = await getValuation();
@@ -400,7 +413,229 @@ export async function handleSignal(article, analysisRow) {
   });
 }
 
-async function executeBuy({ symbol, price, decision, analysisRow, article, meta = null }) {
+/**
+ * 利好信号入候选池(无任何 LLM 调用):打基础分、记宏观快照,
+ * 同票已有待开盘卖单的出生即冲突搁置。表缺失/未启用返回 null,调用方退回即时路径。
+ */
+async function poolBullishSignal({ article, analysisRow, profile }) {
+  if (!isPoolAvailable()) return null;
+  const symbol = analysisRow.symbol;
+
+  // 出生即冲突:同票存在待开盘卖单(方向已明确要离场);查询失败按无冲突处理(fail-open)
+  let conflict = false;
+  try {
+    const { data } = await supabase()
+      .from('pending_orders')
+      .select('id')
+      .eq('symbol', symbol)
+      .eq('side', 'sell')
+      .eq('status', 'pending')
+      .limit(1);
+    conflict = Boolean(data?.length);
+  } catch {
+    conflict = false;
+  }
+
+  const baseScore = scoreCandidate(
+    {
+      tier: analysisRow.tier,
+      confidence: analysisRow.confidence,
+      source_score: article.source_score ?? null,
+      created_at: new Date().toISOString(),
+    },
+    { now: new Date() }
+  );
+  return enqueueCandidate({
+    symbol,
+    side: 'buy',
+    news_id: article.id,
+    analysis_id: analysisRow.id,
+    event_id: analysisRow.event_id ?? null,
+    tier: analysisRow.tier,
+    sentiment: analysisRow.sentiment,
+    confidence: analysisRow.confidence,
+    final_confidence: analysisRow.final_confidence ?? null,
+    source_score: article.source_score ?? null,
+    sector: profile?.sector ?? null,
+    base_score: baseScore,
+    current_score: baseScore,
+    macro_regime: getRegime().regime,
+    status: conflict ? 'conflict_hold' : 'pending',
+    status_reason: conflict ? '同票存在待开盘卖单,入池即冲突搁置' : null,
+  });
+}
+
+/**
+ * 分配时刻执行一个买入候选(由资金分配器在盘中调用,LLM 交易决策只在这里发生):
+ * 重取报价/档案 → 准入复查 → 冷却复查 → decideTrade(含宏观上下文)→ 仓位缩放链
+ * (档位/置信/来源 → 宏观/行业/冲突缩放 → 连亏)→ 风控官 → 锁内结算(含预算/保留/敞口)。
+ * 返回 { trade } | { reject, transient?, reason }(reason 供分配器落候选状态)。
+ */
+export async function executeCandidate(candidate, { macroContext = null, extraScale = 1 } = {}) {
+  const symbol = candidate.symbol;
+
+  // 候选关联的原文与分析行(决策上下文);缺失说明数据被清理,候选作废
+  const [articleRes, analysisRes] = await Promise.all([
+    supabase().from('news_articles').select('*').eq('id', candidate.news_id).maybeSingle(),
+    supabase().from('news_analyses').select('*').eq('id', candidate.analysis_id).maybeSingle(),
+  ]);
+  const article = articleRes?.data;
+  const analysisRow = analysisRes?.data;
+  if (!article || !analysisRow) {
+    return { reject: '候选关联的新闻/分析记录已不存在', reason: 'candidate_orphan' };
+  }
+
+  const [quote, profile] = await Promise.all([getQuote(symbol), getProfile(symbol)]);
+  if (!quote) {
+    recordReject('no_quote');
+    return { reject: '无法获取报价', transient: true, reason: 'no_quote' };
+  }
+  if (profile && profile.isActivelyTrading === false) {
+    recordReject('not_actively_trading');
+    return { reject: '标的未在正常交易', reason: 'not_actively_trading' };
+  }
+  const price = quote.effective_price ?? quote.price;
+
+  // 准入门槛复查:入池时过了,但市值/价格/流动性可能在池中等待期间恶化
+  const gate = checkBuyEligibility({ profile, price });
+  if (!gate.ok) {
+    recordReject('eligibility_gate');
+    return { reject: `未过标的准入门槛: ${gate.reason}`, reason: 'eligibility_gate' };
+  }
+
+  // 冷却复查:上一轮分配刚成交的同票,本轮合并后的候选不能再买
+  const cooldown = await checkTradeCooldown(symbol, 'buy');
+  if (!cooldown.ok) {
+    recordReject('cooldown');
+    return { reject: cooldown.reason, reason: 'cooldown' };
+  }
+
+  const valuation = await getValuation();
+  const memories = await getMemories(symbol);
+  const decisionStartedAt = new Date();
+  const decision = await decideTrade({
+    analysis: analysisRow,
+    article,
+    quote,
+    profile,
+    portfolio: {
+      cash: valuation.cash,
+      totalValue: valuation.total_value,
+      positions: valuation.positions,
+    },
+    memories,
+    macroContext,
+  });
+
+  if (!decision.symbolValid) {
+    recordReject('symbol_invalid');
+    return { reject: `标的核验未通过: ${decision.validationReason}`, reason: 'symbol_invalid' };
+  }
+  if (decision.action !== 'buy' || decision.fraction <= 0) {
+    recordReject('llm_hold');
+    return { reject: `决策为${decision.action}: ${decision.reason}`.slice(0, 200), reason: 'llm_hold' };
+  }
+
+  // 仓位缩放链(与即时路径同序):档位/置信度/来源 → 宏观环境(extraScale)→ 连亏 → 风控官
+  const srcScore =
+    article.source_score === null || article.source_score === undefined
+      ? null
+      : Number(article.source_score);
+  const { sized, tierMult, confMult, srcMult } = scaleFraction({
+    fraction: decision.fraction,
+    tier: analysisRow.tier,
+    confidence: analysisRow.confidence,
+    sourceScore: srcScore,
+  });
+  if (sized !== decision.fraction) {
+    console.log(
+      `[allocator] ${symbol} 仓位缩放: ${decision.fraction} × 档位${tierMult} × 置信度${confMult} × 来源${srcMult} → ${sized}`
+    );
+    decision.fraction = sized;
+  }
+  if (extraScale !== 1) {
+    const scaled = round4(decision.fraction * extraScale);
+    console.log(`[allocator] ${symbol} 宏观/行业/冲突缩放 ×${extraScale}: ${decision.fraction} → ${scaled}`);
+    decision.fraction = scaled;
+  }
+  const streakMult = await getLossStreakMultiplier();
+  if (streakMult < 1) {
+    const cut = round4(decision.fraction * streakMult);
+    console.log(`[allocator] ${symbol} 连亏降仓 ×${streakMult}: ${decision.fraction} → ${cut}`);
+    decision.fraction = cut;
+  }
+
+  if (config.enableRiskOfficer) {
+    try {
+      const context = await buildRiskContext(valuation);
+      const verdict = await reviewProposedTrade({
+        proposal: {
+          symbol,
+          price,
+          fraction: decision.fraction,
+          estimatedSpend: round2(Math.min(decision.fraction * valuation.total_value, valuation.cash)),
+          stopLossPercent: decision.stopLossPercent,
+          takeProfitPercent: decision.takeProfitPercent,
+          reason: decision.reason,
+        },
+        analysis: analysisRow,
+        sourceScore: srcScore,
+        portfolio: {
+          cash: valuation.cash,
+          totalValue: valuation.total_value,
+          positionWeights: context.positionWeights,
+          sectorWeights: context.sectorWeights,
+          recentSells: context.recentSells,
+        },
+        memories,
+        macroContext,
+      });
+      if (!verdict.approve) {
+        console.warn(`[riskofficer] 否决 ${symbol} 买入: ${verdict.reason}`);
+        recordReject('risk_officer_veto');
+        return { reject: `风控官否决: ${verdict.reason}`, reason: 'risk_officer_veto' };
+      }
+      if (verdict.scale < 1) {
+        const scaled = round4(decision.fraction * verdict.scale);
+        console.log(`[riskofficer] ${symbol} 缩仓 ×${verdict.scale}: ${decision.fraction} → ${scaled}(${verdict.reason})`);
+        decision.fraction = scaled;
+      }
+      if (
+        verdict.adjustedStopLossPercent !== null &&
+        verdict.adjustedStopLossPercent < decision.stopLossPercent
+      ) {
+        decision.stopLossPercent = verdict.adjustedStopLossPercent;
+      }
+      if (verdict.reason) {
+        decision.reason = `${decision.reason};风控官:${verdict.reason}`.slice(0, 300);
+      }
+    } catch (err) {
+      console.warn(`[riskofficer] ${symbol} 审批失败,放弃本次买入: ${err.message}`);
+      recordReject('risk_officer_error');
+      return { reject: '风控官审批失败(fail-closed)', reason: 'risk_officer_error' };
+    }
+  }
+  if (decision.fraction <= 0) {
+    recordReject('risk_officer_veto');
+    return { reject: '缩放后仓位归零', reason: 'risk_officer_veto' };
+  }
+
+  return executeBuyStructured({
+    symbol,
+    price,
+    decision,
+    analysisRow,
+    article,
+    meta: {
+      run_id: currentRunId(),
+      decision_started_at: decisionStartedAt.toISOString(),
+      decision_finished_at: new Date().toISOString(),
+    },
+  });
+}
+
+/** 买入下单(结构化返回):漂移熔断 → 锁内结算。返回 { trade } | { reject, transient?, reason } */
+async function executeBuyStructured({ symbol, price, decision, analysisRow, article, meta = null }) {
   return withTradeLock(async () => {
     // 下单前重取最新报价:DeepSeek 决策(最长两次 90s 调用)耗时较长,
     // 决策前的价格可能已过期,绝不能按"消息发布瞬间的价格"成交
@@ -408,7 +643,7 @@ async function executeBuy({ symbol, price, decision, analysisRow, article, meta 
     if (!quote) {
       console.warn(`[trader] ${symbol} 下单时无法获取最新报价,放弃买入(fail-closed)`);
       recordReject('no_quote');
-      return null;
+      return { reject: '下单时无法获取最新报价', transient: true, reason: 'no_quote' };
     }
 
     // 漂移熔断:最新价相对决策时价格偏移过大,LLM 决策依据已失效
@@ -420,10 +655,10 @@ async function executeBuy({ symbol, price, decision, analysisRow, article, meta 
         `[trader] ${symbol} 下单时价格漂移 ${round2(driftPct)}%($${price} → $${fresh})超过阈值 ${config.buyPriceDriftAbortPercent}%,放弃买入`
       );
       recordReject('price_drift_abort');
-      return null;
+      return { reject: '下单时价格漂移超过熔断阈值', transient: true, reason: 'price_drift_abort' };
     }
 
-    const result = await settleBuyLocked({
+    return settleBuyLocked({
       symbol,
       quote,
       fraction: decision.fraction,
@@ -434,12 +669,16 @@ async function executeBuy({ symbol, price, decision, analysisRow, article, meta 
       analysisId: analysisRow.id,
       meta,
     });
-    if (result.reject) {
-      console.log(`[trader] ${symbol} 买入跳过: ${result.reject}`);
-      return null;
-    }
-    return result.trade;
   });
+}
+
+async function executeBuy(args) {
+  const result = await executeBuyStructured(args);
+  if (result?.reject) {
+    console.log(`[trader] ${args.symbol} 买入跳过: ${result.reject}`);
+    return null;
+  }
+  return result?.trade ?? null;
 }
 
 /**
@@ -502,7 +741,7 @@ async function settleBuyLocked({
   // transient 拒绝供开盘队列保留挂单重试——人工暂停/当日熔断都是临时状态)
   if (isTradingHalted()) {
     recordReject('trading_halted');
-    return { reject: '交易暂停开关已开启(人工)', transient: true };
+    return { reject: '交易暂停开关已开启(人工)', transient: true, reason: 'trading_halted' };
   }
   const dailyLoss = await evaluateDailyLossHalt(valuation.total_value);
   if (dailyLoss.halted) {
@@ -510,6 +749,7 @@ async function settleBuyLocked({
     return {
       reject: `当日亏损 ${round2(dailyLoss.dayPnlPercent ?? 0)}% 触发熔断,今日停止开新仓`,
       transient: true,
+      reason: 'daily_loss_halt',
     };
   }
   const maxPos = checkMaxPositions({
@@ -519,7 +759,7 @@ async function settleBuyLocked({
   });
   if (!maxPos.ok) {
     recordReject('max_positions');
-    return { reject: maxPos.reason };
+    return { reject: maxPos.reason, reason: 'max_positions' };
   }
 
   const existing = valuation.positions.find((p) => p.symbol === symbol);
@@ -531,7 +771,7 @@ async function settleBuyLocked({
   if (config.enableMacro) {
     if (regime.regime === 'macro_shock') {
       recordReject('macro_shock');
-      return { reject: '宏观冲击状态,暂停一切新买入', transient: true };
+      return { reject: '宏观冲击状态,暂停一切新买入', transient: true, reason: 'macro_shock' };
     }
     if (!existing && config.maxNewPositionsPerDay > 0) {
       const openedToday = await getNewPositionsToday();
@@ -540,6 +780,7 @@ async function settleBuyLocked({
         return {
           reject: `当日新开仓数已达上限 ${config.maxNewPositionsPerDay}`,
           transient: true,
+          reason: 'new_position_quota',
         };
       }
     }
@@ -583,6 +824,7 @@ async function settleBuyLocked({
         return {
           reject: `宏观环境额度不足(${headroom.binding}),买入金额钳制后低于下限`,
           transient: true,
+          reason: headroom.binding,
         };
       }
     }
@@ -591,7 +833,7 @@ async function settleBuyLocked({
   if (spend < config.minOrderAmount) {
     // 队列成交也走到这里:无运行上下文时 recordReject 为 no-op,归因误差可接受
     recordReject('below_min_amount');
-    return { reject: `买入金额 ${round2(spend)} 低于下限 ${config.minOrderAmount}` };
+    return { reject: `买入金额 ${round2(spend)} 低于下限 ${config.minOrderAmount}`, reason: 'below_min_amount' };
   }
 
   const profile = await getProfile(symbol).catch(() => null);
@@ -618,7 +860,7 @@ async function settleBuyLocked({
       if (spend < config.minOrderAmount) {
         // 钳制后跌破下限:归因为行业帽而非笼统的金额下限
         recordReject('sector_cap');
-        return { reject: `行业 ${sector} 集中度已达上限,买入金额钳制后低于下限` };
+        return { reject: `行业 ${sector} 集中度已达上限,买入金额钳制后低于下限`, reason: 'sector_cap' };
       }
     }
   }

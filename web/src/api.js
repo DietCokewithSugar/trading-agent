@@ -150,4 +150,5 @@ export const REJECT_LABELS = {
   cash_reserve: '现金保留下限',
   daily_budget: '当日预算耗尽',
   gross_exposure: '总敞口上限',
+  cooldown: '冷却期',
 };

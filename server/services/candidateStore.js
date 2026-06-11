@@ -142,6 +142,22 @@ export async function cancelLowScore(threshold, reason) {
   if (data?.length) console.log(`[pool] 宏观冲击:${data.length} 个低分候选已取消`);
 }
 
+/** 同票成交后取消其余兄弟候选(避免下一轮重复占用分配名额再被冷却拒绝) */
+export async function cancelSiblings(symbol, keepId, reason) {
+  if (!isPoolAvailable()) return;
+  const { error } = await supabase()
+    .from('candidate_signals')
+    .update({
+      status: 'cancelled',
+      status_reason: sanitizeProviderText(String(reason || '').slice(0, 200)),
+      updated_at: new Date().toISOString(),
+    })
+    .eq('symbol', symbol)
+    .neq('id', keepId)
+    .in('status', ACTIVE_STATUSES);
+  if (error) console.warn(`[pool] ${symbol} 取消兄弟候选失败: ${error.message}`);
+}
+
 /** 候选池状态分布(宏观页/SSE 用);不可用返回 null */
 export async function countByStatus() {
   if (!isPoolAvailable()) return null;

@@ -394,8 +394,16 @@ export async function runCycle({ fullFetch = false, trigger = 'scheduler' } = {}
           continue;
         }
 
+        // 候选行带 event_id 供审计(resolveEvent 只回写了数据库行,内存行补上)
+        if (dedup.eventId && !analysisRow.event_id) analysisRow.event_id = dedup.eventId;
+
         const result = await handleSignal(article, analysisRow);
-        if (result?.queued) {
+        if (result?.pooled) {
+          // 利好信号已入候选池:事件视同已消费,重复报道不再二次入池;
+          // 是否真正成交由资金分配器按分数与预算决定
+          summary.pooled += 1;
+          await markEventTraded(dedup.eventId, null);
+        } else if (result?.queued) {
           // 休市信号已挂入开盘队列:事件视同已消费,后续重复报道不再触发
           summary.queued += 1;
           await markEventTraded(dedup.eventId, null);

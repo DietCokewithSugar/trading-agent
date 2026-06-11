@@ -7,6 +7,7 @@ import { processPendingOrders } from './services/openQueue.js';
 import { backfillForwardReturns } from './services/signalReturns.js';
 import { refreshCalendar } from './services/macroCalendar.js';
 import { initMacroRegime, recomputeRegime } from './services/macroRegime.js';
+import { maybeRunAllocation } from './services/allocator.js';
 import { getMarketSession } from './services/fmp.js';
 import { broadcast, clientCount } from './services/bus.js';
 
@@ -102,6 +103,14 @@ export function startScheduler() {
         console.error(`[scheduler] 宏观环境重算失败: ${err.message}`)
       );
     }, 10 * 60_000);
+
+    // 资金分配器:每分钟探测,内部限速(盘中每 ALLOCATION_INTERVAL_MINUTES 一轮,
+    // 开盘后的第一个 tick 立即执行,清算隔夜积累的候选;非盘中不执行)
+    setInterval(() => {
+      maybeRunAllocation().catch((err) =>
+        console.error(`[scheduler] 资金分配失败: ${err.message}`)
+      );
+    }, 60_000);
 
     // 启动:加载上次宏观状态(重启延续)+ 先抓一次日历
     setTimeout(() => {
