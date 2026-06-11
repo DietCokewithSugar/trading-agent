@@ -22,6 +22,7 @@ export const api = {
   stats: () => get('/stats'),
   performance: () => get('/performance'),
   signalStats: () => get('/signal-stats'),
+  macro: () => get('/macro'),
   pendingOrders: () => get('/pending-orders'),
   symbol: (symbol) => get(`/symbol/${encodeURIComponent(symbol)}`),
   status: () => get('/status'),
@@ -107,6 +108,47 @@ export const TRIGGER_LABELS = {
   stop_loss: '自动止损',
   take_profit: '自动止盈',
   review: '持仓复查',
+};
+
+// ===== 宏观环境与候选池(014)的标签映射 =====
+
+export const REGIME_LABELS = {
+  risk_on: '风险偏好',
+  neutral: '中性',
+  risk_off: '避险',
+  macro_shock: '宏观冲击',
+};
+
+export const REGIME_TAG_COLORS = {
+  risk_on: 'green',
+  neutral: 'default',
+  risk_off: 'orange',
+  macro_shock: 'red',
+};
+
+export const CANDIDATE_STATUS_LABELS = {
+  pending: '待分配',
+  allocated: '已成交',
+  capital_constrained: '资金受限',
+  macro_filtered: '宏观过滤',
+  conflict_hold: '冲突搁置',
+  rejected: '已拒绝',
+  expired: '已过期',
+  cancelled: '已取消',
+};
+
+export const MACRO_EVENT_TYPE_LABELS = {
+  CPI: 'CPI 通胀',
+  PPI: 'PPI 通胀',
+  FOMC: '美联储/利率',
+  NFP: '非农就业',
+  GDP: 'GDP',
+  yields: '国债收益率',
+  tariffs: '关税/贸易',
+  geopolitics: '地缘政治',
+  energy: '能源',
+  fiscal: '财政',
+  other: '其他',
 };
 
 // ===== 管理页运行指标的标签映射 =====

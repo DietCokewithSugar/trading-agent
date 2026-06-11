@@ -1,9 +1,10 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { Alert, App as AntApp, Badge, Card, Col, Row, Statistic, Tabs, Tag } from 'antd';
-import { api, fmtMoney, fmtNum, fmtPercent, SESSION_LABELS } from './api.js';
+import { api, fmtMoney, fmtNum, fmtPercent, SESSION_LABELS, REGIME_LABELS } from './api.js';
 import Dashboard from './components/Dashboard.jsx';
 import NewsFeed from './components/NewsFeed.jsx';
 import TradesPage from './components/TradesPage.jsx';
+import MacroPage from './components/MacroPage.jsx';
 import SignalStatsPage from './components/SignalStatsPage.jsx';
 import SymbolModal from './components/SymbolModal.jsx';
 import AdminPage from './components/AdminPage.jsx';
@@ -12,6 +13,7 @@ const TABS = [
   { key: 'dashboard', label: '仪表盘' },
   { key: 'news', label: '新闻分析' },
   { key: 'trades', label: '交易记录' },
+  { key: 'macro', label: '宏观' },
   { key: 'signals', label: '信号质量' },
 ];
 
@@ -30,6 +32,8 @@ function MainApp() {
   const [trades, setTrades] = useState([]);
   // 新闻数据由新闻页自行按筛选条件拉取,这里只广播"有新内容"的版本号
   const [newsVersion, setNewsVersion] = useState(0);
+  // 宏观页同理:SSE macro 事件只递增版本号,页面自行拉取
+  const [macroVersion, setMacroVersion] = useState(0);
   const [stats, setStats] = useState(null);
   const [performance, setPerformance] = useState(null);
   const [status, setStatus] = useState(null);
@@ -141,6 +145,16 @@ function MainApp() {
       } catch { /* 忽略畸形数据 */ }
     });
     es.addEventListener('cycle', () => api.status().then(setStatus).catch(() => {}));
+    // 宏观环境切换 / 候选池变化:递增版本号触发宏观页重拉,regime 切换时弹提示
+    es.addEventListener('macro', (e) => {
+      setMacroVersion((v) => v + 1);
+      try {
+        const m = JSON.parse(e.data);
+        if (m.regime && REGIME_LABELS[m.regime]) {
+          pushToast(`宏观环境切换:${REGIME_LABELS[m.regime]}`, m.regime === 'risk_on' ? 'up' : m.regime === 'neutral' ? '' : 'down');
+        }
+      } catch { /* 忽略畸形数据 */ }
+    });
     // 管理后台执行了全量数据重置:全部数据作废,整体刷新
     es.addEventListener('reset', () => {
       refresh();
@@ -220,6 +234,7 @@ function MainApp() {
         )}
         {tab === 'news' && <NewsFeed version={newsVersion} onSymbolClick={setActiveSymbol} />}
         {tab === 'trades' && <TradesPage trades={trades} onSymbolClick={setActiveSymbol} />}
+        {tab === 'macro' && <MacroPage version={macroVersion} onSymbolClick={setActiveSymbol} />}
         {tab === 'signals' && <SignalStatsPage />}
       </main>
 
