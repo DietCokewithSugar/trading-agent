@@ -240,6 +240,16 @@ cd web && npm run dev      # 终端 2:启动 Vite :5173(已配置 /api 代理)
 | `LOSS_STREAK_COUNT` / `LOSS_STREAK_SCALE` | `3` / `0.5` | 硬风控:最近 N 笔卖出全亏时买入比例乘以该系数;`LOSS_STREAK_SCALE=1` 关闭 |
 | `PRESS_BULLISH_PENALTY` | `0.75` | 公司公告类来源的利好信号在置信度门槛上的折价(1=不折价) |
 | `PENDING_ORDER_MAX_AGE_HOURS` | `96` | 开盘队列挂单的最长等待时长(小时),超时作废,需执行 010 迁移 |
+| `ENABLE_MACRO` | `true` | 宏观信号层 + 候选池 + 资金分配器总开关(需执行 014 迁移);关闭后退回纯新闻即时模式 |
+| `CALENDAR_POLL_MINUTES` | `60` | 经济日历刷新间隔(分钟);数据套餐不含该端点时自动停用黑窗,其余宏观功能不受影响 |
+| `MACRO_EVENT_VALIDITY_HOURS` | `72` | 宏观事件有效窗口(小时):聚合市场环境时只看窗口内事件 |
+| `MACRO_SHOCK_HOURS` | `6` | 宏观冲击锁定时长(小时):一档高置信避险事件触发后暂停一切新开仓 |
+| `BLACKOUT_BEFORE_MINUTES` / `BLACKOUT_AFTER_MINUTES` | `30` / `30` | 重大数据发布黑窗:发布前/后 N 分钟不执行买入分配(卖出/止损不受影响);设 0 关闭 |
+| `ALLOCATION_INTERVAL_MINUTES` | `15` | 资金分配器盘中节奏:每 N 分钟一轮(开盘首轮立即清算隔夜候选) |
+| `MAX_ALLOCATIONS_PER_RUN` | `3` | 每轮分配最多执行的买入候选数(LLM 决策只对头部候选发生) |
+| `CANDIDATE_MAX_AGE_HOURS` | `24` | 候选有效期(小时),超龄未分配自动过期 |
+| `MAX_NEW_POSITIONS_PER_DAY` | `3` | 当日最多开新仓数(加仓不计);设 0 关闭 |
+| `CONFLICT_WINDOW_MINUTES` | `120` | 同票多空冲突判定窗口(分钟) |
 | `ADMIN_TOKEN` | 空 | 设置后手动触发接口需要鉴权;同时是管理后台(`#/admin`)的登录口令,未设置时管理接口整组禁用 |
 
 ## API 一览
