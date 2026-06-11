@@ -10,6 +10,7 @@ import {
   Row,
   Space,
   Statistic,
+  Switch,
   Table,
   Tag,
   Typography,
@@ -75,6 +76,7 @@ export default function AdminPage() {
   const [status, setStatus] = useState(null);
   const [metrics, setMetrics] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [haltBusy, setHaltBusy] = useState(false);
   const [confirmText, setConfirmText] = useState('');
   const [message, setMessage] = useState(null);
 
@@ -142,6 +144,24 @@ export default function AdminPage() {
       setError(err.message);
     } finally {
       setBusy(false);
+    }
+  };
+
+  const toggleTradingHalt = async (halted) => {
+    setHaltBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await adminApi.tradingHalt(token, halted);
+      setMessage(
+        `交易暂停开关已${result.halted ? '开启:停止开新仓' : '关闭:恢复正常交易'}${result.persisted ? '' : '(未持久化,重启后失效,请执行 013 迁移)'}`
+      );
+      // 立即重拉状态,开关显示与服务端对齐
+      adminApi.status(token).then(setStatus).catch(() => {});
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setHaltBusy(false);
     }
   };
 
@@ -350,6 +370,41 @@ export default function AdminPage() {
               <Button type="primary" onClick={triggerCycle} loading={busy} disabled={status?.running}>
                 {status?.running ? '运行中…' : '立即执行一轮'}
               </Button>
+            </Card>
+
+            <Card title="交易暂停开关">
+              <Typography.Paragraph type="secondary" style={{ fontSize: 12.5 }}>
+                人工风控开关:开启后停止开新仓(新闻买入与开盘队列买单全部拦截),
+                所有卖出(止损/止盈/持仓复查/新闻卖出)照常执行。状态跨重启保留。
+                与「初始化数据」期间的系统自动暂停是两个独立机制。
+              </Typography.Paragraph>
+              <Space align="center" size={16}>
+                <Switch
+                  checked={status?.tradingHalted === true}
+                  loading={haltBusy}
+                  onChange={toggleTradingHalt}
+                  checkedChildren="已暂停"
+                  unCheckedChildren="正常"
+                />
+                {status?.tradingHalted ? (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    message="已暂停开新仓:做多信号与开盘队列买单全部拦截,卖出与止损保护照常"
+                    style={{ marginBottom: 0 }}
+                  />
+                ) : (
+                  <Alert type="info" showIcon message="交易正常:未启用人工暂停" style={{ marginBottom: 0 }} />
+                )}
+              </Space>
+              {status?.riskControls?.dailyLossTripped && (
+                <Alert
+                  type="warning"
+                  showIcon
+                  message={`当日亏损熔断已触发(阈值 -${status.riskControls.dailyLossHaltPercent}%):今日停止开新仓,次日自动恢复`}
+                  style={{ marginTop: 12 }}
+                />
+              )}
             </Card>
 
             <Card title="危险区:初始化所有数据">

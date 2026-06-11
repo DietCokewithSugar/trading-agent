@@ -2,6 +2,13 @@ import { supabase } from '../db.js';
 import { config } from '../config.js';
 import { getQuote, getProfile, getMarketSession, normalizeTs } from './fmp.js';
 import { currentRunId, recordReject } from './metrics.js';
+import { isTradingHalted } from './tradingHalt.js';
+import {
+  evaluateDailyLossHalt,
+  checkMaxPositions,
+  sectorCapHeadroom,
+  getLossStreakMultiplier,
+} from './riskControls.js';
 import { decideTrade, reviewProposedTrade } from './deepseek.js';
 import { getPortfolio, getValuation } from './portfolio.js';
 import { reflectOnClosedTrade, getMemories } from './memoryService.js';
@@ -145,6 +152,15 @@ async function recordFillDetails(trade, fill, extras = {}) {
  */
 export async function handleSignal(article, analysisRow) {
   const symbol = analysisRow.symbol;
+
+  // 人工交易暂停开关(kill switch):只拦做多信号,连报价/档案/LLM 请求都不发起。
+  // 卖向信号与保护性卖出(止损/止盈/复查)完全不经此检查
+  if (analysisRow.sentiment === 'bullish' && isTradingHalted()) {
+    console.log(`[trader] ${symbol} 交易暂停开关已开启(人工),跳过做多信号`);
+    recordReject('trading_halted');
+    return null;
+  }
+
   const [quote, profile] = await Promise.all([getQuote(symbol), getProfile(symbol)]);
   if (!quote) {
     console.warn(`[trader] ${symbol} 无法获取报价,跳过`);
@@ -171,6 +187,30 @@ export async function handleSignal(article, analysisRow) {
   }
 
   const valuation = await getValuation();
+
+  // 组合级硬风控预检(只拦做多;确定性规则先行,省一次 LLM 决策调用):
+  // 当日亏损熔断 → 持仓数上限。settleBuyLocked 内还有锁内的最终防线(覆盖开盘队列)。
+  // 取舍:bullish 信号理论上也可能让 LLM 给出卖出决策,预检会一并拦掉——
+  // 与现有 eligibility gate 同构的已接受取舍,保护性卖出不经此路径
+  if (analysisRow.sentiment === 'bullish') {
+    const dailyLoss = await evaluateDailyLossHalt(valuation.total_value);
+    if (dailyLoss.halted) {
+      console.log(`[trader] ${symbol} 当日亏损熔断生效,今日停止开新仓,跳过`);
+      recordReject('daily_loss_halt');
+      return null;
+    }
+    const maxPos = checkMaxPositions({
+      positions: valuation.positions,
+      symbol,
+      maxOpenPositions: config.maxOpenPositions,
+    });
+    if (!maxPos.ok) {
+      console.log(`[trader] ${symbol} ${maxPos.reason},跳过`);
+      recordReject('max_positions');
+      return null;
+    }
+  }
+
   // 历史教训(FinMem 式记忆):该股票及全局的平仓复盘结论,注入决策上下文
   const memories = await getMemories(symbol);
   // 决策窗口起点:从这里到风控官审批结束,是"决策依据价格的失效窗口"(漂移熔断防的那段)
@@ -223,6 +263,17 @@ export async function handleSignal(article, analysisRow) {
         `[trader] ${symbol} 仓位缩放: ${decision.fraction} × 档位${tierMult} × 置信度${confMult} × 来源${srcMult} → ${sized}`
       );
       decision.fraction = sized;
+    }
+
+    // 连亏降仓(确定性规则,先于风控官,缩放后的 fraction 对风控官可见):
+    // 最近 N 笔卖出全部亏损说明当前判断系统性失准,买入比例打折
+    const streakMult = await getLossStreakMultiplier();
+    if (streakMult < 1) {
+      const cut = round4(decision.fraction * streakMult);
+      console.log(
+        `[trader] ${symbol} 连亏降仓 ×${streakMult}: ${decision.fraction} → ${cut}(最近 ${config.lossStreakCount} 笔卖出均亏损)`
+      );
+      decision.fraction = cut;
     }
 
     // 风控官审批(TradingAgents 式独立风控):站在组合角度复核这笔买入,
@@ -440,6 +491,30 @@ async function settleBuyLocked({
   // 组合状态以下单时刻为准
   const valuation = await getValuation();
 
+  // 组合级硬风控(交易锁内的最终防线,覆盖新闻买入与开盘队列成交;
+  // transient 拒绝供开盘队列保留挂单重试——人工暂停/当日熔断都是临时状态)
+  if (isTradingHalted()) {
+    recordReject('trading_halted');
+    return { reject: '交易暂停开关已开启(人工)', transient: true };
+  }
+  const dailyLoss = await evaluateDailyLossHalt(valuation.total_value);
+  if (dailyLoss.halted) {
+    recordReject('daily_loss_halt');
+    return {
+      reject: `当日亏损 ${round2(dailyLoss.dayPnlPercent ?? 0)}% 触发熔断,今日停止开新仓`,
+      transient: true,
+    };
+  }
+  const maxPos = checkMaxPositions({
+    positions: valuation.positions,
+    symbol,
+    maxOpenPositions: config.maxOpenPositions,
+  });
+  if (!maxPos.ok) {
+    recordReject('max_positions');
+    return { reject: maxPos.reason };
+  }
+
   // 风控:单笔买入金额 ≤ min(决策比例×组合总值, 总资产×maxBuyCashFraction, 剩余现金)
   let spend = Math.min(
     fraction * valuation.total_value,
@@ -459,8 +534,36 @@ async function settleBuyLocked({
     return { reject: `买入金额 ${round2(spend)} 低于下限 ${config.minOrderAmount}` };
   }
 
-  // 模拟成交:在参考价上施加不利滑点(点差/时段/波动/订单冲击)
   const profile = await getProfile(symbol).catch(() => null);
+
+  // 风控:买后该行业市值 ≤ 组合总值的 maxSectorFraction(钳制而非否决,与 positionCap 一致;
+  // 档案 24h 缓存,锁内基本不打 FMP;未知行业自成一桶)
+  if (config.maxSectorFraction > 0) {
+    const sector = profile?.sector || '未知';
+    let sectorValue = 0;
+    for (const p of valuation.positions) {
+      const pp = await getProfile(p.symbol).catch(() => null);
+      if ((pp?.sector || '未知') === sector) sectorValue += p.market_value;
+    }
+    const headroom = sectorCapHeadroom({
+      totalValue: valuation.total_value,
+      sectorValue,
+      maxSectorFraction: config.maxSectorFraction,
+    });
+    if (spend > headroom) {
+      console.log(
+        `[trader] ${symbol} 行业(${sector})集中度钳制: $${round2(spend)} → $${round2(headroom)}`
+      );
+      spend = headroom;
+      if (spend < config.minOrderAmount) {
+        // 钳制后跌破下限:归因为行业帽而非笼统的金额下限
+        recordReject('sector_cap');
+        return { reject: `行业 ${sector} 集中度已达上限,买入金额钳制后低于下限` };
+      }
+    }
+  }
+
+  // 模拟成交:在参考价上施加不利滑点(点差/时段/波动/订单冲击)
   const fill = computeFill({ side: 'buy', quote, profile, notional: spend });
   if (fill.slippageBps > 0) {
     console.log(

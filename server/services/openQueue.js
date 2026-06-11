@@ -80,9 +80,13 @@ async function fillPendingOrder(order) {
     if (result?.trade) {
       await closeOrder(order, 'filled', result.trade.id, '开盘成交');
       broadcast('trade', result.trade);
-    } else if (result?.reject) {
+    } else if (result?.reject && !result.transient) {
       console.log(`[queue] 订单 #${order.id} ${order.symbol} 作废: ${result.reject}`);
       await closeOrder(order, 'cancelled', null, result.reject);
+    } else if (result?.reject) {
+      // transient 拒绝(人工交易暂停/当日亏损熔断):临时状态,保留挂单下轮/次日重试,
+      // 超龄仍由 pendingOrderMaxAgeHours 兜底作废
+      console.log(`[queue] 订单 #${order.id} ${order.symbol} 暂缓成交: ${result.reject}`);
     }
     // result 为 null(报价暂不可得):留在队列,下轮重试
     return;
