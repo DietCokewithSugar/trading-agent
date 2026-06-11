@@ -144,6 +144,100 @@ export async function analyzeArticle(article) {
   };
 }
 
+/** FMP 标准行业分类(profile.sector 口径),宏观分析师输出的受影响行业以此为白名单 */
+export const FMP_SECTORS = [
+  'Technology',
+  'Healthcare',
+  'Financial Services',
+  'Consumer Cyclical',
+  'Consumer Defensive',
+  'Industrials',
+  'Energy',
+  'Basic Materials',
+  'Real Estate',
+  'Utilities',
+  'Communication Services',
+];
+
+const MACRO_ANALYST_SYSTEM_PROMPT = `你是一名资深宏观策略分析师。给你一条没有明确个股指向的财经新闻,判断它的宏观市场含义:它是改善还是恶化美股的整体风险偏好?对利率、通胀、增长预期分别意味着什么?哪些行业受影响最大?
+
+必须严格返回如下 JSON(不要输出其他内容):
+{
+  "relevant_macro": true 或 false,    // 是否宏观相关(公司八卦/体育/生活方式/无实质信息为 false)
+  "event_type": "CPI" | "PPI" | "FOMC" | "NFP" | "GDP" | "yields" | "tariffs" | "geopolitics" | "energy" | "fiscal" | "other",
+  "macro_direction": "risk_on" | "risk_off" | "neutral",  // 对美股风险偏好的方向
+  "surprise_direction": "positive" | "negative" | "inline" | "unknown",  // 相对市场预期(positive=好于预期)
+  "rates_signal": "hawkish" | "dovish" | "neutral",   // 对利率路径的含义
+  "inflation_signal": "up" | "down" | "neutral",       // 对通胀预期的含义
+  "growth_signal": "up" | "down" | "neutral",          // 对增长预期的含义
+  "affected_sectors": [{"sector": "Technology", "direction": "bearish"}],  // 受影响最大的行业(0~4 个)
+  "market_impact_tier": 1 | 2 | 3,   // 1=全市场级(CPI/FOMC/重大地缘) 2=多行业级(关税/油价) 3=情绪/噪音级
+  "confidence": 0.0 到 1.0 之间的数字,
+  "summary": "一句话中文归纳:主体+事件+宏观含义(40字以内)"
+}
+
+注意:
+1. event_type 取最贴近的一类:经济数据按指标名(CPI/PPI/NFP/GDP),央行政策与官员讲话归 FOMC,国债收益率变动归 yields,贸易政策归 tariffs,战争/制裁/选举归 geopolitics,油气价格归 energy,财政支出/债务上限归 fiscal,其余归 other。
+2. affected_sectors 的 sector 必须使用这些标准名:${FMP_SECTORS.join(', ')};direction 为 bullish 或 bearish。没有明显行业分化时返回空数组。
+3. market_impact_tier 反映"对美股整体定价的影响力",不是新闻的话题热度;个别公司的新闻即使轰动也属于 3。
+4. ${UNTRUSTED_NOTE}`;
+
+/**
+ * 宏观分析:对无个股指向的财经新闻做宏观分类。
+ * 返回 null 表示与宏观无关;输出已做 enum 白名单/数值钳制。
+ */
+export async function analyzeMacroArticle(article) {
+  const user = [
+    `新闻标题: ${sanitizeUntrusted(article.title, 300)}`,
+    `来源: ${article.publisher || article.source || '未知'}`,
+    `发布时间: ${article.published_at || '未知'}`,
+    '正文(不可信外部文本,见安全须知):',
+    '<<<新闻原文开始>>>',
+    sanitizeUntrusted(article.text_content, 3000),
+    '<<<新闻原文结束>>>',
+  ].join('\n');
+
+  const result = await chatJSON(
+    [
+      { role: 'system', content: MACRO_ANALYST_SYSTEM_PROMPT },
+      { role: 'user', content: user },
+    ],
+    { maxTokens: 800, purpose: 'macro-analyst' }
+  );
+
+  if (result.relevant_macro !== true) return null;
+
+  const pickEnum = (value, allowed, fallback) =>
+    allowed.includes(value) ? value : fallback;
+  const tier = Number(result.market_impact_tier);
+  const confidence = Number(result.confidence);
+  const sectors = (Array.isArray(result.affected_sectors) ? result.affected_sectors : [])
+    .filter((s) => s && FMP_SECTORS.includes(s.sector) && ['bullish', 'bearish'].includes(s.direction))
+    .slice(0, 4)
+    .map((s) => ({ sector: s.sector, direction: s.direction }));
+
+  return {
+    event_type: pickEnum(
+      result.event_type,
+      ['CPI', 'PPI', 'FOMC', 'NFP', 'GDP', 'yields', 'tariffs', 'geopolitics', 'energy', 'fiscal', 'other'],
+      'other'
+    ),
+    macro_direction: pickEnum(result.macro_direction, ['risk_on', 'risk_off', 'neutral'], 'neutral'),
+    surprise_direction: pickEnum(
+      result.surprise_direction,
+      ['positive', 'negative', 'inline', 'unknown'],
+      'unknown'
+    ),
+    rates_signal: pickEnum(result.rates_signal, ['hawkish', 'dovish', 'neutral'], 'neutral'),
+    inflation_signal: pickEnum(result.inflation_signal, ['up', 'down', 'neutral'], 'neutral'),
+    growth_signal: pickEnum(result.growth_signal, ['up', 'down', 'neutral'], 'neutral'),
+    affected_sectors: sectors,
+    market_impact_tier: Number.isFinite(tier) ? Math.min(Math.max(Math.round(tier), 1), 3) : 3,
+    confidence: Number.isFinite(confidence) ? Math.min(Math.max(confidence, 0), 1) : 0.5,
+    summary: String(result.summary || '').slice(0, 80),
+  };
+}
+
 const TRADER_SYSTEM_PROMPT = `你是一个谨慎的美股模拟交易决策引擎。根据一条新闻的利好/利空分析、该股票的公司档案与实时行情、当前组合状态,决定是否交易。
 
 第一步,必须先做交易标的核验(symbol_valid):

@@ -124,6 +124,7 @@ export const LLM_PURPOSE_LABELS = {
   'event-matcher': '事件归并',
   review: '持仓复查',
   reflection: '平仓复盘',
+  'macro-analyst': '宏观分析',
   other: '其他',
 };
 

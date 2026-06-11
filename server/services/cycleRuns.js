@@ -42,11 +42,21 @@ export function aggregateRejectReasons(runs) {
   return merged;
 }
 
+// 014 新增的可选计数列:旧库(未执行 014)缺列时逐个剥离重试
+const OPTIONAL_RUN_COLUMNS = ['pooled', 'macro_events'];
+
 /** 写入一轮运行指标,绝不抛错 */
 export async function saveCycleRun(row) {
   if (tableMissing) return;
   try {
-    const { error } = await supabase().from('cycle_runs').insert(row);
+    const payload = { ...row };
+    let { error } = await supabase().from('cycle_runs').insert(payload);
+    while (error) {
+      const col = OPTIONAL_RUN_COLUMNS.find((c) => c in payload && error.message.includes(c));
+      if (!col) break;
+      delete payload[col];
+      ({ error } = await supabase().from('cycle_runs').insert(payload));
+    }
     if (error) {
       if (isMissingTable(error)) warnMissingOnce();
       else console.warn(`[metrics] 运行指标落库失败: ${error.message}`);
