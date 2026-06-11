@@ -20,6 +20,11 @@ export const config = {
   deepseekBaseUrl: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
   // 模型 ID 可配置,例如 deepseek-chat / deepseek-reasoner,或官方文档中最新的模型名
   deepseekModel: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
+  // LLM 成本估算单价(美元/百万 token),仅用于管理页运行指标展示。
+  // 默认值为 deepseek-chat 牌价的缓存未命中口径(估算上限,命中缓存的输入实际更便宜),
+  // 牌价调整或更换模型时通过环境变量覆盖
+  deepseekCostPer1MInput: num0(process.env.DEEPSEEK_COST_PER_1M_INPUT, 0.56),
+  deepseekCostPer1MOutput: num0(process.env.DEEPSEEK_COST_PER_1M_OUTPUT, 1.68),
 
   // Supabase(服务端使用 service_role key,绕过 RLS)
   supabaseUrl: process.env.SUPABASE_URL || '',

@@ -1,5 +1,6 @@
 import { config } from '../config.js';
 import { isHoliday, isEarlyClose } from './marketCalendar.js';
+import { recordProviderError } from './metrics.js';
 
 const BASE = 'https://financialmodelingprep.com/stable';
 
@@ -9,12 +10,18 @@ async function fmpGet(path, params = {}) {
     if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
   }
   url.searchParams.set('apikey', config.fmpApiKey);
-  const res = await fetch(url, { signal: AbortSignal.timeout(20000) });
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`FMP ${path} 请求失败 ${res.status}: ${body.slice(0, 200)}`);
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(20000) });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`FMP ${path} 请求失败 ${res.status}: ${body.slice(0, 200)}`);
+    }
+    return res.json();
+  } catch (err) {
+    // 供应商错误计数(HTTP 非 2xx 与网络/超时异常),原样抛出由调用方降级
+    recordProviderError('fmp', err.message);
+    throw err;
   }
-  return res.json();
 }
 
 /** 最新个股新闻(带 symbol) */
@@ -66,8 +73,8 @@ export function getMarketSession(date = new Date()) {
   return 'closed';
 }
 
-/** FMP 返回的时间戳有秒/毫秒两种,统一为毫秒 */
-function normalizeTs(ts) {
+/** FMP 返回的时间戳有秒/毫秒两种,统一为毫秒(trader 记录成交报价时间戳也用它) */
+export function normalizeTs(ts) {
   const n = Number(ts);
   if (!Number.isFinite(n) || n <= 0) return null;
   return n > 1e12 ? n : n * 1000;

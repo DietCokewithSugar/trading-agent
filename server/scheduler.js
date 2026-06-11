@@ -23,7 +23,7 @@ export function startScheduler() {
   let tick = 0;
   setInterval(() => {
     tick += 1;
-    runCycle({ fullFetch: tick % fullEvery === 0 }).catch((err) =>
+    runCycle({ fullFetch: tick % fullEvery === 0, trigger: 'scheduler' }).catch((err) =>
       console.error(`[scheduler] 新闻轮询失败: ${err.message}`)
     );
   }, newsSec * 1000);
@@ -92,7 +92,7 @@ export function startScheduler() {
 
   // 启动后先跑一轮全源抓取
   setTimeout(() => {
-    runCycle({ fullFetch: true }).catch((err) =>
+    runCycle({ fullFetch: true, trigger: 'scheduler' }).catch((err) =>
       console.error(`[scheduler] 启动首轮失败: ${err.message}`)
     );
   }, 5_000);

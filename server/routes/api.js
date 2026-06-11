@@ -248,7 +248,7 @@ router.post(
       return res.status(409).json({ error: '当前已有一轮在运行中' });
     }
     if (!config.adminToken) lastAnonCycleAt = Date.now();
-    runCycle({ fullFetch: true }); // 异步执行,不阻塞响应
+    runCycle({ fullFetch: true, trigger: 'manual' }); // 异步执行,不阻塞响应
     res.json({ started: true });
   })
 );

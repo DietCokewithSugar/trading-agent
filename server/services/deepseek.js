@@ -1,33 +1,54 @@
 import { config } from '../config.js';
+import { recordLlmCall, recordProviderError } from './metrics.js';
 
 /**
- * 调用 DeepSeek Chat Completions(OpenAI 兼容),强制返回 JSON。
+ * 调用 DeepSeek Chat Completions(OpenAI 兼容),强制返回 JSON,
+ * 并记录时延/Token 用量到运行指标(purpose 标记调用用途,管理页按用途分桶展示)。
  * 文档: https://api-docs.deepseek.com/
  */
-async function chatJSON(messages, { temperature = 0.2, maxTokens = 1200 } = {}) {
-  const res = await fetch(`${config.deepseekBaseUrl}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${config.deepseekApiKey}`,
-    },
-    body: JSON.stringify({
-      model: config.deepseekModel,
-      messages,
-      temperature,
-      max_tokens: maxTokens,
-      response_format: { type: 'json_object' },
-    }),
-    signal: AbortSignal.timeout(90000),
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`DeepSeek 请求失败 ${res.status}: ${body.slice(0, 300)}`);
+async function chatJSONWithMeta(messages, { temperature = 0.2, maxTokens = 1200, purpose = 'other' } = {}) {
+  const startedAt = Date.now();
+  try {
+    const res = await fetch(`${config.deepseekBaseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${config.deepseekApiKey}`,
+      },
+      body: JSON.stringify({
+        model: config.deepseekModel,
+        messages,
+        temperature,
+        max_tokens: maxTokens,
+        response_format: { type: 'json_object' },
+      }),
+      signal: AbortSignal.timeout(90000),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      throw new Error(`DeepSeek 请求失败 ${res.status}: ${body.slice(0, 300)}`);
+    }
+    const data = await res.json();
+    const content = data?.choices?.[0]?.message?.content;
+    if (!content) throw new Error('DeepSeek 返回内容为空');
+    const json = JSON.parse(content);
+    const usage = {
+      promptTokens: Number(data?.usage?.prompt_tokens) || 0,
+      completionTokens: Number(data?.usage?.completion_tokens) || 0,
+    };
+    const latencyMs = Date.now() - startedAt;
+    recordLlmCall({ purpose, ...usage, latencyMs, ok: true });
+    return { json, usage, latencyMs };
+  } catch (err) {
+    recordProviderError('deepseek', err.message);
+    recordLlmCall({ purpose, latencyMs: Date.now() - startedAt, ok: false });
+    throw err;
   }
-  const data = await res.json();
-  const content = data?.choices?.[0]?.message?.content;
-  if (!content) throw new Error('DeepSeek 返回内容为空');
-  return JSON.parse(content);
+}
+
+async function chatJSON(messages, opts = {}) {
+  const { json } = await chatJSONWithMeta(messages, opts);
+  return json;
 }
 
 /**
@@ -98,18 +119,28 @@ export async function analyzeArticle(article) {
     .filter(Boolean)
     .join('\n');
 
-  const result = await chatJSON([
-    { role: 'system', content: ANALYST_SYSTEM_PROMPT },
-    { role: 'user', content: user },
-  ]);
+  const { json: result, usage, latencyMs } = await chatJSONWithMeta(
+    [
+      { role: 'system', content: ANALYST_SYSTEM_PROMPT },
+      { role: 'user', content: user },
+    ],
+    { purpose: 'analyst' }
+  );
 
+  // LLM 调用明细随结果返回,供分析行落库(时间线/用量审计)
+  const llm = {
+    latencyMs,
+    promptTokens: usage.promptTokens,
+    completionTokens: usage.completionTokens,
+  };
   if (!result.relevant || !result.symbol || result.sentiment === 'neutral') {
-    return { ...result, tier: null };
+    return { ...result, tier: null, llm };
   }
   return {
     ...result,
     symbol: String(result.symbol).toUpperCase(),
     tier: computeTier(result.impact_strength, result.impact_scope),
+    llm,
   };
 }
 
@@ -211,10 +242,13 @@ export async function decideTrade({ analysis, article, quote, profile, portfolio
     1
   );
 
-  const result = await chatJSON([
-    { role: 'system', content: TRADER_SYSTEM_PROMPT },
-    { role: 'user', content: user },
-  ]);
+  const result = await chatJSON(
+    [
+      { role: 'system', content: TRADER_SYSTEM_PROMPT },
+      { role: 'user', content: user },
+    ],
+    { purpose: 'trader' }
+  );
 
   const clamp = (value, min, max, fallback) => {
     const n = Number(value);
@@ -300,7 +334,7 @@ export async function reviewProposedTrade({ proposal, analysis, portfolio, memor
       { role: 'system', content: RISK_OFFICER_SYSTEM_PROMPT },
       { role: 'user', content: user },
     ],
-    { maxTokens: 600 }
+    { maxTokens: 600, purpose: 'risk-officer' }
   );
 
   const scale = Number(result.scale);
@@ -356,7 +390,7 @@ export async function reviewPositions({ positions, cash, totalValue }) {
       { role: 'system', content: REVIEW_SYSTEM_PROMPT },
       { role: 'user', content: user },
     ],
-    { maxTokens: 2000 }
+    { maxTokens: 2000, purpose: 'review' }
   );
 
   const clamp = (value, min, max, fallback) => {
@@ -425,7 +459,7 @@ export async function reflectTrade({
       { role: 'system', content: REFLECT_SYSTEM_PROMPT },
       { role: 'user', content: user },
     ],
-    { maxTokens: 400 }
+    { maxTokens: 400, purpose: 'reflection' }
   );
 
   const importance = Number(result.importance);
@@ -470,10 +504,13 @@ export async function matchEvent({ symbol, eventSummary, articleTitle, recentEve
     1
   );
 
-  const result = await chatJSON([
-    { role: 'system', content: EVENT_MATCH_SYSTEM_PROMPT },
-    { role: 'user', content: user },
-  ]);
+  const result = await chatJSON(
+    [
+      { role: 'system', content: EVENT_MATCH_SYSTEM_PROMPT },
+      { role: 'user', content: user },
+    ],
+    { purpose: 'event-matcher' }
+  );
 
   const dupId = Number(result.duplicate_of);
   return {

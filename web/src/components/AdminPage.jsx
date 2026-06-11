@@ -3,23 +3,77 @@ import {
   Alert,
   Button,
   Card,
+  Col,
   Descriptions,
   Form,
   Input,
+  Row,
   Space,
+  Statistic,
+  Table,
+  Tag,
   Typography,
 } from 'antd';
-import { adminApi, fmtMoney, fmtTime } from '../api.js';
+import {
+  adminApi,
+  fmtMoney,
+  fmtNum,
+  fmtTime,
+  LLM_PURPOSE_LABELS,
+  REJECT_LABELS,
+  RUN_TRIGGER_LABELS,
+} from '../api.js';
 
 /**
  * 隐藏管理页(#/admin):
- * 输入 ADMIN_TOKEN 登录后,可查看调度状态、手动触发交易轮、全量初始化数据。
+ * 输入 ADMIN_TOKEN 登录后,可查看调度状态与运行指标、手动触发交易轮、全量初始化数据。
  */
+
+// 最近运行表(cycle_runs):紧凑数字列 + 展开行查看完整错误
+const RUN_COLUMNS = [
+  {
+    title: '开始时间',
+    dataIndex: 'started_at',
+    render: (v) => fmtTime(v),
+    width: 110,
+  },
+  {
+    title: '触发',
+    dataIndex: 'trigger_source',
+    render: (v) => RUN_TRIGGER_LABELS[v] || v,
+    width: 60,
+  },
+  { title: '全量', dataIndex: 'full_fetch', render: (v) => (v ? '是' : '否'), width: 52 },
+  { title: '新增', dataIndex: 'new_articles', width: 52 },
+  { title: '分析', dataIndex: 'analyzed', width: 52 },
+  { title: '信号', dataIndex: 'signals', width: 52 },
+  { title: '去重', dataIndex: 'deduped', width: 52 },
+  { title: '挂起', dataIndex: 'held', width: 52 },
+  { title: '挂单', dataIndex: 'queued', width: 52 },
+  { title: '成交', dataIndex: 'trades', width: 52 },
+  {
+    title: '用时',
+    dataIndex: 'duration_ms',
+    render: (v) => (v === null || v === undefined ? '—' : `${fmtNum(v, 0)}ms`),
+    width: 80,
+  },
+  { title: 'LLM 调用', dataIndex: 'llm_calls', width: 76 },
+  {
+    title: '错误',
+    dataIndex: 'errors',
+    width: 56,
+    render: (errors) => {
+      const n = Array.isArray(errors) ? errors.length : 0;
+      return n > 0 ? <Typography.Text type="danger">{n}</Typography.Text> : 0;
+    },
+  },
+];
 export default function AdminPage() {
   const [token, setToken] = useState(() => sessionStorage.getItem('admin_token') || '');
   const [authed, setAuthed] = useState(false);
   const [error, setError] = useState(null);
   const [status, setStatus] = useState(null);
+  const [metrics, setMetrics] = useState(null);
   const [busy, setBusy] = useState(false);
   const [confirmText, setConfirmText] = useState('');
   const [message, setMessage] = useState(null);
@@ -49,6 +103,15 @@ export default function AdminPage() {
     const load = () => adminApi.status(token).then(setStatus).catch(() => {});
     load();
     const timer = setInterval(load, 5000);
+    return () => clearInterval(timer);
+  }, [authed, token]);
+
+  // 运行指标(最近运行/今日用量/队列):较重的聚合接口,降频到 15 秒
+  useEffect(() => {
+    if (!authed) return undefined;
+    const load = () => adminApi.metrics(token).then(setMetrics).catch(() => {});
+    load();
+    const timer = setInterval(load, 15000);
     return () => clearInterval(timer);
   }, [authed, token]);
 
@@ -157,6 +220,127 @@ export default function AdminPage() {
               {status?.lastError && (
                 <Alert type="warning" message={`上次错误:${status.lastError}`} style={{ marginTop: 12 }} />
               )}
+            </Card>
+
+            <Card title="今日用量">
+              <Row gutter={[16, 16]}>
+                <Col xs={12} md={4}>
+                  <Statistic title="LLM 调用" value={metrics?.today?.llm?.calls ?? '—'} />
+                </Col>
+                <Col xs={12} md={4}>
+                  <Statistic
+                    title="输入 tokens"
+                    value={metrics ? fmtNum(metrics.today?.llm?.promptTokens ?? 0, 0) : '—'}
+                  />
+                </Col>
+                <Col xs={12} md={4}>
+                  <Statistic
+                    title="输出 tokens"
+                    value={metrics ? fmtNum(metrics.today?.llm?.completionTokens ?? 0, 0) : '—'}
+                  />
+                </Col>
+                <Col xs={12} md={4}>
+                  <Statistic
+                    title="估算成本"
+                    value={metrics ? fmtMoney(metrics.today?.llm?.cost ?? 0, 4) : '—'}
+                  />
+                </Col>
+                <Col xs={12} md={4}>
+                  <Statistic
+                    title="行情源错误"
+                    value={metrics?.today?.providerErrors?.fmp?.count ?? '—'}
+                    valueStyle={
+                      metrics?.today?.providerErrors?.fmp?.count > 0 ? { color: '#cf1322' } : undefined
+                    }
+                  />
+                </Col>
+                <Col xs={12} md={4}>
+                  <Statistic
+                    title="模型源错误"
+                    value={metrics?.today?.providerErrors?.deepseek?.count ?? '—'}
+                    valueStyle={
+                      metrics?.today?.providerErrors?.deepseek?.count > 0
+                        ? { color: '#cf1322' }
+                        : undefined
+                    }
+                  />
+                </Col>
+              </Row>
+              <Descriptions
+                size="small"
+                column={{ xs: 1, sm: 2, md: 3 }}
+                style={{ marginTop: 16 }}
+                title={<Typography.Text style={{ fontSize: 13 }}>分用途调用(美东当日,成本为按单价的估算值)</Typography.Text>}
+              >
+                {Object.entries(metrics?.today?.llm?.byPurpose || {}).map(([purpose, b]) => (
+                  <Descriptions.Item key={purpose} label={LLM_PURPOSE_LABELS[purpose] || purpose}>
+                    {b.calls} 次
+                    {b.errors > 0 ? `(失败 ${b.errors})` : ''}
+                    {b.calls > 0 ? ` · 均时 ${(b.latencyMsTotal / b.calls / 1000).toFixed(1)}s` : ''}
+                  </Descriptions.Item>
+                ))}
+              </Descriptions>
+            </Card>
+
+            <Card title="最近运行">
+              {metrics && metrics.runsAvailable === false && (
+                <Alert
+                  type="info"
+                  showIcon
+                  message="运行指标未落库:cycle_runs 表不可用,请在数据库执行 012 迁移"
+                  style={{ marginBottom: 12 }}
+                />
+              )}
+              <Table
+                size="small"
+                rowKey="run_id"
+                columns={RUN_COLUMNS}
+                dataSource={metrics?.runs || []}
+                loading={!metrics}
+                pagination={false}
+                scroll={{ x: 900 }}
+                expandable={{
+                  rowExpandable: (run) => Array.isArray(run.errors) && run.errors.length > 0,
+                  expandedRowRender: (run) => (
+                    <Typography.Paragraph style={{ margin: 0, fontSize: 12.5 }}>
+                      {(run.errors || []).map((e, i) => (
+                        <div key={i}>{e}</div>
+                      ))}
+                    </Typography.Paragraph>
+                  ),
+                }}
+              />
+            </Card>
+
+            <Card title="队列与拒绝原因">
+              <Row gutter={[16, 16]}>
+                <Col xs={12} md={6}>
+                  <Statistic title="分析积压(24h)" value={metrics?.backlog ?? '—'} />
+                </Col>
+                <Col xs={12} md={6}>
+                  <Statistic title="待开盘挂单" value={metrics?.pendingOrders ?? '—'} />
+                </Col>
+                <Col xs={24} md={12}>
+                  <Typography.Text type="secondary" style={{ fontSize: 12.5 }}>
+                    最近 {metrics?.runs?.length ?? 0} 轮的信号拒绝原因分布(信号未成交的原因画像,
+                    可判断风控是否过严/太松)
+                  </Typography.Text>
+                  <div style={{ marginTop: 8 }}>
+                    {Object.entries(metrics?.rejectReasons || {})
+                      .sort((a, b) => b[1] - a[1])
+                      .map(([reason, count]) => (
+                        <Tag key={reason} style={{ marginBottom: 6 }}>
+                          {REJECT_LABELS[reason] || reason} × {count}
+                        </Tag>
+                      ))}
+                    {metrics && !Object.keys(metrics.rejectReasons || {}).length && (
+                      <Typography.Text type="secondary" style={{ fontSize: 12.5 }}>
+                        暂无记录
+                      </Typography.Text>
+                    )}
+                  </div>
+                </Col>
+              </Row>
             </Card>
 
             <Card title="手动操作">
