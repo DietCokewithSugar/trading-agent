@@ -154,8 +154,5 @@ export function isCalendarAvailable() {
   return !state.unavailable && Boolean(state.fetchedAt);
 }
 
-/** 管理重置时清空进程内日历缓存(unavailable 标记保留——套餐不会因重置而改变) */
-export function resetCalendarState() {
-  state.events = [];
-  state.fetchedAt = null;
-}
+// 注意:管理重置不清空日历缓存——经济日历是外部市场数据,与业务数据无关;
+// 清空会让页面在下一次轮询(默认 60 分钟)前误报「经济日历不可用」。

@@ -10,7 +10,6 @@ import { isHalted, setHalted } from './halt.js';
 import { resetMetrics } from './metrics.js';
 import { resetRiskControlState } from './riskControls.js';
 import { resetRegimeState } from './macroRegime.js';
-import { resetCalendarState } from './macroCalendar.js';
 
 /** admin_reset_data RPC 尚未部署(未执行 005 迁移)时的判定 */
 function isMissingResetRpc(error) {
@@ -139,12 +138,12 @@ export async function resetAllData() {
     });
 
     // 清进程内状态:报价/档案缓存、运行指标与上一轮结果都已对应被删除的数据。
-    // 注意:人工交易暂停开关(tradingHalt)不随重置改变——人工开关由人工关
+    // 注意:人工交易暂停开关(tradingHalt)不随重置改变——人工开关由人工关;
+    // 经济日历缓存也不清——它是外部市场数据,清空只会在下次轮询前误报「日历不可用」
     clearCaches();
     resetMetrics();
     resetRiskControlState();
     resetRegimeState();
-    resetCalendarState();
     cycleStatus.lastResult = null;
     cycleStatus.lastError = null;
     cycleStatus.lastRunAt = null;

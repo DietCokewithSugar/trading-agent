@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { Button, Card, Empty, Input, Space, Table, Tag } from 'antd';
 import TradeItem from './TradeItem.jsx';
+import CandidatePool from './CandidatePool.jsx';
 import { api, fmtMoney, fmtTime } from '../api.js';
 
 const PAGE_SIZE = 100;
@@ -55,7 +56,7 @@ function PendingOrders({ orders, onSymbolClick }) {
   );
 }
 
-export default function TradesPage({ trades, onSymbolClick }) {
+export default function TradesPage({ trades, macroVersion = 0, onSymbolClick }) {
   const [search, setSearch] = useState('');
   const [extra, setExtra] = useState([]);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -93,6 +94,7 @@ export default function TradesPage({ trades, onSymbolClick }) {
   if (!merged.length) {
     return (
       <div>
+        <CandidatePool version={macroVersion} onSymbolClick={onSymbolClick} />
         <PendingOrders orders={pending} onSymbolClick={onSymbolClick} />
         <Empty description="暂无交易记录。出现高档位的利好/利空新闻时,AI 会自动执行模拟买卖。" />
       </div>
@@ -101,6 +103,7 @@ export default function TradesPage({ trades, onSymbolClick }) {
 
   return (
     <div>
+      <CandidatePool version={macroVersion} onSymbolClick={onSymbolClick} />
       <PendingOrders orders={pending} onSymbolClick={onSymbolClick} />
       <Input.Search
         allowClear

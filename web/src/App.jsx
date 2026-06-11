@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { Alert, App as AntApp, Badge, Card, Col, Row, Statistic, Tabs, Tag } from 'antd';
+import { Alert, App as AntApp, Badge, Card, Col, Row, Statistic, Tabs, Tag, Typography } from 'antd';
 import { api, fmtMoney, fmtNum, fmtPercent, SESSION_LABELS, REGIME_LABELS } from './api.js';
 import Dashboard from './components/Dashboard.jsx';
 import NewsFeed from './components/NewsFeed.jsx';
@@ -8,6 +8,7 @@ import MacroPage from './components/MacroPage.jsx';
 import SignalStatsPage from './components/SignalStatsPage.jsx';
 import SymbolModal from './components/SymbolModal.jsx';
 import AdminPage from './components/AdminPage.jsx';
+import StrategyPage from './components/StrategyPage.jsx';
 
 const TABS = [
   { key: 'dashboard', label: '仪表盘' },
@@ -192,6 +193,9 @@ function MainApp() {
         <div className="header-top">
           <h1>AI 新闻交易员</h1>
           <div className="header-actions">
+            <Typography.Link href="#/strategy" style={{ fontSize: 13 }}>
+              投资策略说明
+            </Typography.Link>
             {session && (
               <Tag color={SESSION_TAG_COLORS[session] || 'default'} style={{ marginRight: 0 }}>
                 {SESSION_LABELS[session]}
@@ -233,8 +237,10 @@ function MainApp() {
           />
         )}
         {tab === 'news' && <NewsFeed version={newsVersion} onSymbolClick={setActiveSymbol} />}
-        {tab === 'trades' && <TradesPage trades={trades} onSymbolClick={setActiveSymbol} />}
-        {tab === 'macro' && <MacroPage version={macroVersion} onSymbolClick={setActiveSymbol} />}
+        {tab === 'trades' && (
+          <TradesPage trades={trades} macroVersion={macroVersion} onSymbolClick={setActiveSymbol} />
+        )}
+        {tab === 'macro' && <MacroPage version={macroVersion} />}
         {tab === 'signals' && <SignalStatsPage />}
       </main>
 
@@ -249,7 +255,7 @@ function MainApp() {
   );
 }
 
-/** 根组件:hash 为 #/admin 时进入隐藏管理页,其余渲染主面板 */
+/** 根组件:#/admin 进入隐藏管理页,#/strategy 进入投资策略说明页,其余渲染主面板 */
 export default function App() {
   const [hash, setHash] = useState(window.location.hash);
   useEffect(() => {
@@ -258,5 +264,6 @@ export default function App() {
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
   if (hash === '#/admin') return <AdminPage />;
+  if (hash === '#/strategy') return <StrategyPage />;
   return <MainApp />;
 }

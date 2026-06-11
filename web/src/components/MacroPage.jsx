@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useState } from 'react';
 import {
   Alert,
   Badge,
-  Button,
   Card,
   Col,
   Descriptions,
@@ -11,32 +10,22 @@ import {
   Row,
   Space,
   Spin,
-  Statistic,
   Table,
   Tag,
   Typography,
 } from 'antd';
 import {
   api,
-  fmtNum,
   fmtTime,
   REGIME_LABELS,
   REGIME_TAG_COLORS,
-  CANDIDATE_STATUS_LABELS,
   MACRO_EVENT_TYPE_LABELS,
-  TIER_LABELS,
 } from '../api.js';
 
 const DIRECTION_LABELS = { risk_on: '利好风险资产', risk_off: '避险', neutral: '中性' };
 const RATES_LABELS = { hawkish: '鹰派', dovish: '鸽派', neutral: '中性' };
 const UPDOWN_LABELS = { up: '上行', down: '下行', neutral: '中性' };
 const SECTOR_DIR_COLORS = { bullish: 'green', bearish: 'red' };
-const CANDIDATE_STATUS_COLORS = {
-  pending: 'blue',
-  capital_constrained: 'gold',
-  macro_filtered: 'orange',
-  conflict_hold: 'purple',
-};
 
 /** 当前宏观环境卡片:状态 + 风险分 + 利率/通胀/增长子标签 + 生效的组合参数 */
 function RegimeCard({ regime }) {
@@ -47,7 +36,9 @@ function RegimeCard({ regime }) {
         <Tag color={REGIME_TAG_COLORS[regime.regime] || 'default'} style={{ fontSize: 16, padding: '4px 12px' }}>
           {REGIME_LABELS[regime.regime] || regime.regime}
         </Tag>
-        <span className="num">风险评分 {Number(regime.risk_score ?? 0).toFixed(2)}</span>
+        <span className="num" style={{ whiteSpace: 'nowrap' }}>
+          风险评分 {Number(regime.risk_score ?? 0).toFixed(2)}
+        </span>
         {regime.shock_until && (
           <Tag color="red">冲击锁定至 {fmtTime(regime.shock_until)}</Tag>
         )}
@@ -56,13 +47,17 @@ function RegimeCard({ regime }) {
         <Tag>利率 {RATES_LABELS[regime.rates_signal] || '中性'}</Tag>
         <Tag>通胀 {UPDOWN_LABELS[regime.inflation_signal] || '中性'}</Tag>
         <Tag>增长 {UPDOWN_LABELS[regime.growth_signal] || '中性'}</Tag>
-        <Typography.Text type="secondary" style={{ fontSize: 12.5 }}>
+        <Typography.Text type="secondary" style={{ fontSize: 12.5, whiteSpace: 'nowrap' }}>
           更新于 {fmtTime(regime.updated_at)}
         </Typography.Text>
       </Space>
+      {/* 垂直布局 + 标签不换行:水平布局在窄列里"标签: 值"会被折行,观感破碎 */}
       <Descriptions
         size="small"
-        column={{ xs: 2, md: 4 }}
+        layout="vertical"
+        column={{ xs: 2, sm: 4 }}
+        labelStyle={{ whiteSpace: 'nowrap' }}
+        contentStyle={{ whiteSpace: 'nowrap' }}
         items={[
           {
             key: 'budget',
@@ -189,86 +184,12 @@ function MacroEventsList({ events }) {
   );
 }
 
-/** 候选池预览:等待资金分配的买入信号 */
-function PoolCard({ pool, onSymbolClick }) {
-  if (!pool) return null;
-  const counts = pool.counts || {};
-  const columns = [
-    {
-      title: '股票',
-      dataIndex: 'symbol',
-      width: 90,
-      render: (v) => (
-        <Button type="link" size="small" style={{ padding: 0 }} onClick={() => onSymbolClick(v)}>
-          {v}
-        </Button>
-      ),
-    },
-    {
-      title: '档位',
-      dataIndex: 'tier',
-      width: 160,
-      ellipsis: true,
-      render: (v) => (v ? TIER_LABELS[v] : '—'),
-    },
-    {
-      title: '当前分',
-      dataIndex: 'current_score',
-      width: 90,
-      align: 'right',
-      render: (v) => <span className="num">{v === null || v === undefined ? '—' : fmtNum(v, 3)}</span>,
-    },
-    {
-      title: '状态',
-      dataIndex: 'status',
-      width: 100,
-      render: (v) => (
-        <Tag color={CANDIDATE_STATUS_COLORS[v] || 'default'} style={{ marginRight: 0 }}>
-          {CANDIDATE_STATUS_LABELS[v] || v}
-        </Tag>
-      ),
-    },
-    { title: '说明', dataIndex: 'status_reason', ellipsis: true, render: (v) => v || '—' },
-    { title: '入池时间', dataIndex: 'created_at', width: 110, render: (v) => fmtTime(v) },
-  ];
-  return (
-    <Card
-      size="small"
-      title={
-        <Space size={8} wrap>
-          买入候选池
-          {Object.entries(counts).map(([status, n]) => (
-            <Tag key={status} color={CANDIDATE_STATUS_COLORS[status] || 'default'} style={{ marginRight: 0 }}>
-              {CANDIDATE_STATUS_LABELS[status] || status} {n}
-            </Tag>
-          ))}
-        </Space>
-      }
-    >
-      {pool.top?.length ? (
-        <Table
-          rowKey="id"
-          size="small"
-          columns={columns}
-          dataSource={pool.top}
-          pagination={false}
-          scroll={{ x: 700 }}
-        />
-      ) : (
-        <Empty
-          description="候选池为空。利好信号经准入门槛后入池,由资金分配器在盘中按分数统一执行。"
-          image={Empty.PRESENTED_IMAGE_SIMPLE}
-        />
-      )}
-    </Card>
-  );
-}
-
 /**
- * 宏观页:当前市场环境(regime)、经济日历与黑窗、近期宏观事件、买入候选池。
+ * 宏观页:当前市场环境(regime)、经济日历与黑窗、近期宏观事件。
+ * 买入候选池在「交易记录」页展示。
  * version 由 App 的 SSE macro 事件驱动自增,触发重新拉取。
  */
-export default function MacroPage({ version = 0, onSymbolClick }) {
+export default function MacroPage({ version = 0 }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -316,12 +237,12 @@ export default function MacroPage({ version = 0, onSymbolClick }) {
           <CalendarCard calendar={data.calendar} />
         </Col>
       </Row>
-      <PoolCard pool={data.pool} onSymbolClick={onSymbolClick} />
       <MacroEventsList events={data.events} />
       <Typography.Paragraph type="secondary" style={{ fontSize: 13, margin: 0 }}>
         宏观环境由近 72 小时的宏观事件按档位、置信度与时间衰减加权聚合:避险/冲击状态下收紧当日预算、
-        提高现金保留并压缩买入金额;利好信号统一进入候选池,由资金分配器在盘中按分数高低分配资金——
-        资金不足的高分信号会留池等待,而不是先到先得地被低分信号抢走。
+        提高现金保留并压缩买入金额;利好信号统一进入买入候选池(见「交易记录」页),
+        由资金分配器在盘中按分数高低分配资金——资金不足的高分信号会留池等待,
+        而不是先到先得地被低分信号抢走。
       </Typography.Paragraph>
     </Space>
   );

@@ -89,7 +89,9 @@ export default function Dashboard({ portfolio, snapshots, trades, stats, perform
           snapshots={snapshots}
           trades={trades}
           initialCapital={portfolio?.initial_capital}
-          benchmark={performance?.benchmark}
+          benchmarks={
+            performance?.benchmarks ?? (performance?.benchmark ? [performance.benchmark] : [])
+          }
         />
       </Card>
 

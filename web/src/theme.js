@@ -10,6 +10,7 @@ export const CHART = {
   axis: '#8c8c8c',
   reference: '#bfbfbf',
   benchmark: '#8c8c8c',
+  benchmarkGold: '#d4a017', // 黄金基准线(区别于灰色的标普500)
   tooltipBg: '#ffffff',
   tooltipBorder: '#d9d9d9',
   tooltipShadow: '0 2px 8px rgba(0, 0, 0, 0.12)',
