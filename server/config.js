@@ -71,6 +71,13 @@ export const config = {
   minMarketCap: num0(process.env.MIN_MARKET_CAP, 300e6),
   minPrice: num0(process.env.MIN_PRICE, 2),
   minAvgDollarVolume: num0(process.env.MIN_AVG_DOLLAR_VOLUME, 5e6),
+  // 交易所白名单(FMP profile.exchange 短代码,大小写不敏感;显式设空字符串关闭检查)。
+  // 默认只允许三大所,自动屏蔽 OTC/PNK(粉单)——付费拉抬新闻的重灾区。
+  // 用 ?? 而非 ||:显式设 ALLOWED_EXCHANGES=(空)才表示关闭
+  allowedExchanges: (process.env.ALLOWED_EXCHANGES ?? 'NASDAQ,NYSE,AMEX')
+    .split(',')
+    .map((s) => s.trim().toUpperCase())
+    .filter(Boolean),
   // 公司公告类来源(新闻稿通道)的利好信号置信度折价(0~1,1=不折价):
   // 公告真实性高但立场天然偏多,折价后多数会落入"挂起等独立媒体交叉确认"流程
   pressBullishPenalty: Math.min(num(process.env.PRESS_BULLISH_PENALTY, 0.75), 1),
@@ -102,6 +109,17 @@ export const config = {
   positionReviewHour: num(process.env.POSITION_REVIEW_HOUR, 14),
   // 风控官:买入执行前由独立 LLM 角色做组合级复核(放行/缩仓/否决),失败时放弃买入
   enableRiskOfficer: process.env.ENABLE_RISK_OFFICER !== 'false',
+
+  // 组合级硬风控(代码强制,先于且独立于 LLM 风控官;只约束买入,卖出/止损永远放行)
+  // 当日组合亏损达到该百分比 → 当日停止开新仓(sticky,次日自动恢复;0=关闭)
+  dailyLossHaltPercent: num0(process.env.DAILY_LOSS_HALT_PERCENT, 2),
+  // 最大同时持仓数(只拦开新仓,加仓不受限;0=关闭)
+  maxOpenPositions: num0(process.env.MAX_OPEN_POSITIONS, 10),
+  // 单行业市值占组合总值上限(超出部分钳制买入金额;0=关闭)
+  maxSectorFraction: Math.min(num0(process.env.MAX_SECTOR_FRACTION, 0.35), 1),
+  // 连亏降仓:最近 N 笔卖出全部亏损时,买入比例乘以该系数(1=关闭)
+  lossStreakCount: num0(process.env.LOSS_STREAK_COUNT, 3),
+  lossStreakScale: Math.min(num0(process.env.LOSS_STREAK_SCALE, 0.5), 1),
 
   // 关注列表(用于 Yahoo RSS 抓取),持仓股票会自动加入
   watchlist: (process.env.WATCHLIST || 'AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA')

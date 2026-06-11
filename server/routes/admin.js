@@ -8,6 +8,8 @@ import { isHalted } from '../services/halt.js';
 import { safeTokenEqual, createAuthRateLimiter } from '../services/authGuard.js';
 import { getTodayMetrics } from '../services/metrics.js';
 import { listRecentRuns, aggregateRejectReasons, isCycleRunsAvailable } from '../services/cycleRuns.js';
+import { isTradingHalted, setTradingHalt } from '../services/tradingHalt.js';
+import { getRiskControlState } from '../services/riskControls.js';
 
 const router = Router();
 
@@ -46,6 +48,8 @@ router.get('/status', (req, res) => {
   res.json({
     ...cycleStatus,
     halted: isHalted(),
+    tradingHalted: isTradingHalted(),
+    riskControls: getRiskControlState(),
     sseClients: clientCount(),
     pollSeconds: config.newsPollSeconds,
     riskCheckSeconds: config.riskCheckSeconds,
@@ -53,6 +57,21 @@ router.get('/status', (req, res) => {
     initialCapital: config.initialCapital,
   });
 });
+
+/** 交易暂停开关(kill switch):只停新开买入,卖出/止损/止盈/复查不受影响 */
+router.post(
+  '/trading-halt',
+  asyncHandler(async (req, res) => {
+    if (typeof req.body?.halted !== 'boolean') {
+      return res.status(400).json({ error: '请求体需携带 {"halted": true|false}' });
+    }
+    const result = await setTradingHalt(req.body.halted);
+    console.log(
+      `[admin] 交易暂停开关 → ${result.halted ? '开启' : '关闭'}${result.persisted ? '' : '(未持久化,请执行 013 迁移)'}`
+    );
+    res.json(result);
+  })
+);
 
 /** 手动触发一轮全源抓取/分析/交易 */
 router.post(

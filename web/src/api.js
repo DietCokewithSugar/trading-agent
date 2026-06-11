@@ -48,6 +48,8 @@ export const adminApi = {
   verify: (token) => adminRequest('/verify', { token }),
   status: (token) => adminRequest('/status', { token }),
   metrics: (token) => adminRequest('/metrics', { token }),
+  tradingHalt: (token, halted) =>
+    adminRequest('/trading-halt', { method: 'POST', token, body: { halted } }),
   runCycle: (token) => adminRequest('/run-cycle', { method: 'POST', token }),
   reset: (token) =>
     adminRequest('/reset', { method: 'POST', token, body: { confirm: 'RESET' } }),
@@ -138,4 +140,8 @@ export const REJECT_LABELS = {
   risk_officer_error: '风控官审批失败',
   price_drift_abort: '价格漂移熔断',
   below_min_amount: '金额低于下限',
+  trading_halted: '交易暂停(人工开关)',
+  daily_loss_halt: '当日亏损熔断',
+  max_positions: '持仓数达上限',
+  sector_cap: '行业集中度上限',
 };

@@ -44,6 +44,8 @@ create table if not exists portfolio_state (
   initial_capital numeric not null,
   updated_at timestamptz not null default now()
 );
+-- 人工交易暂停开关(013):开启后只拦新开买入,所有卖出/止损/止盈/复查照常
+alter table portfolio_state add column if not exists trading_halted boolean not null default false;
 
 -- 当前持仓(止损/止盈价由 AI 在买入时设定,服务端自动监控触发)
 create table if not exists positions (

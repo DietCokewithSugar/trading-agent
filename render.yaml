@@ -65,6 +65,18 @@ services:
         value: "2"
       - key: MIN_AVG_DOLLAR_VOLUME
         value: "5000000"
+      - key: ALLOWED_EXCHANGES
+        value: "NASDAQ,NYSE,AMEX"
+      - key: DAILY_LOSS_HALT_PERCENT
+        value: "2"
+      - key: MAX_OPEN_POSITIONS
+        value: "10"
+      - key: MAX_SECTOR_FRACTION
+        value: "0.35"
+      - key: LOSS_STREAK_COUNT
+        value: "3"
+      - key: LOSS_STREAK_SCALE
+        value: "0.5"
       - key: PRESS_BULLISH_PENALTY
         value: "0.75"
       - key: PENDING_ORDER_MAX_AGE_HOURS
