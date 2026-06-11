@@ -2,8 +2,9 @@
 // 纯观测+聚合输入层:本模块失败只影响宏观功能,绝不打断个股交易主链路。
 import { supabase } from '../db.js';
 import { config } from '../config.js';
-import { analyzeMacroArticle } from './deepseek.js';
+import { analyzeMacroArticle, matchMacroEvent } from './deepseek.js';
 import { matchCalendarSurprise } from './macroCalendar.js';
+import { mergeMacroConfidence } from './macroRegime.js';
 import { sanitizeProviderText } from './metrics.js';
 
 const state = {
@@ -50,6 +51,17 @@ export async function processMacroArticle(article) {
     summary: sanitizeProviderText(analysis.summary),
   };
 
+  // 入库前事件归并:与近 72h 已记录宏观事件 LLM 比对,同一事件的重复报道只累计
+  // 篇数与小幅增信,不插新行——防止 regime 风险分被重复报道线性叠加放大。
+  // 判重任何失败 fail-open 照常插入:宏观层宁可分数略偏,不可丢掉真实风险信号
+  // (与个股侧 fail-closed 相反——那边漏判会触发重复交易,这边只是评分输入)。
+  try {
+    const merged = await mergeDuplicateMacroEvent(row, article);
+    if (merged) return merged;
+  } catch (err) {
+    console.warn(`[macro] 事件归并不可用(${err.message}),照常入库`);
+  }
+
   const { data, error } = await supabase().from('macro_events').insert(row).select().single();
   if (error) {
     if (isMissingTable(error)) {
@@ -63,6 +75,47 @@ export async function processMacroArticle(article) {
     `[macro] ${data.event_type} ${data.macro_direction} 第${data.market_impact_tier}档 conf=${data.confidence}: ${data.summary}`
   );
   return data;
+}
+
+/**
+ * 与近期宏观事件比对判重(候选不按 event_type 过滤——同一底层事件可能被归入
+ * 不同类型,如中东冲突 → geopolitics vs energy,跨类型归并正是要抓的重复)。
+ * 命中则更新原行并返回合并后的行(runCycle 照常 recomputeRegime);未命中返回 null。
+ * created_at 不动:重复报道不刷新时间衰减,实质性新进展会被 LLM 判为新事件。
+ */
+async function mergeDuplicateMacroEvent(row, article) {
+  const candidates = await listRecentMacroEvents(config.macroEventValidityHours, 20);
+  if (!candidates?.length) return null;
+
+  const { duplicateOf, reason } = await matchMacroEvent({
+    summary: row.summary,
+    eventType: row.event_type,
+    articleTitle: article.title,
+    recentEvents: candidates,
+  });
+  const dup = duplicateOf ? candidates.find((e) => e.id === duplicateOf) : null;
+  if (!dup) return null;
+
+  const update = {
+    article_count: (dup.article_count || 1) + 1,
+    confidence: mergeMacroConfidence(dup.confidence, row.confidence),
+    updated_at: new Date().toISOString(),
+  };
+  const db = supabase();
+  const { error } = await db.from('macro_events').update(update).eq('id', dup.id);
+  if (error) {
+    // 未执行 015 迁移:strip 掉缺失列只更 confidence 重试(去重照做,只是不计数)
+    if (!/article_count|updated_at/.test(error.message)) throw new Error(error.message);
+    const { error: retryErr } = await db
+      .from('macro_events')
+      .update({ confidence: update.confidence })
+      .eq('id', dup.id);
+    if (retryErr) throw new Error(retryErr.message);
+  }
+  console.log(
+    `[macro] 重复报道归并 → 事件 #${dup.id}(第 ${update.article_count} 篇):${reason || dup.summary}`
+  );
+  return { ...dup, ...update };
 }
 
 /** 近 N 小时的宏观事件(regime 聚合与 /api/macro 用);表缺失返回 null */

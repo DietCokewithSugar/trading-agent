@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { aggregateRegime, sectorMultiplier } from '../server/services/macroRegime.js';
+import { aggregateRegime, sectorMultiplier, mergeMacroConfidence } from '../server/services/macroRegime.js';
 
 const NOW = new Date('2026-06-11T15:00:00Z');
 
@@ -106,6 +106,42 @@ test('aggregateRegime:子标签聚合(利率/通胀/增长)', () => {
   assert.equal(r.rates, 'hawkish');
   assert.equal(r.inflation, 'up');
   assert.equal(r.growth, 'down');
+});
+
+test('aggregateRegime:同类型同方向重复事件组内衰减,不线性叠加', () => {
+  const dup = ev({ event_type: 'geopolitics', market_impact_tier: 2, confidence: 0.8 });
+  const single = aggregateRegime({ events: [dup], now: NOW }).riskScore;
+  const tripled = aggregateRegime({ events: [dup, { ...dup }, { ...dup }], now: NOW }).riskScore;
+  // 理论线性叠加值:3 份全权重(无衰减时的分数)
+  const w = 0.6 * 0.8 * Math.exp(-0.5 / 24);
+  const linear = -Math.min((3 * w) / (3 * w + 1), 1);
+  assert.ok(Math.abs(tripled) > Math.abs(single), '重复事件仍应比单条略强(算一次+小幅增量)');
+  assert.ok(Math.abs(tripled) < Math.abs(linear) - 0.01, `${tripled} 应显著弱于线性叠加 ${linear}`);
+});
+
+test('aggregateRegime:不同类型同方向事件不衰减(多事件同向是真实信号)', () => {
+  const a = ev({ event_type: 'geopolitics', market_impact_tier: 2, confidence: 0.8 });
+  const sameType = aggregateRegime({ events: [a, { ...a }], now: NOW }).riskScore;
+  const crossType = aggregateRegime({
+    events: [a, { ...a, event_type: 'CPI' }],
+    now: NOW,
+  }).riskScore;
+  assert.ok(Math.abs(crossType) > Math.abs(sameType), '跨类型两事件应强于同类型两条重复');
+});
+
+test('aggregateRegime:同类型不同方向各自全权重,互相抵消为 0', () => {
+  const events = [
+    ev({ event_type: 'FOMC', market_impact_tier: 2, confidence: 0.8 }),
+    ev({ event_type: 'FOMC', market_impact_tier: 2, confidence: 0.8, macro_direction: 'risk_on' }),
+  ];
+  assert.equal(aggregateRegime({ events, now: NOW }).riskScore, 0);
+});
+
+test('mergeMacroConfidence:较大值小幅增信,封顶 0.95,非法值兜底', () => {
+  assert.equal(mergeMacroConfidence(0.7, 0.9), Number((0.9 * 1.05).toFixed(3)));
+  assert.equal(mergeMacroConfidence(0.8, 0.8), 0.84);
+  assert.equal(mergeMacroConfidence(0.95, 0.95), 0.95, '绝对封顶 0.95');
+  assert.equal(mergeMacroConfidence(null, NaN), Number((0.5 * 1.05).toFixed(3)), '非法值兜底 0.5');
 });
 
 test('sectorMultiplier:利好放大/利空压缩,clamp 区间,无命中为 1', () => {

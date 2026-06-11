@@ -18,6 +18,43 @@ function eventWeight(event, nowTs, halfLifeHours) {
   return tierWeight * conf * Math.exp(-ageHours / halfLifeHours);
 }
 
+/**
+ * 重复报道归并时的置信度合并(纯函数):较大值 ×1.05 小幅增信(交叉佐证),
+ * 绝对封顶 0.95——多次归并也不会爬到 1.0;非法值兜底 0.5。
+ */
+export function mergeMacroConfidence(oldConf, newConf) {
+  const a = Number.isFinite(Number(oldConf)) ? Number(oldConf) : 0.5;
+  const b = Number.isFinite(Number(newConf)) ? Number(newConf) : 0.5;
+  return Number(Math.min(Math.max(a, b) * 1.05, 0.95).toFixed(3));
+}
+
+/**
+ * riskScore 输入对的组内几何衰减(纯函数):LLM 入库判重的兜底防线。
+ * 同 event_type+macro_direction 的事件视为疑似同一事件的重复行(判重漏网、
+ * fail-open 残留、015 之前的历史存量),组内按权重降序第 i 条 ×dampening^i,
+ * 防止重复报道把风险分线性叠加放大;不同组之间互不影响(多事件同向是真实信号)。
+ */
+function dampenedDirectionPairs(events, nowTs, halfLifeHours, dampening) {
+  const groups = new Map();
+  for (const e of events) {
+    if (e.macro_direction !== 'risk_on' && e.macro_direction !== 'risk_off') continue;
+    const key = `${e.event_type}|${e.macro_direction}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push({
+      weight: eventWeight(e, nowTs, halfLifeHours),
+      direction: e.macro_direction === 'risk_on' ? 1 : -1,
+    });
+  }
+  const pairs = [];
+  for (const group of groups.values()) {
+    group.sort((a, b) => b.weight - a.weight);
+    group.forEach((pair, i) => {
+      pairs.push({ ...pair, weight: pair.weight * dampening ** i });
+    });
+  }
+  return pairs;
+}
+
 /** 带平滑的加权方向分:单一弱事件不足以把状态推到极端 */
 function weightedScore(pairs, smoothing = 1) {
   let raw = 0;
@@ -56,6 +93,7 @@ export function aggregateRegime({ events = [], now = new Date(), prev = null, cf
     enterThreshold = 0.3,
     exitThreshold = 0.2,
     shockMinConfidence = 0.75,
+    duplicateDampening = 0.6,
   } = cfg;
   const nowTs = now instanceof Date ? now.getTime() : Number(now);
   const valid = (Array.isArray(events) ? events : []).filter((e) => {
@@ -79,14 +117,7 @@ export function aggregateRegime({ events = [], now = new Date(), prev = null, cf
   }
 
   const riskScore = Number(
-    weightedScore(
-      valid
-        .filter((e) => e.macro_direction === 'risk_on' || e.macro_direction === 'risk_off')
-        .map((e) => ({
-          weight: eventWeight(e, nowTs, halfLifeHours),
-          direction: e.macro_direction === 'risk_on' ? 1 : -1,
-        }))
-    ).toFixed(3)
+    weightedScore(dampenedDirectionPairs(valid, nowTs, halfLifeHours, duplicateDampening)).toFixed(3)
   );
 
   // 滞回:进入新状态要求更强的分数,退出沿用较松的阈值,防止边界附近来回切换

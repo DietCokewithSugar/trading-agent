@@ -644,3 +644,52 @@ export async function matchEvent({ symbol, eventSummary, articleTitle, recentEve
     reason: result.reason || '',
   };
 }
+
+const MACRO_EVENT_MATCH_SYSTEM_PROMPT = `你是一个宏观财经事件归并助手。同一个宏观事件(同一次数据发布、同一场会议、同一轮地缘冲突)经常被多家媒体用不同标题、不同角度重复报道。给你一条新分析出的宏观事件,以及近期已记录的宏观事件列表,判断这条新事件是否只是某个已有事件的重复报道或转述。
+
+判断标准:核心事实相同(同一数据发布、同一政策表态、同一冲突/事件)即视为同一事件,即使标题措辞、报道角度、事件类型归类不同。只有包含实质性新进展(冲突升级或缓和、数据修正、政策正式落地、性质不同的新事实)时才算新事件。拿不准时倾向于判定为重复(归并不会丢失信号,只会合并计数)。
+
+${UNTRUSTED_NOTE}
+
+必须严格返回 JSON:
+{
+  "duplicate_of": 已有事件的 id(数字);不是重复报道则为 null,
+  "reason": "中文简述判断依据(50字以内)"
+}`;
+
+/**
+ * 宏观事件归并:判断新分析出的宏观事件是否为既有 macro_events 行的重复报道。
+ * 返回 { duplicateOf: number|null, reason }。
+ */
+export async function matchMacroEvent({ summary, eventType, articleTitle, recentEvents }) {
+  const user = JSON.stringify(
+    {
+      新事件类型: eventType,
+      新事件概要: summary,
+      新闻标题: sanitizeUntrusted(articleTitle, 300),
+      已记录事件: recentEvents.map((e) => ({
+        id: e.id,
+        类型: e.event_type,
+        概要: e.summary,
+        记录时间: e.created_at,
+        报道数: e.article_count,
+      })),
+    },
+    null,
+    1
+  );
+
+  const result = await chatJSON(
+    [
+      { role: 'system', content: MACRO_EVENT_MATCH_SYSTEM_PROMPT },
+      { role: 'user', content: user },
+    ],
+    { purpose: 'macro-event-matcher' }
+  );
+
+  const dupId = Number(result.duplicate_of);
+  return {
+    duplicateOf: Number.isFinite(dupId) && dupId > 0 ? dupId : null,
+    reason: result.reason || '',
+  };
+}
