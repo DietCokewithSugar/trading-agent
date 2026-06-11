@@ -8,6 +8,8 @@ import {
   checkMaxPositions,
   sectorCapHeadroom,
   lossStreakMultiplier,
+  computeBuyHeadroom,
+  updateNewPositionState,
 } from '../server/services/riskControls.js';
 
 test('etMidnightUtcIso:EST 与 EDT 日期均换算回美东当日零点', () => {
@@ -85,6 +87,81 @@ test('sectorCapHeadroom:剩余额度、超限归零、0 关闭', () => {
     sectorCapHeadroom({ totalValue: 100000, sectorValue: 99000, maxSectorFraction: 0 }),
     Infinity
   );
+});
+
+test('computeBuyHeadroom:三重钳制各自触发', () => {
+  const base = {
+    cash: 50000,
+    totalValue: 100000,
+    positionsValue: 50000,
+    spentToday: 0,
+    budgetBase: 100000,
+  };
+  const params = { minCashReserve: 0.25, dailyBuyBudget: 0.35, maxGrossExposure: 0.75 };
+  // 不受限:三个余量分别为 25000 / 35000 / 25000
+  const free = computeBuyHeadroom({ ...base, spend: 10000, params });
+  assert.deepEqual(free, { spend: 10000, clamped: false, binding: null });
+  // 现金保留触发:cash 26000 − 25000 = 1000
+  const reserve = computeBuyHeadroom({ ...base, spend: 10000, cash: 26000, params });
+  assert.equal(reserve.spend, 1000);
+  assert.equal(reserve.binding, 'cash_reserve');
+  // 当日预算触发:35000 − 34000 = 1000
+  const budget = computeBuyHeadroom({ ...base, spend: 10000, spentToday: 34000, params });
+  assert.equal(budget.spend, 1000);
+  assert.equal(budget.binding, 'daily_budget');
+  // 总敞口触发:75000 − 74000 = 1000
+  const exposure = computeBuyHeadroom({ ...base, spend: 10000, positionsValue: 74000, params });
+  assert.equal(exposure.spend, 1000);
+  assert.equal(exposure.binding, 'gross_exposure');
+});
+
+test('computeBuyHeadroom:组合触发取最紧约束,额度耗尽归零', () => {
+  const params = { minCashReserve: 0.25, dailyBuyBudget: 0.35, maxGrossExposure: 0.75 };
+  const r = computeBuyHeadroom({
+    spend: 10000,
+    cash: 26000, // reserve 余量 1000
+    totalValue: 100000,
+    positionsValue: 74500, // exposure 余量 500(最紧)
+    spentToday: 0,
+    budgetBase: 100000,
+    params,
+  });
+  assert.equal(r.spend, 500);
+  assert.equal(r.binding, 'gross_exposure');
+  // macro_shock 参数集(全 0)→ 额度归零
+  const shock = computeBuyHeadroom({
+    spend: 10000,
+    cash: 100000,
+    totalValue: 100000,
+    positionsValue: 0,
+    params: { minCashReserve: 1, dailyBuyBudget: 0, maxGrossExposure: 0 },
+  });
+  assert.equal(shock.spend, 0);
+  assert.equal(shock.clamped, true);
+});
+
+test('computeBuyHeadroom:预算基数缺失退用当前总值', () => {
+  const r = computeBuyHeadroom({
+    spend: 40000,
+    cash: 100000,
+    totalValue: 100000,
+    positionsValue: 0,
+    spentToday: 0,
+    budgetBase: null,
+    params: { minCashReserve: 0, dailyBuyBudget: 0.35, maxGrossExposure: 1 },
+  });
+  assert.equal(r.spend, 35000, '按当前总值的 35% 计预算');
+  assert.equal(r.binding, 'daily_budget');
+});
+
+test('updateNewPositionState:同日去重累计、换日重置', () => {
+  let state = null;
+  state = updateNewPositionState(state, { dayKey: '2026-06-15', symbol: 'AAPL' });
+  state = updateNewPositionState(state, { dayKey: '2026-06-15', symbol: 'MSFT' });
+  state = updateNewPositionState(state, { dayKey: '2026-06-15', symbol: 'AAPL' });
+  assert.equal(state.symbols.length, 2, '同票重复不累计');
+  state = updateNewPositionState(state, { dayKey: '2026-06-16', symbol: 'NVDA' });
+  assert.deepEqual(state.symbols, ['NVDA'], '换日重置');
 });
 
 test('lossStreakMultiplier:连亏打折、盈亏混合/样本不足/关闭均为 1', () => {

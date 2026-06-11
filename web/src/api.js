@@ -145,4 +145,9 @@ export const REJECT_LABELS = {
   daily_loss_halt: '当日亏损熔断',
   max_positions: '持仓数达上限',
   sector_cap: '行业集中度上限',
+  macro_shock: '宏观冲击暂停',
+  new_position_quota: '当日开仓数上限',
+  cash_reserve: '现金保留下限',
+  daily_budget: '当日预算耗尽',
+  gross_exposure: '总敞口上限',
 };

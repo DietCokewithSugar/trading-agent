@@ -91,6 +91,52 @@ export function lossStreakMultiplier(pnls, { count, scale }) {
   return recent.every((p) => Number(p) < 0) ? scale : 1;
 }
 
+/**
+ * 宏观环境三重买入钳制(014):现金保留下限 / 当日买入预算 / 持仓总敞口上限。
+ * spend 为拟买金额;budgetBase 为当日预算基数(日初组合总值,缺失时退用当前总值);
+ * params 取自 config.macroRegimeParams[regime]。
+ * 返回 { spend: 钳制后金额(≥0), clamped, binding }(binding 为最早把额度压到最低的约束名,
+ * 'cash_reserve' | 'daily_budget' | 'gross_exposure' | null)。
+ */
+export function computeBuyHeadroom({
+  spend,
+  cash,
+  totalValue,
+  positionsValue,
+  spentToday = 0,
+  budgetBase = null,
+  params = {},
+}) {
+  const want = Math.max(Number(spend) || 0, 0);
+  const total = Number(totalValue) || 0;
+  const base = Number.isFinite(Number(budgetBase)) && Number(budgetBase) > 0 ? Number(budgetBase) : total;
+  const limits = [
+    ['cash_reserve', (Number(cash) || 0) - (Number(params.minCashReserve) || 0) * total],
+    ['daily_budget', (Number(params.dailyBuyBudget) || 0) * base - (Number(spentToday) || 0)],
+    ['gross_exposure', (Number(params.maxGrossExposure) || 0) * total - (Number(positionsValue) || 0)],
+  ];
+  let allowed = want;
+  let binding = null;
+  for (const [name, headroom] of limits) {
+    const h = Math.max(headroom, 0);
+    if (h < allowed) {
+      allowed = h;
+      binding = name;
+    }
+  }
+  return { spend: allowed, clamped: allowed < want, binding };
+}
+
+/**
+ * 当日开新仓计数状态机(换日重置;加仓不计,由调用方只对新开仓调用)。
+ * state: { dayKey, symbols: string[] };返回新 state。
+ */
+export function updateNewPositionState(state, { dayKey, symbol }) {
+  const symbols = state?.dayKey === dayKey ? new Set(state.symbols || []) : new Set();
+  if (symbol) symbols.add(symbol);
+  return { dayKey, symbols: [...symbols] };
+}
+
 // ===== 有状态薄层(进程内缓存 + DB 查询,fail-open) =====
 
 // 当日基线缓存与熔断状态;基线告警每日一次,避免新装首日刷屏
@@ -166,6 +212,79 @@ export async function getLossStreakMultiplier() {
   }
 }
 
+// 当日买入金额缓存(预算钳制用)与当日新开仓集合(014)
+let buySpentCache = { dayKey: null, value: null, at: 0 };
+let newPositionState = { dayKey: null, symbols: [] };
+let newPositionSeededDay = null;
+
+/** 当日(美东)已花费的买入金额合计;查询失败 fail-open 按 0 计并告警 */
+export async function getDailyBuySpent() {
+  const dayKey = etDayKey();
+  if (buySpentCache.dayKey === dayKey && Date.now() - buySpentCache.at < 30_000) {
+    return buySpentCache.value;
+  }
+  let value = 0;
+  try {
+    const { data, error } = await supabase()
+      .from('trades')
+      .select('amount')
+      .eq('side', 'buy')
+      .gte('created_at', etMidnightUtcIso());
+    if (error) {
+      console.warn(`[risk] 查询当日买入金额失败(预算按已花 0 处理): ${error.message}`);
+    } else {
+      value = (data || []).reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
+    }
+  } catch (err) {
+    console.warn(`[risk] 查询当日买入金额失败(预算按已花 0 处理): ${err.message}`);
+  }
+  buySpentCache = { dayKey, value, at: Date.now() };
+  return value;
+}
+
+/** 成交后增量记账(避免 30s 缓存窗口内连续买入时预算失准) */
+export function noteBuySpent(amount) {
+  const dayKey = etDayKey();
+  if (buySpentCache.dayKey === dayKey && buySpentCache.value !== null) {
+    buySpentCache.value += Number(amount) || 0;
+  }
+}
+
+/**
+ * 当日已开新仓数。重启后用当日 buy 交易的 distinct symbols 播种——
+ * 会把加仓也计入(保守超计),方向安全:宁可少开仓,不可超配额。
+ */
+export async function getNewPositionsToday() {
+  const dayKey = etDayKey();
+  if (newPositionState.dayKey !== dayKey) {
+    newPositionState = { dayKey, symbols: [] };
+    newPositionSeededDay = null;
+  }
+  if (newPositionSeededDay !== dayKey) {
+    newPositionSeededDay = dayKey;
+    try {
+      const { data, error } = await supabase()
+        .from('trades')
+        .select('symbol')
+        .eq('side', 'buy')
+        .gte('created_at', etMidnightUtcIso());
+      if (!error) {
+        for (const t of data || []) {
+          newPositionState = updateNewPositionState(newPositionState, { dayKey, symbol: t.symbol });
+        }
+      }
+    } catch {
+      // 播种失败按进程内计数继续(fail-open)
+    }
+  }
+  return newPositionState.symbols.length;
+}
+
+/** 开新仓成交后记账(加仓不调用) */
+export function noteNewPositionOpened(symbol) {
+  newPositionState = updateNewPositionState(newPositionState, { dayKey: etDayKey(), symbol });
+}
+
 /** 当前硬风控状态(管理页展示) */
 export function getRiskControlState() {
   return {
@@ -176,9 +295,17 @@ export function getRiskControlState() {
   };
 }
 
+/** 当日预算基数:日初组合总值(与亏损熔断同一基线快照),不可得返回 null */
+export async function getDailyBudgetBase() {
+  return getDayBaseline(etDayKey());
+}
+
 /** 管理重置时清进程内状态(快照已清空,基线/熔断状态随之失效) */
 export function resetRiskControlState() {
   baselineCache = { dayKey: null, value: null };
   dailyLossState = { dayKey: null, tripped: false };
   baselineWarnedDay = null;
+  buySpentCache = { dayKey: null, value: null, at: 0 };
+  newPositionState = { dayKey: null, symbols: [] };
+  newPositionSeededDay = null;
 }

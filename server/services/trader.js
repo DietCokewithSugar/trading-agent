@@ -8,7 +8,14 @@ import {
   checkMaxPositions,
   sectorCapHeadroom,
   getLossStreakMultiplier,
+  computeBuyHeadroom,
+  getDailyBuySpent,
+  getDailyBudgetBase,
+  noteBuySpent,
+  getNewPositionsToday,
+  noteNewPositionOpened,
 } from './riskControls.js';
+import { getRegime, getRegimeParams } from './macroRegime.js';
 import { decideTrade, reviewProposedTrade } from './deepseek.js';
 import { getPortfolio, getValuation } from './portfolio.js';
 import { reflectOnClosedTrade, getMemories } from './memoryService.js';
@@ -515,6 +522,29 @@ async function settleBuyLocked({
     return { reject: maxPos.reason };
   }
 
+  const existing = valuation.positions.find((p) => p.symbol === symbol);
+
+  // 宏观环境硬风控(014,只拦买入;regime/配额都是临时状态 → transient 供池/队列重试):
+  // macro_shock 一律不开新仓;当日新开仓数配额(加仓不计)
+  const regime = getRegime();
+  const regimeParams = getRegimeParams(regime.regime);
+  if (config.enableMacro) {
+    if (regime.regime === 'macro_shock') {
+      recordReject('macro_shock');
+      return { reject: '宏观冲击状态,暂停一切新买入', transient: true };
+    }
+    if (!existing && config.maxNewPositionsPerDay > 0) {
+      const openedToday = await getNewPositionsToday();
+      if (openedToday >= config.maxNewPositionsPerDay) {
+        recordReject('new_position_quota');
+        return {
+          reject: `当日新开仓数已达上限 ${config.maxNewPositionsPerDay}`,
+          transient: true,
+        };
+      }
+    }
+  }
+
   // 风控:单笔买入金额 ≤ min(决策比例×组合总值, 总资产×maxBuyCashFraction, 剩余现金)
   let spend = Math.min(
     fraction * valuation.total_value,
@@ -523,10 +553,40 @@ async function settleBuyLocked({
   );
 
   // 风控:买入后该股票市值不超过组合总值的 maxPositionFraction
-  const existing = valuation.positions.find((p) => p.symbol === symbol);
   const existingValue = existing ? existing.market_value : 0;
   const positionCap = config.maxPositionFraction * valuation.total_value - existingValue;
   spend = Math.min(spend, Math.max(positionCap, 0));
+
+  // 宏观环境三重钳制:现金保留下限 / 当日买入预算(基数=日初总值)/ 持仓总敞口上限
+  if (config.enableMacro) {
+    const [spentToday, budgetBase] = await Promise.all([
+      getDailyBuySpent(),
+      getDailyBudgetBase(),
+    ]);
+    const headroom = computeBuyHeadroom({
+      spend,
+      cash: valuation.cash,
+      totalValue: valuation.total_value,
+      positionsValue: valuation.total_value - valuation.cash,
+      spentToday,
+      budgetBase,
+      params: regimeParams,
+    });
+    if (headroom.clamped) {
+      console.log(
+        `[trader] ${symbol} 宏观环境(${regime.regime})钳制买入金额: $${round2(spend)} → $${round2(headroom.spend)}(约束=${headroom.binding})`
+      );
+      spend = headroom.spend;
+      if (spend < config.minOrderAmount) {
+        // 预算/保留/敞口都是当日态 → transient,候选池/开盘队列保留重试
+        recordReject(headroom.binding);
+        return {
+          reject: `宏观环境额度不足(${headroom.binding}),买入金额钳制后低于下限`,
+          transient: true,
+        };
+      }
+    }
+  }
 
   if (spend < config.minOrderAmount) {
     // 队列成交也走到这里:无运行上下文时 recordReject 为 no-op,归因误差可接受
@@ -574,7 +634,18 @@ async function settleBuyLocked({
   const amount = round2(quantity * fill.fillPrice);
 
   // 执行时间线:成交所用报价自带的时间戳 + 决策窗口/run_id(队列成交无 meta,仅报价时间戳)
-  const extras = { quote_timestamp: quoteTimestampOf(quote), ...(meta || {}) };
+  // + 成交时宏观环境快照(014)
+  const extras = {
+    quote_timestamp: quoteTimestampOf(quote),
+    ...(config.enableMacro ? { macro_regime: regime.regime } : {}),
+    ...(meta || {}),
+  };
+
+  // 当日预算/开仓数记账(成交即记,失败路径不记)
+  const noteBuyDone = () => {
+    noteBuySpent(amount);
+    if (!existing) noteNewPositionOpened(symbol);
+  };
 
   const { data, error } = await supabase().rpc('execute_trade', {
     p_symbol: symbol,
@@ -590,6 +661,7 @@ async function settleBuyLocked({
     p_take_profit_percent: takeProfitPercent,
   });
   if (!error) {
+    noteBuyDone();
     return { trade: logTrade(await recordFillDetails(data, fill, extras)) };
   }
   if (!isMissingTradeRpc(error)) throw new Error(`买入 ${symbol} 失败: ${error.message}`);
@@ -606,6 +678,7 @@ async function settleBuyLocked({
     fill,
     extras,
   });
+  noteBuyDone();
   return { trade };
 }
 
@@ -783,7 +856,7 @@ async function legacySell({ symbol, price, quantity, amount, reason, trigger, ne
   });
 }
 
-// trades 的可选明细列(008/012 迁移新增),旧库缺列时逐列剥离重试
+// trades 的可选明细列(008/012/014 迁移新增),旧库缺列时逐列剥离重试
 const OPTIONAL_TRADE_COLUMNS = [
   'quote_price',
   'slippage_bps',
@@ -791,6 +864,7 @@ const OPTIONAL_TRADE_COLUMNS = [
   'run_id',
   'decision_started_at',
   'decision_finished_at',
+  'macro_regime',
 ];
 
 async function insertTrade(db, trade) {
