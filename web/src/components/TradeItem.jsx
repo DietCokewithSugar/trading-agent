@@ -1,6 +1,14 @@
 import React from 'react';
 import { Button, Card, Space, Tag, Typography } from 'antd';
-import { fmtMoney, fmtNum, fmtTime, TIER_LABELS, TRIGGER_LABELS } from '../api.js';
+import {
+  fmtMoney,
+  fmtNum,
+  fmtTime,
+  TIER_LABELS,
+  TRIGGER_LABELS,
+  REGIME_LABELS,
+  REGIME_TAG_COLORS,
+} from '../api.js';
 
 /**
  * 单条交易记录卡片(仪表盘「最近交易」与交易记录页共用)。
@@ -17,6 +25,11 @@ export default function TradeItem({ trade: t, onSymbolClick, compact = false }) 
         {TRIGGER_LABELS[t.trigger] && (
           <Tag color="orange" style={{ marginRight: 0 }}>
             {TRIGGER_LABELS[t.trigger]}
+          </Tag>
+        )}
+        {t.macro_regime && REGIME_LABELS[t.macro_regime] && (
+          <Tag color={REGIME_TAG_COLORS[t.macro_regime]} style={{ marginRight: 0 }}>
+            {REGIME_LABELS[t.macro_regime]}
           </Tag>
         )}
         <Button type="link" size="small" style={{ padding: 0 }} onClick={() => onSymbolClick(t.symbol)}>

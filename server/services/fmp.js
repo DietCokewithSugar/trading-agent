@@ -43,6 +43,15 @@ export async function getPressReleases(limit = 20) {
 }
 
 /**
+ * 经济日历(CPI/FOMC/非农等定期数据,含 estimate/previous/actual 与发布时间)。
+ * from/to 为 YYYY-MM-DD。部分 FMP 套餐不含该端点:403/404 时抛错由调用方判定停用。
+ */
+export async function getEconomicCalendar(from, to) {
+  const data = await fmpGet('/economic-calendar', { from, to });
+  return Array.isArray(data) ? data : [];
+}
+
+/**
  * 当前美股市场时段(美东时间):
  * pre 盘前 4:00–9:30 / regular 盘中 9:30–16:00 / post 盘后 16:00–20:00 / closed 休市。
  * 周末与交易所假日(marketCalendar.js 规则计算)直接 closed;

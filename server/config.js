@@ -121,6 +121,40 @@ export const config = {
   lossStreakCount: num0(process.env.LOSS_STREAK_COUNT, 3),
   lossStreakScale: Math.min(num0(process.env.LOSS_STREAK_SCALE, 0.5), 1),
 
+  // ── 宏观信号层(014)──
+  // 总开关:关闭后整体退回"纯新闻即时模式"(无宏观分析/候选池/分配器,行为同 013)
+  enableMacro: process.env.ENABLE_MACRO !== 'false',
+  // 经济日历刷新间隔(分钟);FMP 套餐不含该端点时自动停用(黑窗失效,其余宏观功能不受影响)
+  calendarPollMinutes: num(process.env.CALENDAR_POLL_MINUTES, 60),
+  // 宏观事件有效窗口(小时):聚合 regime 时只看该窗口内的事件
+  macroEventValidityHours: num(process.env.MACRO_EVENT_VALIDITY_HOURS, 72),
+  // 宏观冲击持续时长(小时):一档高置信 risk_off 事件触发 macro_shock 后的锁定期
+  macroShockHours: num(process.env.MACRO_SHOCK_HOURS, 6),
+  // 重大数据发布黑窗:发布前/后 N 分钟内不执行新的买入分配(卖出/止损不受影响;0=关闭)
+  blackoutBeforeMinutes: num0(process.env.BLACKOUT_BEFORE_MINUTES, 30),
+  blackoutAfterMinutes: num0(process.env.BLACKOUT_AFTER_MINUTES, 30),
+
+  // ── 候选池与资金分配器(014)──
+  // 盘中分配节奏:每 N 分钟一轮(开盘后首轮立即执行,清算隔夜积累的候选)
+  allocationIntervalMinutes: num(process.env.ALLOCATION_INTERVAL_MINUTES, 15),
+  // 每轮分配最多执行的买入候选数(LLM 交易决策只对这些头部候选发生)
+  maxAllocationsPerRun: num(process.env.MAX_ALLOCATIONS_PER_RUN, 3),
+  // 候选有效期(小时):新闻信号的时效性,超龄自动过期
+  candidateMaxAgeHours: num(process.env.CANDIDATE_MAX_AGE_HOURS, 24),
+  // 当日最多开多少个新仓(加仓不计;0=关闭)
+  maxNewPositionsPerDay: num0(process.env.MAX_NEW_POSITIONS_PER_DAY, 3),
+  // 同票多空冲突判定窗口(分钟):窗口内存在反向高置信信号时进入冲突消解
+  conflictWindowMinutes: num(process.env.CONFLICT_WINDOW_MINUTES, 120),
+  // 各宏观环境下的组合参数(代码常量,沿 tierSizeMultipliers 先例不逐项开 env):
+  // minCashReserve=现金保留下限(占组合总值) dailyBuyBudget=当日买入预算(占当日初组合总值)
+  // maxGrossExposure=持仓总敞口上限 macroMultiplier=买入金额宏观乘数 allowedTiers=允许的信号档位
+  macroRegimeParams: {
+    risk_on: { minCashReserve: 0.15, dailyBuyBudget: 0.45, maxGrossExposure: 0.85, macroMultiplier: 1.2, allowedTiers: [1, 2] },
+    neutral: { minCashReserve: 0.25, dailyBuyBudget: 0.35, maxGrossExposure: 0.75, macroMultiplier: 1.0, allowedTiers: [1, 2] },
+    risk_off: { minCashReserve: 0.4, dailyBuyBudget: 0.15, maxGrossExposure: 0.5, macroMultiplier: 0.5, allowedTiers: [1], minConfidence: 0.7 },
+    macro_shock: { minCashReserve: 1, dailyBuyBudget: 0, maxGrossExposure: 0, macroMultiplier: 0, allowedTiers: [] },
+  },
+
   // 关注列表(用于 Yahoo RSS 抓取),持仓股票会自动加入
   watchlist: (process.env.WATCHLIST || 'AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA')
     .split(',')

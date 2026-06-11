@@ -10,6 +10,10 @@ import { isHalted } from './halt.js';
  * 待下一个常规交易时段以当日开盘价(叠加盘中滑点)成交。
  * 隔夜新闻的跳空缺口由市场兑现,不再被模拟盘记成策略收益——这是成交真实化的关键一环。
  * pending_orders 表不可用(010 迁移未执行)时整体停用,trader 退回旧的立即成交路径。
+ *
+ * 014 之后:休市买入的主路径已被候选池(candidate_signals + allocator)替代——
+ * 利好信号直接入池等开盘统一分配,本队列主要服务休市卖出与候选池不可用时的 legacy 买入;
+ * 历史遗留的买入挂单仍由 fillPendingOrder 照常消化。
  */
 
 let tableMissing = false;

@@ -121,6 +121,17 @@ async function linkAnalysis(db, analysisId, eventId) {
   if (error) console.warn(`[event] 关联分析 ${analysisId} → 事件 ${eventId} 失败: ${error.message}`);
 }
 
+/**
+ * 同一股票同方向的新闻交易冷却复查(分配器在执行候选前调用:
+ * 上一轮刚成交的同票候选,本轮不能再买)。symbol+side 直接给定。
+ */
+export async function checkTradeCooldown(symbol, side) {
+  return checkCooldown(supabase(), {
+    symbol,
+    sentiment: side === 'buy' ? 'bullish' : 'bearish',
+  });
+}
+
 /** 同一股票同方向的新闻交易,冷却期内不再重复触发 */
 async function checkCooldown(db, analysisRow) {
   try {

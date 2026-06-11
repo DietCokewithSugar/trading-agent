@@ -5,6 +5,8 @@ import { getStockNews, getGeneralNews, getPressReleases, getQuote } from './fmp.
 import { getYahooNews } from './yahoo.js';
 import { analyzeArticle } from './deepseek.js';
 import { resolveEvent, markEventTraded } from './eventService.js';
+import { isMacroCandidate, processMacroArticle } from './macroService.js';
+import { recomputeRegime } from './macroRegime.js';
 import { scoreSource, computeFinalConfidence, isPressRelease } from './credibility.js';
 import { recordSignalPrice } from './signalReturns.js';
 import { handleSignal } from './trader.js';
@@ -262,6 +264,8 @@ export async function runCycle({ fullFetch = false, trigger = 'scheduler' } = {}
     deduped: 0,
     held: 0,
     queued: 0,
+    pooled: 0,
+    macroEvents: 0,
     trades: 0,
     errors: [],
   };
@@ -293,6 +297,19 @@ export async function runCycle({ fullFetch = false, trigger = 'scheduler' } = {}
 
     for (const article of toAnalyze) {
       try {
+        // 宏观路由:无个股指向的综合财经新闻走宏观分析师(占用本轮分析名额;
+        // 积压队列已让带代码的文章优先,宏观新闻自然限流)
+        if (isMacroCandidate(article)) {
+          const macroEvent = await processMacroArticle(article);
+          await markAnalyzed(article.id);
+          summary.analyzed += 1;
+          if (macroEvent) {
+            summary.macroEvents += 1;
+            await recomputeRegime('event'); // 新宏观事件立即重算环境(失败只告警)
+          }
+          continue;
+        }
+
         const analysisRow = await analyzeAndStore(article);
         await markAnalyzed(article.id);
         summary.analyzed += 1;
@@ -377,8 +394,16 @@ export async function runCycle({ fullFetch = false, trigger = 'scheduler' } = {}
           continue;
         }
 
+        // 候选行带 event_id 供审计(resolveEvent 只回写了数据库行,内存行补上)
+        if (dedup.eventId && !analysisRow.event_id) analysisRow.event_id = dedup.eventId;
+
         const result = await handleSignal(article, analysisRow);
-        if (result?.queued) {
+        if (result?.pooled) {
+          // 利好信号已入候选池:事件视同已消费,重复报道不再二次入池;
+          // 是否真正成交由资金分配器按分数与预算决定
+          summary.pooled += 1;
+          await markEventTraded(dedup.eventId, null);
+        } else if (result?.queued) {
           // 休市信号已挂入开盘队列:事件视同已消费,后续重复报道不再触发
           summary.queued += 1;
           await markEventTraded(dedup.eventId, null);
@@ -401,7 +426,7 @@ export async function runCycle({ fullFetch = false, trigger = 'scheduler' } = {}
     cycleStatus.lastError = null;
     if (summary.newArticles || summary.analyzed) {
       console.log(
-        `[cycle] 完成: 新增${summary.newArticles} 分析${summary.analyzed} 信号${summary.signals} 去重${summary.deduped} 挂起${summary.held} 挂单${summary.queued} 成交${summary.trades} 用时${summary.durationMs}ms run=${runId.slice(0, 8)}`
+        `[cycle] 完成: 新增${summary.newArticles} 分析${summary.analyzed} 宏观${summary.macroEvents} 信号${summary.signals} 去重${summary.deduped} 挂起${summary.held} 挂单${summary.queued} 入池${summary.pooled} 成交${summary.trades} 用时${summary.durationMs}ms run=${runId.slice(0, 8)}`
       );
     }
     broadcast('cycle', publicSummary);
@@ -430,6 +455,8 @@ export async function runCycle({ fullFetch = false, trigger = 'scheduler' } = {}
       deduped: summary.deduped,
       held: summary.held,
       queued: summary.queued,
+      pooled: summary.pooled,
+      macro_events: summary.macroEvents,
       trades: summary.trades,
       errors: summary.errors,
       llm_calls: runStats.llmCalls,

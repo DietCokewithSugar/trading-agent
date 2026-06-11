@@ -8,6 +8,10 @@ import { getQuote } from '../services/fmp.js';
 import { getStats, getPerformance } from '../services/statsService.js';
 import { getSignalStats } from '../services/signalStats.js';
 import { listPendingOrders } from '../services/openQueue.js';
+import { getRegime, getRegimeParams } from '../services/macroRegime.js';
+import { listRecentMacroEvents } from '../services/macroService.js';
+import { getBlackoutState, getUpcomingEvents } from '../services/macroCalendar.js';
+import { countByStatus, listPoolPreview } from '../services/candidateStore.js';
 import { safeTokenEqual, createAuthRateLimiter } from '../services/authGuard.js';
 
 const router = Router();
@@ -97,6 +101,69 @@ router.get(
     res.json(await listPendingOrders());
   })
 );
+
+/** 宏观环境:当前 regime 与生效参数、近期宏观事件、经济日历/黑窗、候选池概览 */
+router.get(
+  '/macro',
+  asyncHandler(async (req, res) => {
+    if (!config.enableMacro) {
+      return res.json({ available: false });
+    }
+    const regime = getRegime();
+    const params = getRegimeParams(regime.regime);
+    const [events, pool] = await Promise.all([
+      listRecentMacroEvents(config.macroEventValidityHours, 20).catch(() => null),
+      getPoolOverview(),
+    ]);
+    const blackout = getBlackoutState();
+    res.json({
+      available: events !== null,
+      regime: {
+        regime: regime.regime,
+        risk_score: regime.risk_score,
+        rates_signal: regime.rates_signal,
+        inflation_signal: regime.inflation_signal,
+        growth_signal: regime.growth_signal,
+        shock_until: regime.shock_until,
+        updated_at: regime.updated_at,
+        params: {
+          daily_buy_budget: params.dailyBuyBudget,
+          min_cash_reserve: params.minCashReserve,
+          max_gross_exposure: params.maxGrossExposure,
+          macro_multiplier: params.macroMultiplier,
+          allowed_tiers: params.allowedTiers,
+        },
+      },
+      events: events || [],
+      calendar: {
+        available: blackout.available,
+        blackout: {
+          active: blackout.inBlackout,
+          until: blackout.until,
+          event: blackout.event?.event || null,
+        },
+        upcoming: getUpcomingEvents().map((ev) => ({
+          event: ev.event,
+          date: ev.date,
+          estimate: ev.estimate ?? null,
+          previous: ev.previous ?? null,
+          actual: ev.actual ?? null,
+        })),
+      },
+      pool: pool,
+    });
+  })
+);
+
+// 候选池概览(014 表缺失时返回 null,前端隐藏该卡片)
+async function getPoolOverview() {
+  const [counts, top] = await Promise.all([
+    countByStatus().catch(() => null),
+    listPoolPreview(10).catch(() => null),
+  ]);
+  if (counts === null && top === null) return null;
+  return { counts: counts || {}, top: top || [] };
+}
 
 /** 单只股票详情:报价(含盘前盘后)、持仓、相关分析、交易历史 */
 router.get(
@@ -203,7 +270,7 @@ router.get(
   })
 );
 
-/** SSE 实时推送流:news / analysis / trade / portfolio / snapshot / cycle 事件 */
+/** SSE 实时推送流:news / analysis / trade / portfolio / snapshot / cycle / macro 事件 */
 router.get('/stream', sseHandler);
 
 /** 调度状态(公开接口,不暴露模型等内部配置;完整状态见 /api/admin/status) */

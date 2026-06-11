@@ -151,7 +151,22 @@ export function summarizeSignals(rows) {
       label: '实际交易 vs 未交易',
       rows: bucketRows(enriched, [
         { label: '已交易', match: (r) => r.traded },
-        { label: '未交易(去重/挂起/否决)', match: (r) => !r.traded },
+        // 候选池状态细分(014):资金受限/宏观过滤/冲突搁置说明"信号好但没轮到钱/被组合层拦下",
+        // 它们的前瞻收益是衡量分配器机会成本的关键
+        {
+          label: '资金受限未交易',
+          match: (r) => !r.traded && r.candidate_status === 'capital_constrained',
+        },
+        { label: '宏观过滤', match: (r) => !r.traded && r.candidate_status === 'macro_filtered' },
+        { label: '冲突搁置', match: (r) => !r.traded && r.candidate_status === 'conflict_hold' },
+        {
+          label: '其他未交易(去重/挂起/否决)',
+          match: (r) =>
+            !r.traded &&
+            !['capital_constrained', 'macro_filtered', 'conflict_hold'].includes(
+              r.candidate_status
+            ),
+        },
       ]),
     },
   ];
@@ -204,6 +219,21 @@ export async function getSignalStats() {
     .limit(2000);
   const tradedSet = new Set((tradedRows || []).map((t) => t.analysis_id));
 
+  // 候选池状态(014 迁移容忍:表缺失时全部按 null,traded 组退回两桶口径)
+  let candidateStatusById = new Map();
+  try {
+    const { data: candRows, error: candErr } = await db
+      .from('candidate_signals')
+      .select('analysis_id, status')
+      .not('analysis_id', 'is', null)
+      .limit(2000);
+    if (!candErr) {
+      candidateStatusById = new Map((candRows || []).map((c) => [c.analysis_id, c.status]));
+    }
+  } catch {
+    // 候选池不可用时静默退回(本统计是纯观测层)
+  }
+
   const rows = (data || []).map((a) => ({
     sentiment: a.sentiment,
     tier: a.tier,
@@ -214,6 +244,7 @@ export async function getSignalStats() {
         ? null
         : Number(a.news_articles.source_score),
     traded: tradedSet.has(a.id),
+    candidate_status: candidateStatusById.get(a.id) ?? null,
     fwd_return_1h: a.fwd_return_1h === null ? null : Number(a.fwd_return_1h),
     fwd_return_1d: a.fwd_return_1d === null ? null : Number(a.fwd_return_1d),
     fwd_return_5d: a.fwd_return_5d === null ? null : Number(a.fwd_return_5d),

@@ -5,6 +5,9 @@ import { checkStops } from './services/riskMonitor.js';
 import { maybeRunDailyReview } from './services/positionReview.js';
 import { processPendingOrders } from './services/openQueue.js';
 import { backfillForwardReturns } from './services/signalReturns.js';
+import { refreshCalendar } from './services/macroCalendar.js';
+import { initMacroRegime, recomputeRegime } from './services/macroRegime.js';
+import { maybeRunAllocation } from './services/allocator.js';
 import { getMarketSession } from './services/fmp.js';
 import { broadcast, clientCount } from './services/bus.js';
 
@@ -85,6 +88,36 @@ export function startScheduler() {
       console.error(`[scheduler] 信号前瞻收益回填失败: ${err.message}`)
     );
   }, 10 * 60_000);
+
+  if (config.enableMacro) {
+    // 经济日历刷新(黑窗与 surprise 数据源;套餐不含端点时模块内部自动停用)
+    setInterval(() => {
+      refreshCalendar().catch((err) =>
+        console.error(`[scheduler] 经济日历刷新失败: ${err.message}`)
+      );
+    }, Math.max(config.calendarPollMinutes, 5) * 60_000);
+
+    // 宏观环境衰减重算:无新事件时风险分随时间衰减回 neutral,macro_shock 到期解除
+    setInterval(() => {
+      recomputeRegime('decay').catch((err) =>
+        console.error(`[scheduler] 宏观环境重算失败: ${err.message}`)
+      );
+    }, 10 * 60_000);
+
+    // 资金分配器:每分钟探测,内部限速(盘中每 ALLOCATION_INTERVAL_MINUTES 一轮,
+    // 开盘后的第一个 tick 立即执行,清算隔夜积累的候选;非盘中不执行)
+    setInterval(() => {
+      maybeRunAllocation().catch((err) =>
+        console.error(`[scheduler] 资金分配失败: ${err.message}`)
+      );
+    }, 60_000);
+
+    // 启动:加载上次宏观状态(重启延续)+ 先抓一次日历
+    setTimeout(() => {
+      initMacroRegime().catch((err) => console.error(`[scheduler] 宏观状态加载失败: ${err.message}`));
+      refreshCalendar().catch((err) => console.error(`[scheduler] 经济日历首抓失败: ${err.message}`));
+    }, 10_000);
+  }
 
   console.log(
     `[scheduler] 已启动: 新闻每 ${newsSec}s(每 ${fullEvery} 轮全源抓取) · 报价推送每 ${quoteSec}s · 快照每 ${snapSec}s · 风控每 ${riskSec}s`

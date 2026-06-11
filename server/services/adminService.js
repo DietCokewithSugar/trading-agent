@@ -1,6 +1,7 @@
 import { supabase } from '../db.js';
 import { config } from '../config.js';
 import { cycleStatus } from './newsService.js';
+import { allocatorStatus } from './allocator.js';
 import { withTradeLock } from './trader.js';
 import { clearCaches } from './fmp.js';
 import { getValuation } from './portfolio.js';
@@ -8,6 +9,8 @@ import { broadcast } from './bus.js';
 import { isHalted, setHalted } from './halt.js';
 import { resetMetrics } from './metrics.js';
 import { resetRiskControlState } from './riskControls.js';
+import { resetRegimeState } from './macroRegime.js';
+import { resetCalendarState } from './macroCalendar.js';
 
 /** admin_reset_data RPC 尚未部署(未执行 005 迁移)时的判定 */
 function isMissingResetRpc(error) {
@@ -18,10 +21,10 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** 等待运行中的交易轮结束(最多 maxWaitMs),保证重置不与抓取/分析/交易并发 */
+/** 等待运行中的交易轮与资金分配轮结束(最多 maxWaitMs),保证重置不与抓取/分析/交易并发 */
 async function drainRunningCycle(maxWaitMs = 60_000) {
   const start = Date.now();
-  while (cycleStatus.running) {
+  while (cycleStatus.running || allocatorStatus.running) {
     if (Date.now() - start > maxWaitMs) return false;
     await sleep(500);
   }
@@ -39,6 +42,9 @@ async function legacyReset(db) {
     { table: 'pending_orders', filter: (q) => q.neq('id', 0), optional: true },
     // cycle_runs 主键是 uuid(012 迁移新增,缺表时容忍),无自增 id 可比,按非空主键全删
     { table: 'cycle_runs', filter: (q) => q.not('run_id', 'is', null), optional: true },
+    // 候选池 / 宏观事件(014 迁移新增,缺表时容忍);candidate_signals 引用 trades,先删
+    { table: 'candidate_signals', filter: (q) => q.neq('id', 0), optional: true },
+    { table: 'macro_events', filter: (q) => q.neq('id', 0), optional: true },
     { table: 'trades', filter: (q) => q.neq('id', 0) },
     { table: 'news_events', filter: (q) => q.neq('id', 0) },
     { table: 'news_analyses', filter: (q) => q.neq('id', 0) },
@@ -62,6 +68,26 @@ async function legacyReset(db) {
     })
     .eq('id', 1);
   if (stateErr) throw new Error(`重置资金账户失败: ${stateErr.message}`);
+  await resetMacroStateRow(db);
+}
+
+/** 宏观状态复位为 neutral(014 迁移新增,缺表时容忍,失败仅告警) */
+async function resetMacroStateRow(db) {
+  const { error } = await db
+    .from('macro_state')
+    .update({
+      regime: 'neutral',
+      risk_score: 0,
+      rates_signal: null,
+      inflation_signal: null,
+      growth_signal: null,
+      shock_until: null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', 1);
+  if (error && !/does not exist|not find|schema cache/i.test(error.message)) {
+    console.warn(`[admin] 复位 macro_state 失败(可忽略): ${error.message}`);
+  }
 }
 
 /**
@@ -91,12 +117,20 @@ export async function resetAllData() {
         p_initial_capital: config.initialCapital,
       });
       if (!error) {
-        // 数据库里可能还是 005 版函数(truncate 列表不含 cycle_runs),补一次 best-effort 清理;
-        // 012 版函数已清过,这里删空表无副作用,缺表/失败仅告警
-        const { error: runsErr } = await db.from('cycle_runs').delete().not('run_id', 'is', null);
-        if (runsErr && !/does not exist|not find|schema cache/i.test(runsErr.message)) {
-          console.warn(`[admin] 清空 cycle_runs 失败(可忽略): ${runsErr.message}`);
+        // 数据库里可能还是 005/012 版函数(truncate 列表不含后续新表),补一次 best-effort 清理;
+        // 014 版函数已清过,这里删空表无副作用,缺表/失败仅告警
+        const cleanups = [
+          ['cycle_runs', (q) => q.not('run_id', 'is', null)],
+          ['candidate_signals', (q) => q.neq('id', 0)],
+          ['macro_events', (q) => q.neq('id', 0)],
+        ];
+        for (const [table, filter] of cleanups) {
+          const { error: cleanErr } = await filter(db.from(table).delete());
+          if (cleanErr && !/does not exist|not find|schema cache/i.test(cleanErr.message)) {
+            console.warn(`[admin] 清空 ${table} 失败(可忽略): ${cleanErr.message}`);
+          }
         }
+        await resetMacroStateRow(db);
         return;
       }
       if (!isMissingResetRpc(error)) throw new Error(`重置失败: ${error.message}`);
@@ -109,6 +143,8 @@ export async function resetAllData() {
     clearCaches();
     resetMetrics();
     resetRiskControlState();
+    resetRegimeState();
+    resetCalendarState();
     cycleStatus.lastResult = null;
     cycleStatus.lastError = null;
     cycleStatus.lastRunAt = null;
