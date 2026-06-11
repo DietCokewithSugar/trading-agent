@@ -47,6 +47,7 @@ async function adminRequest(path, { method = 'GET', token, body } = {}) {
 export const adminApi = {
   verify: (token) => adminRequest('/verify', { token }),
   status: (token) => adminRequest('/status', { token }),
+  metrics: (token) => adminRequest('/metrics', { token }),
   runCycle: (token) => adminRequest('/run-cycle', { method: 'POST', token }),
   reset: (token) =>
     adminRequest('/reset', { method: 'POST', token, body: { confirm: 'RESET' } }),
@@ -104,4 +105,37 @@ export const TRIGGER_LABELS = {
   stop_loss: '自动止损',
   take_profit: '自动止盈',
   review: '持仓复查',
+};
+
+// ===== 管理页运行指标的标签映射 =====
+
+export const RUN_TRIGGER_LABELS = {
+  scheduler: '调度',
+  manual: '手动',
+  admin: '管理',
+};
+
+export const LLM_PURPOSE_LABELS = {
+  analyst: '新闻分析',
+  trader: '交易决策',
+  'risk-officer': '风控审批',
+  'event-matcher': '事件归并',
+  review: '持仓复查',
+  reflection: '平仓复盘',
+  other: '其他',
+};
+
+export const REJECT_LABELS = {
+  event_dedup: '重复事件去重',
+  held_low_confidence: '低置信挂起观察',
+  confirm_below_threshold: '交叉确认后仍低于门槛',
+  no_quote: '无法获取报价',
+  not_actively_trading: '标的未在正常交易',
+  eligibility_gate: '未过标的准入门槛',
+  symbol_invalid: '标的核验未通过',
+  llm_hold: '决策为观望',
+  risk_officer_veto: '风控官否决',
+  risk_officer_error: '风控官审批失败',
+  price_drift_abort: '价格漂移熔断',
+  below_min_amount: '金额低于下限',
 };

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { supabase } from '../db.js';
 import { config } from '../config.js';
 import { getStockNews, getGeneralNews, getPressReleases, getQuote } from './fmp.js';
@@ -10,6 +11,8 @@ import { handleSignal } from './trader.js';
 import { getPortfolio } from './portfolio.js';
 import { broadcast } from './bus.js';
 import { isHalted } from './halt.js';
+import { beginRun, endRun, currentRunId, recordReject, sanitizeProviderText } from './metrics.js';
+import { saveCycleRun } from './cycleRuns.js';
 
 export const cycleStatus = {
   running: false,
@@ -142,6 +145,22 @@ async function getAnalysisBacklog(limit) {
     .slice(0, limit);
 }
 
+/** 近 24 小时尚未分析的积压文章数(管理页指标用),不可用时返回 null */
+export async function countAnalysisBacklog() {
+  try {
+    const since = new Date(Date.now() - 24 * 3600_000).toISOString();
+    const { count, error } = await supabase()
+      .from('news_articles')
+      .select('id', { count: 'exact', head: true })
+      .is('analyzed_at', null)
+      .gte('fetched_at', since);
+    if (error) return null;
+    return count ?? 0;
+  } catch {
+    return null;
+  }
+}
+
 /** 标记文章已分析(含判定为不相关),使其退出积压队列;分析失败的不标记,下轮重试 */
 async function markAnalyzed(articleId) {
   const { error } = await supabase()
@@ -187,14 +206,25 @@ async function analyzeAndStore(article) {
     event_summary: analysis.event_summary || null,
     final_confidence: finalConfidence,
     model: config.deepseekModel,
+    // 可观测性(012):关联本轮 run_id + LLM 调用明细(时延/用量)
+    run_id: currentRunId(),
+    llm_latency_ms: analysis.llm?.latencyMs ?? null,
+    llm_prompt_tokens: analysis.llm?.promptTokens ?? null,
+    llm_completion_tokens: analysis.llm?.completionTokens ?? null,
   };
-  // 兼容旧库:逐个剥离尚未迁移的可选列重试(003 的 event_summary、009 的 final_confidence)
+  // 兼容旧库:逐个剥离尚未迁移的可选列重试(003/009/012 各自新增的列)
+  const optionalColumns = [
+    'event_summary',
+    'final_confidence',
+    'run_id',
+    'llm_latency_ms',
+    'llm_prompt_tokens',
+    'llm_completion_tokens',
+  ];
   const payload = { ...row };
   let { data, error } = await supabase().from('news_analyses').insert(payload).select().single();
   while (error) {
-    const col = ['event_summary', 'final_confidence'].find(
-      (c) => c in payload && error.message.includes(c)
-    );
+    const col = optionalColumns.find((c) => c in payload && error.message.includes(c));
     if (!col) break;
     delete payload[col];
     ({ data, error } = await supabase().from('news_analyses').insert(payload).select().single());
@@ -208,7 +238,7 @@ async function analyzeAndStore(article) {
 }
 
 /** 完整的一轮:抓新闻 → 分析 → 交易,并通过 SSE 实时推送各环节结果 */
-export async function runCycle({ fullFetch = false } = {}) {
+export async function runCycle({ fullFetch = false, trigger = 'scheduler' } = {}) {
   // 管理后台正在重置数据时暂停,避免边删库边交易
   if (isHalted()) {
     return cycleStatus.lastResult;
@@ -218,7 +248,12 @@ export async function runCycle({ fullFetch = false } = {}) {
   }
   cycleStatus.running = true;
   const startedAt = new Date();
+  const runId = randomUUID();
+  // 开启本轮指标累加器:LLM 用量/供应商错误/拒绝原因,结束时随 cycle_runs 落库
+  beginRun({ runId, trigger });
   const summary = {
+    runId,
+    trigger,
     startedAt: startedAt.toISOString(),
     fullFetch,
     newArticles: 0,
@@ -313,6 +348,7 @@ export async function runCycle({ fullFetch = false } = {}) {
 
         if (!dedup.proceed && !dedup.confirmable) {
           summary.deduped += 1;
+          recordReject('event_dedup');
           console.log(`[cycle] ${analysisRow.symbol} 跳过交易: ${dedup.reason}`);
           continue;
         }
@@ -324,6 +360,7 @@ export async function runCycle({ fullFetch = false } = {}) {
           const boosted = finalConf === null ? null : Math.min(finalConf * boost, 1);
           if (boosted !== null && boosted < config.minFinalConfidence) {
             summary.deduped += 1;
+            recordReject('confirm_below_threshold');
             console.log(
               `[cycle] ${analysisRow.symbol} 交叉确认后综合置信度 ${boosted.toFixed(2)} 仍低于门槛 ${config.minFinalConfidence},继续观望`
             );
@@ -333,6 +370,7 @@ export async function runCycle({ fullFetch = false } = {}) {
         } else if (finalConf !== null && finalConf < config.minFinalConfidence) {
           // 来源可信度不足:不立即交易,事件已记录,等待独立信源交叉确认
           summary.held += 1;
+          recordReject('held_low_confidence');
           console.log(
             `[cycle] ${analysisRow.symbol} 综合置信度 ${finalConf.toFixed(2)} 低于门槛 ${config.minFinalConfidence}(来源可信度/时效不足),挂起等待交叉确认`
           );
@@ -356,22 +394,52 @@ export async function runCycle({ fullFetch = false } = {}) {
     }
 
     summary.durationMs = Date.now() - startedAt.getTime();
-    cycleStatus.lastResult = summary;
+    // 公开面(SSE 广播 / /api/status 的 lastResult)的错误文案脱敏,
+    // 完整错误原文只随 cycle_runs 落库,经 token 门控的管理接口查看
+    const publicSummary = { ...summary, errors: summary.errors.map(sanitizeProviderText) };
+    cycleStatus.lastResult = publicSummary;
     cycleStatus.lastError = null;
     if (summary.newArticles || summary.analyzed) {
       console.log(
-        `[cycle] 完成: 新增${summary.newArticles} 分析${summary.analyzed} 信号${summary.signals} 去重${summary.deduped} 挂起${summary.held} 挂单${summary.queued} 成交${summary.trades} 用时${summary.durationMs}ms`
+        `[cycle] 完成: 新增${summary.newArticles} 分析${summary.analyzed} 信号${summary.signals} 去重${summary.deduped} 挂起${summary.held} 挂单${summary.queued} 成交${summary.trades} 用时${summary.durationMs}ms run=${runId.slice(0, 8)}`
       );
     }
-    broadcast('cycle', summary);
-    return summary;
+    broadcast('cycle', publicSummary);
+    return publicSummary;
   } catch (err) {
     console.error(`[cycle] 本轮失败: ${err.message}`);
-    cycleStatus.lastError = err.message;
     summary.errors.push(err.message);
-    cycleStatus.lastResult = summary;
-    return summary;
+    summary.durationMs = Date.now() - startedAt.getTime();
+    const publicSummary = { ...summary, errors: summary.errors.map(sanitizeProviderText) };
+    cycleStatus.lastError = sanitizeProviderText(err.message);
+    cycleStatus.lastResult = publicSummary;
+    return publicSummary;
   } finally {
+    // 每轮指标落库(成功/失败轮都落;纯观测层,失败绝不影响交易主链路)
+    const runStats = endRun();
+    saveCycleRun({
+      run_id: runId,
+      trigger_source: trigger,
+      full_fetch: fullFetch,
+      started_at: startedAt.toISOString(),
+      finished_at: new Date().toISOString(),
+      duration_ms: summary.durationMs ?? Date.now() - startedAt.getTime(),
+      new_articles: summary.newArticles,
+      analyzed: summary.analyzed,
+      signals: summary.signals,
+      deduped: summary.deduped,
+      held: summary.held,
+      queued: summary.queued,
+      trades: summary.trades,
+      errors: summary.errors,
+      llm_calls: runStats.llmCalls,
+      llm_prompt_tokens: runStats.llmPromptTokens,
+      llm_completion_tokens: runStats.llmCompletionTokens,
+      llm_cost: runStats.llmCost,
+      fmp_errors: runStats.fmpErrors,
+      deepseek_errors: runStats.deepseekErrors,
+      reject_reasons: runStats.rejectReasons,
+    }).catch(() => {});
     cycleStatus.running = false;
     cycleStatus.lastRunAt = startedAt.toISOString();
   }

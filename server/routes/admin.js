@@ -1,10 +1,13 @@
 import { Router } from 'express';
+import { supabase } from '../db.js';
 import { config } from '../config.js';
-import { runCycle, cycleStatus } from '../services/newsService.js';
+import { runCycle, cycleStatus, countAnalysisBacklog } from '../services/newsService.js';
 import { resetAllData } from '../services/adminService.js';
 import { clientCount } from '../services/bus.js';
 import { isHalted } from '../services/halt.js';
 import { safeTokenEqual, createAuthRateLimiter } from '../services/authGuard.js';
+import { getTodayMetrics } from '../services/metrics.js';
+import { listRecentRuns, aggregateRejectReasons, isCycleRunsAvailable } from '../services/cycleRuns.js';
 
 const router = Router();
 
@@ -61,8 +64,46 @@ router.post(
     if (isHalted()) {
       return res.status(409).json({ error: '系统暂停中(可能正在重置数据),请稍后再试' });
     }
-    runCycle({ fullFetch: true }); // 异步执行,不阻塞响应
+    runCycle({ fullFetch: true, trigger: 'admin' }); // 异步执行,不阻塞响应
     res.json({ started: true });
+  })
+);
+
+/** 待开盘挂单数(指标面板用),表/连接不可用时返回 null */
+async function countPendingOrders() {
+  try {
+    const { count, error } = await supabase()
+      .from('pending_orders')
+      .select('id', { count: 'exact', head: true })
+      .eq('status', 'pending');
+    if (error) return null;
+    return count ?? 0;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 运行指标(管理页指标面板):最近运行记录、今日 LLM 用量/成本、
+ * 上游错误计数、分析积压、待开盘挂单、拒绝原因分布。
+ * cycle_runs 的 errors 含上游供应商名称,只允许经本 token 门控接口暴露。
+ */
+router.get(
+  '/metrics',
+  asyncHandler(async (req, res) => {
+    const [runs, backlog, pendingOrders] = await Promise.all([
+      listRecentRuns(20),
+      countAnalysisBacklog(),
+      countPendingOrders(),
+    ]);
+    res.json({
+      runs,
+      runsAvailable: isCycleRunsAvailable(),
+      today: getTodayMetrics(),
+      backlog,
+      pendingOrders,
+      rejectReasons: aggregateRejectReasons(runs),
+    });
   })
 );
 

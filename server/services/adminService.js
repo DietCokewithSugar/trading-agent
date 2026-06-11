@@ -6,6 +6,7 @@ import { clearCaches } from './fmp.js';
 import { getValuation } from './portfolio.js';
 import { broadcast } from './bus.js';
 import { isHalted, setHalted } from './halt.js';
+import { resetMetrics } from './metrics.js';
 
 /** admin_reset_data RPC 尚未部署(未执行 005 迁移)时的判定 */
 function isMissingResetRpc(error) {
@@ -35,6 +36,8 @@ async function legacyReset(db) {
     // trade_reflections / pending_orders 引用 trades(006/010 迁移新增,缺表时容忍)
     { table: 'trade_reflections', filter: (q) => q.neq('id', 0), optional: true },
     { table: 'pending_orders', filter: (q) => q.neq('id', 0), optional: true },
+    // cycle_runs 主键是 uuid(012 迁移新增,缺表时容忍),无自增 id 可比,按非空主键全删
+    { table: 'cycle_runs', filter: (q) => q.not('run_id', 'is', null), optional: true },
     { table: 'trades', filter: (q) => q.neq('id', 0) },
     { table: 'news_events', filter: (q) => q.neq('id', 0) },
     { table: 'news_analyses', filter: (q) => q.neq('id', 0) },
@@ -86,14 +89,23 @@ export async function resetAllData() {
       const { error } = await db.rpc('admin_reset_data', {
         p_initial_capital: config.initialCapital,
       });
-      if (!error) return;
+      if (!error) {
+        // 数据库里可能还是 005 版函数(truncate 列表不含 cycle_runs),补一次 best-effort 清理;
+        // 012 版函数已清过,这里删空表无副作用,缺表/失败仅告警
+        const { error: runsErr } = await db.from('cycle_runs').delete().not('run_id', 'is', null);
+        if (runsErr && !/does not exist|not find|schema cache/i.test(runsErr.message)) {
+          console.warn(`[admin] 清空 cycle_runs 失败(可忽略): ${runsErr.message}`);
+        }
+        return;
+      }
       if (!isMissingResetRpc(error)) throw new Error(`重置失败: ${error.message}`);
       console.warn('[admin] admin_reset_data RPC 不可用,退回逐表删除(请尽快执行 005 迁移)');
       await legacyReset(db);
     });
 
-    // 清进程内状态:报价/档案缓存与上一轮结果都已对应被删除的数据
+    // 清进程内状态:报价/档案缓存、运行指标与上一轮结果都已对应被删除的数据
     clearCaches();
+    resetMetrics();
     cycleStatus.lastResult = null;
     cycleStatus.lastError = null;
     cycleStatus.lastRunAt = null;
