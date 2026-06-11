@@ -180,7 +180,11 @@ create table if not exists macro_events (
   market_impact_tier smallint not null check (market_impact_tier between 1 and 3),
   confidence numeric,
   summary text,
-  created_at timestamptz not null default now()
+  -- 归并的报道篇数(015):同一宏观事件的重复报道只累计篇数,不插新行
+  article_count integer not null default 1,
+  created_at timestamptz not null default now(),
+  -- 最近一次归并时间(015);created_at 保持首报时点,时间衰减与有效期均以首报为准
+  updated_at timestamptz not null default now()
 );
 create index if not exists idx_macro_events_created on macro_events (created_at desc);
 

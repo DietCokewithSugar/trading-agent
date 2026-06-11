@@ -160,6 +160,7 @@ function MacroEventsList({ events }) {
                 <Tag color={ev.market_impact_tier === 1 ? 'red' : ev.market_impact_tier === 2 ? 'orange' : 'default'}>
                   第{ev.market_impact_tier}档
                 </Tag>
+                {ev.article_count > 1 && <Tag color="blue">×{ev.article_count} 篇报道</Tag>}
                 {(ev.affected_sectors || []).map((s) => (
                   <Tag key={s.sector} color={SECTOR_DIR_COLORS[s.direction]}>
                     {s.sector}
