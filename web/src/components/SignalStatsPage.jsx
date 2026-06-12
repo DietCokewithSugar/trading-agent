@@ -157,6 +157,46 @@ export default function SignalStatsPage() {
         alpha,而不只是赶上了好行情。
       </Typography.Paragraph>
 
+      {data.pooling && data.pooling.n > 0 && (
+        <Card title="候选池排队成本(入池路径成交)" size="small">
+          <Row gutter={[12, 12]}>
+            <Col xs={8}>
+              <Statistic title="样本数" valueRender={() => <span className="num">{data.pooling.n}</span>} valueStyle={{ fontSize: 20 }} />
+            </Col>
+            <Col xs={8}>
+              <Statistic
+                title="平均等待"
+                valueRender={() => (
+                  <span className="num">
+                    {data.pooling.avg_wait_minutes === null ? '—' : `${data.pooling.avg_wait_minutes} 分钟`}
+                  </span>
+                )}
+                valueStyle={{ fontSize: 20 }}
+              />
+            </Col>
+            <Col xs={8}>
+              <Statistic
+                title="平均入池→成交漂移"
+                valueRender={() =>
+                  data.pooling.avg_drift_percent === null ? (
+                    '—'
+                  ) : (
+                    <span className={`num ${data.pooling.avg_drift_percent > 0 ? 'down' : 'up'}`}>
+                      {fmtSignedPct(data.pooling.avg_drift_percent)}
+                    </span>
+                  )
+                }
+                valueStyle={{ fontSize: 20 }}
+              />
+            </Col>
+          </Row>
+          <Typography.Paragraph type="secondary" style={{ fontSize: 13, margin: '8px 0 0' }}>
+            漂移为正表示排队期间价格上行、买得更贵(排队成本);对比上方「执行路径与排队时长」分桶的
+            1 小时收益,可量化候选池延迟换来的资金分配是否抵得过信号变陈旧。
+          </Typography.Paragraph>
+        </Card>
+      )}
+
       {data.groups.map((g) => (
         <GroupTable key={g.key} group={g} />
       ))}

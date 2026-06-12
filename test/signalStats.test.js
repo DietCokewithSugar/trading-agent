@@ -61,6 +61,42 @@ test('按档位/已交易分桶', () => {
   assert.equal(tradedRows.find((r) => r.label === '已交易').n_1d, 1);
 });
 
+test('按宏观环境分桶:入池快照为准,未入池信号落兜底桶', () => {
+  const rows = [
+    signal({ macro_regime: 'risk_on', fwd_return_1d: 2 }),
+    signal({ macro_regime: 'risk_off', fwd_return_1d: -1 }),
+    signal({ fwd_return_1d: 1 }), // 无 macro_regime 字段(未入池/迁移前数据)
+  ];
+  const regimeRows = summarizeSignals(rows).groups.find((g) => g.key === 'regime').rows;
+  assert.equal(regimeRows.find((r) => r.label === '风险偏好').n_1d, 1);
+  assert.equal(regimeRows.find((r) => r.label === '避险').n_1d, 1);
+  assert.equal(regimeRows.find((r) => r.label === '未入池').n_1d, 1);
+  assert.equal(regimeRows.find((r) => r.label === '中性'), undefined, '空桶不出现');
+});
+
+test('执行路径与排队时长分桶 + pooling 聚合', () => {
+  const rows = [
+    // 即时路径成交(无排队度量)
+    signal({ traded: true, fwd_return_1h: 2 }),
+    // 入池成交:10 分钟 / 90 分钟 / 5 小时
+    signal({ traded: true, pool_wait_minutes: 10, pool_drift_percent: 0.5, fwd_return_1h: 1 }),
+    signal({ traded: true, pool_wait_minutes: 90, pool_drift_percent: 1.5, fwd_return_1h: -1 }),
+    signal({ traded: true, pool_wait_minutes: 300, pool_drift_percent: null, fwd_return_1h: 0.5 }),
+    // 未交易信号不进该分组
+    signal({ traded: false, fwd_return_1h: 3 }),
+  ];
+  const { groups, pooling } = summarizeSignals(rows);
+  const pathRows = groups.find((g) => g.key === 'exec_path').rows;
+  assert.equal(pathRows.find((r) => r.label === '即时成交').n_1h, 1);
+  assert.equal(pathRows.find((r) => r.label === '入池成交(全部)').n_1h, 3);
+  assert.equal(pathRows.find((r) => r.label === '入池 ≤15 分钟').n_1h, 1);
+  assert.equal(pathRows.find((r) => r.label === '入池 1~4 小时').n_1h, 1);
+  assert.equal(pathRows.find((r) => r.label === '入池 >4 小时').n_1h, 1);
+  assert.equal(pooling.n, 3);
+  assert.equal(pooling.avg_wait_minutes, Math.round(((10 + 90 + 300) / 3) * 10) / 10);
+  assert.equal(pooling.avg_drift_percent, 1, '漂移均值只算有值的样本');
+});
+
 test('IC:综合置信度与方向调整收益完全同序时接近 1', () => {
   const rows = [
     signal({ final_confidence: 0.3, fwd_return_1d: 1 }),
