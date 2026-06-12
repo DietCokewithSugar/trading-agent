@@ -75,6 +75,7 @@ export default function AdminPage() {
   const [error, setError] = useState(null);
   const [status, setStatus] = useState(null);
   const [metrics, setMetrics] = useState(null);
+  const [advisor, setAdvisor] = useState(null);
   const [busy, setBusy] = useState(false);
   const [haltBusy, setHaltBusy] = useState(false);
   const [confirmText, setConfirmText] = useState('');
@@ -115,6 +116,13 @@ export default function AdminPage() {
     load();
     const timer = setInterval(load, 15000);
     return () => clearInterval(timer);
+  }, [authed, token]);
+
+  // 参数建议(近 30 天统计的重聚合):登录时拉一次,手动刷新
+  useEffect(() => {
+    if (!authed) return undefined;
+    adminApi.advisor(token).then(setAdvisor).catch(() => {});
+    return undefined;
   }, [authed, token]);
 
   const login = async ({ token: input }) => {
@@ -361,6 +369,61 @@ export default function AdminPage() {
                   </div>
                 </Col>
               </Row>
+            </Card>
+
+            <Card
+              title="参数建议(近 30 天)"
+              extra={
+                <Button
+                  size="small"
+                  onClick={() => adminApi.advisor(token).then(setAdvisor).catch(() => {})}
+                >
+                  刷新
+                </Button>
+              }
+            >
+              <Typography.Paragraph type="secondary" style={{ fontSize: 12.5 }}>
+                由信号前瞻收益统计(拦截层机会成本/来源/档位/置信度校准)与影子组合对照
+                推导的参数调整建议——每条都带样本量与 95% 置信区间证据,样本不足或差异不显著的规则
+                保持沉默。建议仅供参考,参数变更仍需人工通过环境变量执行。
+              </Typography.Paragraph>
+              {!advisor ? (
+                <Typography.Text type="secondary">加载中…</Typography.Text>
+              ) : advisor.available === false ? (
+                <Alert type="info" showIcon message="信号前瞻收益数据不可用(需执行 011 迁移),无法生成建议" />
+              ) : (
+                <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                  {(advisor.suggestions || []).map((s) => (
+                    <Alert
+                      key={s.id}
+                      type={s.level === 'adjust' ? 'warning' : 'success'}
+                      showIcon
+                      message={s.title}
+                      description={
+                        <>
+                          <div>{s.suggestion}</div>
+                          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                            证据:{s.evidence}
+                          </Typography.Text>
+                        </>
+                      }
+                    />
+                  ))}
+                  {!advisor.suggestions?.length && (
+                    <Alert
+                      type="info"
+                      showIcon
+                      message="暂无可下结论的建议:各规则样本不足或表现差异不显著(这是正常状态,不是故障)"
+                    />
+                  )}
+                  {Boolean(advisor.skipped?.length) && (
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      另有 {advisor.skipped.length} 条规则未评估:
+                      {advisor.skipped.map((s) => `${s.title}(${s.reason})`).join(';')}
+                    </Typography.Text>
+                  )}
+                </Space>
+              )}
             </Card>
 
             <Card title="手动操作">

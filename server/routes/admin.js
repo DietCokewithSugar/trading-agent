@@ -11,6 +11,7 @@ import { listRecentRuns, aggregateRejectReasons, isCycleRunsAvailable } from '..
 import { isTradingHalted, setTradingHalt } from '../services/tradingHalt.js';
 import { getRiskControlState } from '../services/riskControls.js';
 import { listRecentDecisions } from '../services/decisionLog.js';
+import { getParameterAdvice } from '../services/parameterAdvisor.js';
 
 const router = Router();
 
@@ -124,6 +125,23 @@ router.get(
       pendingOrders,
       rejectReasons: aggregateRejectReasons(runs),
     });
+  })
+);
+
+/**
+ * 参数建议器:把近 N 天的信号统计(机会成本/来源/档位/置信度校准)与影子组合
+ * 对照反向映射成参数调整建议——每条建议带样本量与置信区间证据,小样本不出建议。
+ * ?days=30 限定统计窗口;011 未迁移(无前瞻收益数据)时返回 available:false。
+ */
+router.get(
+  '/advisor',
+  asyncHandler(async (req, res) => {
+    const days = Number(req.query.days);
+    res.json(
+      await getParameterAdvice({
+        days: Number.isFinite(days) && days > 0 ? Math.min(days, 180) : 30,
+      })
+    );
   })
 );
 
