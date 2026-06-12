@@ -950,6 +950,16 @@ async function settleBuyLocked({
   // 组合状态以下单时刻为准
   const valuation = await getValuation();
 
+  // 持仓报价缺失时估值回退成本价,浮亏被抹平 → 当日亏损熔断/三重钳制全部失真,
+  // fail-closed 暂缓买入(transient,报价恢复后下一轮重试);卖出/止损不经此路径
+  if (valuation.missing_quotes?.length) {
+    console.warn(
+      `[trader] ${symbol} 持仓报价缺失(${valuation.missing_quotes.join('/')}),估值不可信,暂缓买入`
+    );
+    recordReject('valuation_unreliable');
+    return { reject: '持仓报价缺失,估值不可信,暂缓买入', transient: true, reason: 'valuation_unreliable' };
+  }
+
   // 组合级硬风控(交易锁内的最终防线,覆盖新闻买入与开盘队列成交;
   // transient 拒绝供开盘队列保留挂单重试——人工暂停/当日熔断都是临时状态)
   if (isTradingHalted()) {

@@ -10,7 +10,7 @@ import { isHalted, setHalted } from './halt.js';
 import { resetMetrics } from './metrics.js';
 import { resetRiskControlState } from './riskControls.js';
 import { resetRegimeState } from './macroRegime.js';
-import { resetShadowState, initShadowPortfolios } from './shadowPortfolio.js';
+import { resetShadowState, initShadowPortfolios, drainShadowQueue } from './shadowPortfolio.js';
 
 /** admin_reset_data RPC 尚未部署(未执行 005 迁移)时的判定 */
 function isMissingResetRpc(error) {
@@ -117,6 +117,9 @@ export async function resetAllData() {
       err.status = 409;
       throw err;
     }
+    // 排空影子组合串行链:已入队的影子改账在截库前执行完,halt 旗标挡住新任务,
+    // 否则截库+重建之后才执行的幻影成交会写进全新影子账本
+    await drainShadowQueue();
 
     await withTradeLock(async () => {
       const db = supabase();

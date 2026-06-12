@@ -137,8 +137,27 @@ export function matchCalendarSurprise(eventType, occurredAt = new Date()) {
   };
   const pattern = KEYWORDS[eventType];
   if (!pattern) return null;
-  const dayStart = new Date(occurredAt).setUTCHours(0, 0, 0, 0);
-  const dayEnd = dayStart + 24 * 3600_000;
+  // "同日"按美东日历日:UTC 日界会让美东 20 点后的文章匹配失败或错配到次日。
+  // 沿 etMidnightUtcIso 的先例分别尝试 EST/EDT 偏移,取换算回美东后仍为当日零点的那个
+  const ET_DAY_FMT = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' });
+  const ET_HOUR_FMT = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    hour: '2-digit',
+    hourCycle: 'h23',
+  });
+  const etDay = ET_DAY_FMT.format(new Date(occurredAt));
+  for (const offset of ['-05:00', '-04:00']) {
+    const candidate = new Date(`${etDay}T00:00:00${offset}`);
+    if (ET_DAY_FMT.format(candidate) === etDay && Number(ET_HOUR_FMT.format(candidate)) === 0) {
+      const dayStart = candidate.getTime();
+      const dayEnd = dayStart + 24 * 3600_000;
+      return findSurpriseInWindow(pattern, dayStart, dayEnd);
+    }
+  }
+  return null;
+}
+
+function findSurpriseInWindow(pattern, dayStart, dayEnd) {
   for (const ev of state.events) {
     const at = parseCalendarDate(ev.date);
     if (at == null || at < dayStart || at >= dayEnd) continue;

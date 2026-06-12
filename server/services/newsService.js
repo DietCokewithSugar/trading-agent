@@ -371,11 +371,14 @@ export async function runCycle({ fullFetch = false, trigger = 'scheduler' } = {}
           }
         }
 
+        // 置信度缺失(LLM 漏字段)按不可交易处理:可交易门槛是"置信度 ≥ 0.5",
+        // 缺失不是达标(与 symbol_valid 缺失按未通过的约定同向)
         const actionable =
           analysisRow.sentiment !== 'neutral' &&
           analysisRow.tier !== null &&
           analysisRow.tier <= config.tradeTierThreshold &&
-          (analysisRow.confidence === null || analysisRow.confidence >= 0.5);
+          analysisRow.confidence !== null &&
+          analysisRow.confidence >= 0.5;
         if (!actionable) continue;
 
         summary.signals += 1;

@@ -13,15 +13,17 @@ export function safeTokenEqual(provided, expected) {
 }
 
 /**
- * 鉴权失败限流器:同一 IP 在 15 分钟窗口内最多 10 次失败请求
- * (skipSuccessfulRequests:鉴权成功的正常管理操作不计数),
+ * 鉴权失败限流器:同一 IP 在 15 分钟窗口内最多 10 次鉴权失败(403)请求,
  * 防止 x-admin-token 被在线暴力破解。挂在鉴权中间件之前。
+ * 只计 403:持有效 token 的正常管理操作返回的 400(确认词错)/409(运行中冲突)
+ * 不是口令猜测,不应把管理员自己锁 15 分钟。
  */
 export function createAuthRateLimiter(logPrefix = 'admin') {
   return rateLimit({
     windowMs: 15 * 60_000,
     limit: 10,
     skipSuccessfulRequests: true,
+    requestWasSuccessful: (req, res) => res.statusCode !== 403,
     standardHeaders: true,
     legacyHeaders: false,
     handler: (req, res) => {

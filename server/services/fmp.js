@@ -156,8 +156,9 @@ export async function getQuote(symbol, maxAgeMs = 10_000) {
   if (extTrade) {
     const quoteTs = normalizeTs(q.timestamp);
     const extTs = normalizeTs(extTrade.timestamp);
-    // 盘前盘后成交比常规报价更新时才采用(防止用上一交易日的旧盘后价覆盖今日收盘价)
-    if (!quoteTs || !extTs || extTs >= quoteTs) {
+    // 盘前盘后成交比常规报价更新时才采用(防止用上一交易日的旧盘后价覆盖今日收盘价);
+    // 盘后价自身无时间戳时新旧无从判断,不采用(fail-closed,退回常规报价)
+    if (extTs && (!quoteTs || extTs >= quoteTs)) {
       q.extended_price = extTrade.price;
       q.effective_price = extTrade.price;
       q.extended_change_percent = ((extTrade.price - q.price) / q.price) * 100;
