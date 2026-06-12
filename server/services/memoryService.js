@@ -1,6 +1,7 @@
 import { supabase } from '../db.js';
 import { config } from '../config.js';
 import { reflectTrade } from './deepseek.js';
+import { getHoldingBenchmark } from './benchmark.js';
 
 function round2(n) {
   return Math.round(n * 100) / 100;
@@ -21,6 +22,10 @@ function warnMissingOnce() {
   warnedMissingTable = true;
   console.warn('[memory] trade_reflections 表不可用,交易记忆功能停用(请执行 006 迁移)');
 }
+
+// 016 迁移新增的可选列(同期 SPY 基准):旧库缺列时逐列剥离重试,各列只告警一次
+const OPTIONAL_REFLECTION_COLUMNS = ['spy_return_percent', 'excess_return_percent'];
+const missingReflectionColumns = new Set();
 
 /**
  * 平仓复盘:对一笔已实现盈亏的卖出,回溯买入论点,让 DeepSeek 提炼经验教训并入库。
@@ -60,6 +65,15 @@ export async function reflectOnClosedTrade(sellTrade) {
       )
     : null;
 
+  // 同持仓期 SPY 基准(016,fail-open):让模型评判超额收益(alpha)而非绝对盈亏——
+  // 大盘普涨日的平庸盈利不算成功,跟随大盘的亏损未必是决策错误
+  const benchmark = buy
+    ? await getHoldingBenchmark({ entryAt: buy.created_at, exitAt: sellTrade.created_at })
+    : null;
+  const spyReturnPercent = benchmark?.spyReturnPercent ?? null;
+  const excessReturnPercent =
+    spyReturnPercent !== null && pnlPercent !== null ? round2(pnlPercent - spyReturnPercent) : null;
+
   const reflection = await reflectTrade({
     symbol: sellTrade.symbol,
     thesis: buy?.reason || null,
@@ -69,27 +83,38 @@ export async function reflectOnClosedTrade(sellTrade) {
     pnlPercent,
     holdingMinutes,
     sellReason: sellTrade.reason || null,
+    spyReturnPercent,
+    excessReturnPercent,
   });
 
-  const { data, error } = await db
-    .from('trade_reflections')
-    .insert({
-      trade_id: sellTrade.id,
-      symbol: sellTrade.symbol,
-      trigger: sellTrade.trigger || null,
-      entry_price: entryPrice,
-      exit_price: exitPrice,
-      realized_pnl: Number(sellTrade.realized_pnl),
-      pnl_percent: pnlPercent !== null ? round2(pnlPercent) : null,
-      holding_minutes: holdingMinutes,
-      thesis: buy?.reason || null,
-      outcome_summary: reflection.outcomeSummary,
-      lesson: reflection.lesson,
-      importance: reflection.importance,
-      model: config.deepseekModel,
-    })
-    .select()
-    .single();
+  const row = {
+    trade_id: sellTrade.id,
+    symbol: sellTrade.symbol,
+    trigger: sellTrade.trigger || null,
+    entry_price: entryPrice,
+    exit_price: exitPrice,
+    realized_pnl: Number(sellTrade.realized_pnl),
+    pnl_percent: pnlPercent !== null ? round2(pnlPercent) : null,
+    holding_minutes: holdingMinutes,
+    thesis: buy?.reason || null,
+    outcome_summary: reflection.outcomeSummary,
+    lesson: reflection.lesson,
+    importance: reflection.importance,
+    model: config.deepseekModel,
+    spy_return_percent: spyReturnPercent,
+    excess_return_percent: excessReturnPercent,
+  };
+  for (const col of missingReflectionColumns) delete row[col];
+  let { data, error } = await db.from('trade_reflections').insert(row).select().single();
+  // 016 未迁移:可选基准列逐列剥离重试,复盘照常入库
+  while (error && /column|schema/i.test(error.message)) {
+    const col = OPTIONAL_REFLECTION_COLUMNS.find((c) => c in row && error.message.includes(c));
+    if (!col) break;
+    missingReflectionColumns.add(col);
+    console.warn(`[memory] trade_reflections 缺少 ${col} 列,已降级不记录(请执行 016 迁移)`);
+    delete row[col];
+    ({ data, error } = await db.from('trade_reflections').insert(row).select().single());
+  }
   if (error) {
     if (isMissingTable(error)) {
       warnMissingOnce();
