@@ -140,11 +140,22 @@ export async function analyzeArticle(article) {
     promptTokens: usage.promptTokens,
     completionTokens: usage.completionTokens,
   };
-  if (!result.relevant || !result.symbol || result.sentiment === 'neutral') {
-    return { ...result, tier: null, llm };
+  // 输出钳制(与宏观分析路径同约定):sentiment 非白名单值按 neutral 处理(不可交易),
+  // confidence 钳到 [0,1]——越界值(如把 0.85 写成 85)否则会被 computeFinalConfidence
+  // 的 min(...,1) 抬成满分,绕过 MIN_FINAL_CONFIDENCE 挂起,并把候选池排名放大污染;
+  // impact_strength/scope 无需处理,computeTier 对非法值自然落到第 4 档(最弱)
+  const sentiment = ['bullish', 'bearish', 'neutral'].includes(result.sentiment)
+    ? result.sentiment
+    : 'neutral';
+  const conf = Number(result.confidence);
+  const confidence = Number.isFinite(conf) ? Math.min(Math.max(conf, 0), 1) : 0.5;
+  if (!result.relevant || !result.symbol || sentiment === 'neutral') {
+    return { ...result, sentiment, confidence, tier: null, llm };
   }
   return {
     ...result,
+    sentiment,
+    confidence,
     symbol: String(result.symbol).toUpperCase(),
     tier: computeTier(result.impact_strength, result.impact_scope),
     llm,

@@ -2,6 +2,7 @@ import { supabase } from '../db.js';
 import { config } from '../config.js';
 import { cycleStatus } from './newsService.js';
 import { allocatorStatus } from './allocator.js';
+import { queueStatus } from './openQueue.js';
 import { withTradeLock } from './trader.js';
 import { clearCaches } from './fmp.js';
 import { getValuation } from './portfolio.js';
@@ -21,10 +22,13 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** 等待运行中的交易轮与资金分配轮结束(最多 maxWaitMs),保证重置不与抓取/分析/交易并发 */
+/** 等待运行中的交易轮/资金分配轮/开盘队列批次结束(最多 maxWaitMs),
+ *  保证重置不与抓取/分析/交易并发。开盘队列必须纳入:在途买单若在截库后才拿到
+ *  交易锁,会对着刚恢复初始资金的干净账本成交(止损/复查只做卖出,截库后无持仓
+ *  自然落空,无需等待) */
 async function drainRunningCycle(maxWaitMs = 60_000) {
   const start = Date.now();
-  while (cycleStatus.running || allocatorStatus.running) {
+  while (cycleStatus.running || allocatorStatus.running || queueStatus.running) {
     if (Date.now() - start > maxWaitMs) return false;
     await sleep(500);
   }

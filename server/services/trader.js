@@ -586,7 +586,7 @@ async function poolBullishSignal({ article, analysisRow, profile, price = null }
  * (档位/置信/来源 → 宏观/行业/冲突缩放 → 连亏)→ 风控官 → 锁内结算(含预算/保留/敞口)。
  * 返回 { trade } | { reject, transient?, reason }(reason 供分配器落候选状态)。
  */
-export async function executeCandidate(candidate, { macroContext = null, extraScale = 1 } = {}) {
+export async function executeCandidate(candidate, { macroContext = null, extraScale = 1, macroScale = 1 } = {}) {
   const symbol = candidate.symbol;
 
   // 候选关联的原文与分析行(决策上下文);缺失说明数据被清理,候选作废
@@ -810,7 +810,8 @@ export async function executeCandidate(candidate, { macroContext = null, extraSc
     },
     // 排队成本度量(016):入池价/入池时间随单传递,成交后算漂移与等待时长
     pool: { entryPrice: candidate.entry_price ?? null, enteredAt: candidate.created_at ?? null },
-    shadowCtx: { officerScale },
+    // 宏观分量单独随单传递:no_macro_filter 镜像时只还原宏观/行业乘数,保留冲突/风控官缩放
+    shadowCtx: { officerScale, macroScale },
     // 锁内结算前最后一次状态复核:decideTrade+风控官的长 LLM 窗口(最长两次 90s)期间
     // 新到利空可能已把候选改为 conflict_hold,不能对着刚出利空的票继续买入。
     // 读取失败(null)不据此阻断——分配器侧刚核验过,瞬时读库失败不应杀掉买入
@@ -1155,12 +1156,14 @@ async function settleBuyLocked({
 
   // 影子组合:实盘成交镜像到跟随型变体(fire-and-forget)。
   // effectiveFraction=实际成交占组合总值比例(含全部钳制),no_risk_officer 用它还原风控官缩仓;
-  // requestFraction=宏观钳制前的请求比例,no_macro_filter 用它绕过本组合不存在的宏观钳制
+  // requestFraction 已含分配路径的宏观/行业乘数,随单的 macroScale 供 no_macro_filter
+  // 镜像时还原宏观分量(否则恰在宏观层起作用的 regime 里,消融变体跟实盘买得一样大)
   const shadowMirror = (trade) =>
     mirrorBuy(trade, {
       effectiveFraction: valuation.total_value > 0 ? amount / valuation.total_value : 0,
       requestFraction: fraction,
       officerScale: shadowCtx?.officerScale ?? 1,
+      macroScale: shadowCtx?.macroScale ?? 1,
       stopLossPercent,
       takeProfitPercent,
     });

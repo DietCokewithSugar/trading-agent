@@ -31,6 +31,7 @@ import {
   applyBuy,
   applySell,
   unscaleFraction,
+  unapplyScale,
   pickTopBlocked,
   valuePositions,
 } from './shadowEngine.js';
@@ -523,13 +524,14 @@ export function onMacroFilteredCandidates(candidates, note) {
 /**
  * 实盘买入成交镜像:跟随型变体按"自己组合总值 × 还原后的比例"等比买入。
  *   no_risk_officer:实际成交比例 ÷ 风控官缩仓系数(其余约束原样保留)
- *   no_macro_filter:宏观钳制前的请求比例(风控官/冲突缩放保留,影子引擎本身无宏观钳制)
+ *   no_macro_filter:请求比例 ÷ 宏观分量(宏观乘数×行业乘数,双向还原;
+ *     风控官/冲突缩放保留,影子引擎本身无宏观钳制)
  */
-export function mirrorBuy(trade, { effectiveFraction, requestFraction, officerScale = 1, stopLossPercent = null, takeProfitPercent = null } = {}) {
+export function mirrorBuy(trade, { effectiveFraction, requestFraction, officerScale = 1, macroScale = 1, stopLossPercent = null, takeProfitPercent = null } = {}) {
   if (!isShadowAvailable() || !trade) return;
   const plans = [
     { variant: 'no_risk_officer', fraction: unscaleFraction(effectiveFraction, officerScale) },
-    { variant: 'no_macro_filter', fraction: round4(Number(requestFraction) || 0) },
+    { variant: 'no_macro_filter', fraction: unapplyScale(requestFraction, macroScale) },
   ];
   for (const plan of plans) {
     if (!(plan.fraction > 0)) continue;

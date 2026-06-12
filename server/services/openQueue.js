@@ -17,7 +17,9 @@ import { isHalted } from './halt.js';
  */
 
 let tableMissing = false;
-let running = false;
+
+/** 队列运行状态(adminService 重置前 drain 用:在途批次的买入不能与截库并发) */
+export const queueStatus = { running: false };
 
 function isMissingTable(error) {
   return (
@@ -117,9 +119,9 @@ async function fillPendingOrder(order) {
 
 /** 由调度器周期调用:常规交易时段把挂起的订单逐一成交 */
 export async function processPendingOrders() {
-  if (tableMissing || running || isHalted()) return;
+  if (tableMissing || queueStatus.running || isHalted()) return;
   if (getMarketSession() !== 'regular') return;
-  running = true;
+  queueStatus.running = true;
   try {
     const { data: orders, error } = await supabase()
       .from('pending_orders')
@@ -133,6 +135,12 @@ export async function processPendingOrders() {
       return;
     }
     for (const order of orders || []) {
+      // 逐单复查 halt 旗标:管理重置在批次进行中开始时立即停手,
+      // 否则在途买单可能在截库后拿到交易锁,把一笔幽灵交易写进全新账本
+      if (isHalted()) {
+        console.log('[queue] 检测到全局暂停,本批剩余订单留待下轮');
+        return;
+      }
       try {
         await fillPendingOrder(order);
       } catch (err) {
@@ -140,7 +148,7 @@ export async function processPendingOrders() {
       }
     }
   } finally {
-    running = false;
+    queueStatus.running = false;
   }
 }
 
