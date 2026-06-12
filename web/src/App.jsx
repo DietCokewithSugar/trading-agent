@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { Alert, App as AntApp, Badge, Card, Col, Row, Statistic, Tabs, Tag, Typography } from 'antd';
+import { Alert, App as AntApp, Tabs } from 'antd';
 import { api, fmtMoney, fmtNum, fmtPercent, SESSION_LABELS, REGIME_LABELS } from './api.js';
 import Dashboard from './components/Dashboard.jsx';
 import NewsFeed from './components/NewsFeed.jsx';
@@ -19,8 +19,6 @@ const TABS = [
   { key: 'signals', label: '信号质量' },
   { key: 'ablation', label: '消融实验' },
 ];
-
-const SESSION_TAG_COLORS = { pre: 'orange', regular: 'blue', post: 'orange', closed: 'default' };
 
 // SSE 断线时的兜底轮询间隔
 const FALLBACK_REFRESH_MS = 60_000;
@@ -173,63 +171,63 @@ function MainApp() {
   const pnl = portfolio?.pnl ?? 0;
   const session = portfolio?.market_session;
 
-  const headerStats = portfolio
-    ? [
-        { title: '总资产', render: <span className="num">{fmtMoney(portfolio.total_value)}</span> },
-        { title: '可用现金', render: <span className="num">{fmtMoney(portfolio.cash)}</span> },
-        {
-          title: '持仓市值',
-          render: <span className="num">{fmtMoney(portfolio.positions_value)}</span>,
-        },
-        {
-          title: '总盈亏',
-          render: (
-            <span className={`num ${pnl >= 0 ? 'up' : 'down'}`}>
-              {fmtMoney(pnl)} ({fmtPercent(portfolio.pnl_percent)})
-            </span>
-          ),
-        },
-      ]
-    : [];
-
   return (
-    <div className="app">
-      <header>
-        <div className="header-top">
-          <h1>AI 新闻交易员</h1>
-          <div className="header-actions">
-            <Typography.Link href="#/strategy" style={{ fontSize: 13 }}>
-              投资策略说明
-            </Typography.Link>
-            {session && (
-              <Tag color={SESSION_TAG_COLORS[session] || 'default'} style={{ marginRight: 0 }}>
-                {SESSION_LABELS[session]}
-              </Tag>
-            )}
-            <Badge
-              status={live ? 'processing' : 'default'}
-              text={live ? '实时' : '轮询'}
-              title={live ? '已建立 SSE 实时连接' : '实时连接断开,使用兜底轮询'}
-            />
+    <div className="page">
+      <header className="masthead">
+        <div className="masthead-inner">
+          <div className="masthead-top">
+            <div className="brand">
+              <h1>AI 新闻交易员</h1>
+              <span className="brand-sub">新闻驱动 · 美股模拟交易</span>
+            </div>
+            <div className="masthead-status">
+              <a href="#/strategy">投资策略说明</a>
+              {session && (
+                <span className={`chip ${session === 'regular' ? 'chip-active' : ''}`}>
+                  {SESSION_LABELS[session]}
+                </span>
+              )}
+              <span
+                className="live"
+                title={live ? '已建立实时连接' : '实时连接断开,使用兜底轮询'}
+              >
+                <span className={`live-dot ${live ? '' : 'off'}`} />
+                {live ? '实时' : '轮询'}
+              </span>
+            </div>
           </div>
+          <dl className="account-strip">
+            <div className="account-cell">
+              <dt>总资产</dt>
+              <dd>{fmtMoney(portfolio?.total_value)}</dd>
+            </div>
+            <div className="account-cell">
+              <dt>可用现金</dt>
+              <dd>{fmtMoney(portfolio?.cash)}</dd>
+            </div>
+            <div className="account-cell">
+              <dt>持仓市值</dt>
+              <dd>{fmtMoney(portfolio?.positions_value)}</dd>
+            </div>
+            <div className="account-cell">
+              <dt>总盈亏</dt>
+              <dd className={portfolio ? (pnl >= 0 ? 'up' : 'down') : ''}>
+                {fmtMoney(portfolio ? pnl : null)}
+                {portfolio && <span className="account-sub">{fmtPercent(portfolio.pnl_percent)}</span>}
+              </dd>
+            </div>
+          </dl>
         </div>
-        {portfolio && (
-          <Row gutter={[12, 12]}>
-            {headerStats.map((s) => (
-              <Col xs={12} md={6} key={s.title}>
-                <Card size="small">
-                  <Statistic title={s.title} valueRender={() => s.render} />
-                </Card>
-              </Col>
-            ))}
-          </Row>
-        )}
-        {error && <Alert type="error" banner message={error} style={{ marginTop: 12 }} />}
       </header>
 
-      <Tabs activeKey={tab} onChange={setTab} items={TABS} style={{ marginTop: 8 }} />
+      <nav className="tabbar">
+        <div className="tabbar-inner">
+          <Tabs activeKey={tab} onChange={setTab} items={TABS} />
+        </div>
+      </nav>
 
-      <main>
+      <main className="content">
+        {error && <Alert type="error" message={error} style={{ marginBottom: 16 }} />}
         {tab === 'dashboard' && (
           <Dashboard
             portfolio={portfolio}
@@ -248,9 +246,9 @@ function MainApp() {
         {tab === 'macro' && <MacroPage version={macroVersion} />}
         {tab === 'signals' && <SignalStatsPage />}
         {tab === 'ablation' && <AblationPage version={macroVersion} />}
-      </main>
 
-      <footer className="footer">模拟交易,不构成投资建议</footer>
+        <footer className="footer">模拟交易 · 虚拟资金 · 不构成投资建议</footer>
+      </main>
 
       <SymbolModal
         symbol={activeSymbol}
