@@ -45,6 +45,8 @@ async function legacyReset(db) {
     // 候选池 / 宏观事件(014 迁移新增,缺表时容忍);candidate_signals 引用 trades,先删
     { table: 'candidate_signals', filter: (q) => q.neq('id', 0), optional: true },
     { table: 'macro_events', filter: (q) => q.neq('id', 0), optional: true },
+    // 决策回放(018 迁移新增,缺表时容忍);引用 trades/news,先删
+    { table: 'trade_decisions', filter: (q) => q.neq('id', 0), optional: true },
     // 影子组合(017 迁移新增,缺表时容忍);positions 引用 portfolios,先删
     { table: 'shadow_trades', filter: (q) => q.neq('id', 0), optional: true },
     { table: 'shadow_snapshots', filter: (q) => q.neq('id', 0), optional: true },
@@ -128,6 +130,7 @@ export async function resetAllData() {
           ['cycle_runs', (q) => q.not('run_id', 'is', null)],
           ['candidate_signals', (q) => q.neq('id', 0)],
           ['macro_events', (q) => q.neq('id', 0)],
+          ['trade_decisions', (q) => q.neq('id', 0)],
           ['shadow_trades', (q) => q.neq('id', 0)],
           ['shadow_snapshots', (q) => q.neq('id', 0)],
           ['shadow_positions', (q) => q.neq('symbol', '')],

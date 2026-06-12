@@ -426,7 +426,8 @@ begin
     candidate_signals,
     shadow_portfolios,
     shadow_trades,
-    shadow_snapshots
+    shadow_snapshots,
+    trade_decisions
   restart identity cascade;
 
   -- 宏观状态复位(单行表不 truncate,避免丢失行)
@@ -571,6 +572,43 @@ language sql stable as $$
   order by variant, created_at;
 $$;
 
+-- LLM 交易决策可回放(018):每次交易员决策连同风控官审批落一行完整记录
+-- (prompt 版本、完整 messages、输入哈希、原始返回、normalized 结果、缩放链、价格快照、结局),
+-- 改 prompt/换模型后可用旧输入重放对比。RLS 不开放匿名读(完整 prompt 含内部信息,
+-- 只经 token 门控的 /api/admin/decisions 暴露)。
+create table if not exists trade_decisions (
+  id bigint generated always as identity primary key,
+  symbol text not null,
+  path text not null check (path in ('immediate', 'allocation')),
+  run_id uuid,
+  news_id bigint references news_articles(id) on delete set null,
+  analysis_id bigint references news_analyses(id) on delete set null,
+  candidate_id bigint references candidate_signals(id) on delete set null,
+  trade_id bigint references trades(id) on delete set null,
+  model text,
+  trader_prompt_version integer,
+  trader_messages jsonb,
+  trader_input_hash text,
+  trader_raw jsonb,
+  trader_decision jsonb,
+  trader_latency_ms integer,
+  officer_prompt_version integer,
+  officer_messages jsonb,
+  officer_input_hash text,
+  officer_raw jsonb,
+  officer_verdict jsonb,
+  officer_latency_ms integer,
+  sizing jsonb,
+  decision_price numeric,
+  fill_price numeric,
+  fill_quote_price numeric,
+  outcome text not null,
+  outcome_reason text,
+  created_at timestamptz not null default now()
+);
+create index if not exists idx_trade_decisions_created on trade_decisions (created_at desc);
+create index if not exists idx_trade_decisions_symbol on trade_decisions (symbol, created_at desc);
+
 -- 初始资金 10 万美元(服务端也会在缺失时自动初始化)
 insert into portfolio_state (id, cash, initial_capital)
 values (1, 100000, 100000)
@@ -589,6 +627,8 @@ alter table pending_orders enable row level security;
 -- 按约定供应商信息只允许出现在 token 门控的管理面(/api/admin/metrics);
 -- 服务端使用 service_role key,不受 RLS 限制
 alter table cycle_runs enable row level security;
+-- trade_decisions 同理:完整 prompt 含组合明细等内部信息,启用 RLS 但不开放匿名读
+alter table trade_decisions enable row level security;
 alter table macro_events enable row level security;
 alter table macro_state enable row level security;
 alter table candidate_signals enable row level security;
