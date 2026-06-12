@@ -17,7 +17,7 @@ import {
 export default function TradeItem({ trade: t, onSymbolClick, compact = false }) {
   const buy = t.side === 'buy';
   return (
-    <Card size="small">
+    <Card size="small" className={`trade-item ${buy ? 'trade-buy' : 'trade-sell'}`}>
       <Space size={8} wrap>
         <Tag color={buy ? 'green' : 'red'} style={{ marginRight: 0 }}>
           {buy ? '买入' : '卖出'}
