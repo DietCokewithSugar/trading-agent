@@ -95,6 +95,19 @@ export function unscaleFraction(fraction, scale) {
 }
 
 /**
+ * 双向仓位还原:去掉被消融层施加的任意正缩放(宏观乘数 risk_off ×0.5 要放大还原,
+ * risk_on ×1.2 也要缩小还原——无宏观层的变体两个方向的缩放都不该有)。
+ * 非法/0 缩放不除,按原值返回(宁可跟单也不放大出 Infinity)。
+ */
+export function unapplyScale(fraction, scale) {
+  const f = Number(fraction);
+  const s = Number(scale);
+  if (!Number.isFinite(f) || f <= 0) return 0;
+  if (!Number.isFinite(s) || s <= 0 || s === 1) return round4(f);
+  return round4(f / s);
+}
+
+/**
  * 宏观拦截候选中选出影子组合本轮可重放的前 N 个:按当前分降序,
  * 跳过没有 analysis_id 或该变体已买过的(去重键 variant+analysis_id)。
  */

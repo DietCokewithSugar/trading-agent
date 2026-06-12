@@ -84,9 +84,13 @@ export async function listActiveCandidates() {
 /**
  * 更新候选状态/分数(status_reason 出现在公共读表,统一脱敏)。
  * expectedStatus(乐观并发):仅当行的当前状态仍为该值时才更新,防止分配轮用内存快照
- * 覆盖并发写入(典型:利空信号在分配轮进行中触发的 conflict_hold)。返回是否实际更新。
+ * 覆盖并发写入(典型:利空信号在分配轮进行中触发的 conflict_hold)。
+ * expectedUpdatedAt:状态值做版本号有 ABA 洞——旧 conflict_hold 出窗复活的同一时刻,
+ * 新利空把行写回 conflict_hold,状态值不变、按状态比对会误判"无并发修改"并覆盖回 pending;
+ * 加上行的 updated_at(每次写入都刷新)做严格版本比对后,任何并发写都会让本次更新落空。
+ * 失败/未命中返回 false,成功返回本次写入的 updated_at(truthy,调用方据此刷新内存快照)。
  */
-export async function updateCandidate(id, fields, { expectedStatus } = {}) {
+export async function updateCandidate(id, fields, { expectedStatus, expectedUpdatedAt } = {}) {
   if (!isPoolAvailable()) return false;
   const payload = {
     ...fields,
@@ -96,16 +100,17 @@ export async function updateCandidate(id, fields, { expectedStatus } = {}) {
   };
   let query = supabase().from('candidate_signals').update(payload).eq('id', id);
   if (expectedStatus) query = query.eq('status', expectedStatus);
+  if (expectedUpdatedAt) query = query.eq('updated_at', expectedUpdatedAt);
   const { data, error } = await query.select('id');
   if (error) {
     console.warn(`[pool] 更新候选 #${id} 失败: ${error.message}`);
     return false;
   }
-  if (expectedStatus && !(data || []).length) {
-    console.log(`[pool] 候选 #${id} 状态已非 ${expectedStatus}(并发修改),跳过本次更新`);
+  if ((expectedStatus || expectedUpdatedAt) && !(data || []).length) {
+    console.log(`[pool] 候选 #${id} 已被并发修改,跳过本次更新`);
     return false;
   }
-  return true;
+  return payload.updated_at;
 }
 
 /** 执行前重读候选当前状态:关闭"读快照 → LLM 长调用 → 执行"窗口内的冲突搁置竞态。

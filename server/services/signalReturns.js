@@ -136,9 +136,13 @@ async function backfillDaily() {
       console.warn(`[signal] ${symbol} 历史行情获取失败,下轮重试: ${err.message}`);
       continue;
     }
+    // FMP 日线端点在交易日盘中会返回当日(未收盘)的行,若拿它当"第 N 个交易日收盘"
+    // 会把盘中价写死(回填只填 null、不再修正)。只采用日期早于今天的已定型 K 线,
+    // 当日收盘留待下一轮回填——晚一天到账,但口径正确。
+    const settledRows = (rows || []).filter((r) => r.date < todayEt);
     for (const a of items) {
       const { r1d, r5d } = computeDailyForwardReturns({
-        rows,
+        rows: settledRows,
         signalEtDate: etDate(a.created_at),
         signalPrice: a.signal_price,
       });

@@ -5,6 +5,7 @@ import {
   applyBuy,
   applySell,
   unscaleFraction,
+  unapplyScale,
   pickTopBlocked,
   valuePositions,
 } from '../server/services/shadowEngine.js';
@@ -89,6 +90,15 @@ test('unscaleFraction: 还原消融层缩放,非法系数不放大', () => {
   assert.equal(unscaleFraction(0.05, 0), 0.05); // scale=0 不除(避免 Infinity)
   assert.equal(unscaleFraction(0.05, null), 0.05);
   assert.equal(unscaleFraction(0, 0.5), 0);
+});
+
+test('unapplyScale: 双向还原宏观分量,非法系数不放大', () => {
+  assert.equal(unapplyScale(0.05, 0.5), 0.1); // risk_off ×0.5 → 还原翻倍
+  assert.equal(unapplyScale(0.06, 1.2), 0.05); // risk_on ×1.2 → 还原缩小
+  assert.equal(unapplyScale(0.05, 1), 0.05); // 未缩放
+  assert.equal(unapplyScale(0.05, 0), 0.05); // scale=0 不除(避免 Infinity)
+  assert.equal(unapplyScale(0.05, null), 0.05);
+  assert.equal(unapplyScale(0, 0.5), 0);
 });
 
 test('pickTopBlocked: 按当前分降序取前 N,跳过已买与缺 analysis_id 的', () => {

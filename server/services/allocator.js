@@ -168,7 +168,7 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
           await updateCandidate(
             candidate.id,
             { status: 'cancelled', current_score: fresh, status_reason: '宏观冲击期间取消低分候选' },
-            { expectedStatus: candidate.status }
+            { expectedStatus: candidate.status, expectedUpdatedAt: candidate.updated_at }
           );
         }
       }
@@ -199,6 +199,11 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
     ]);
     const events = macroEvents || [];
     const cash = Number(portfolioState?.cash);
+    // 本轮现金的滚动估计:每笔成交即时扣减。预算类拒绝时闸门必须记"拒绝时刻"的水位,
+    // 记轮初快照会虚高(本轮成交越多越虚),导致卖出释放现金后 cash > gate.cash 永不成立,
+    // capital_constrained 候选被错误冻结到跨日(并发卖出只会让真实现金高于此估计,
+    // 闸门偏保守方向是放行,fail-open)
+    let cashNow = cash;
     // 资金受限闸门:现金高于上次受限水位($1 容差)或已跨美东日(预算/配额重置)才放行复评;
     // 现金读取异常按放行处理(fail-open,宁可多花一次 LLM 也不长期冻结候选)
     const gate = allocatorStatus.capitalGate;
@@ -243,10 +248,16 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
       // 曾被宏观过滤/冲突搁置的候选回到待分配(冲突由下方 resolveConflicts 重新判定)
       preScored.push({ ...candidate, score, sectorMult });
     }
-    const missedIds = await flushCandidateWrites(scoreWrites);
+    const { missed: missedIds, stamped } = await flushCandidateWrites(scoreWrites);
     // 影子组合:被 regime 档位/置信度过滤的候选在 no_macro_filter 变体里照样重放
     if (regimeFiltered.length) {
       onMacroFilteredCandidates(regimeFiltered, `宏观过滤(${regime.regime})`);
+    }
+    // 刷分写入会更新行的 updated_at(乐观并发版本号),同步回本轮内存快照,
+    // 否则后续带 expectedUpdatedAt 的写入会拿旧版本号全部落空
+    for (const c of preScored) {
+      const ts = stamped.get(c.id);
+      if (ts) c.updated_at = ts;
     }
     const scored = preScored.filter((c) => !missedIds.has(c.id));
     if (!scored.length) return;
@@ -265,7 +276,7 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
         await updateCandidate(
           candidate.id,
           { status: 'conflict_hold', status_reason: reason },
-          { expectedStatus: candidate.status }
+          { expectedStatus: candidate.status, expectedUpdatedAt: candidate.updated_at }
         );
       }
     }
@@ -273,7 +284,7 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
       await updateCandidate(
         candidate.id,
         { status: 'cancelled', status_reason: reason },
-        { expectedStatus: candidate.status }
+        { expectedStatus: candidate.status, expectedUpdatedAt: candidate.updated_at }
       );
     }
     const scaleById = new Map();
@@ -283,7 +294,8 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
       reEligible.push(candidate);
     }
     // 曾被搁置/过滤但本轮重新可跑的候选恢复 pending;乐观并发未命中
-    //(状态刚被其它路径改写,如新到利空触发的 conflict_hold)的候选本轮不再执行
+    //(被其它路径并发改写,如新到利空触发的 conflict_hold——含状态值相同的
+    // ABA 情形,由 expectedUpdatedAt 版本比对兜住)的候选本轮不再执行
     const runnable = [];
     for (const candidate of reEligible) {
       // 资金未释放期间 capital_constrained 不复评:复位后必然再走一遍
@@ -293,10 +305,11 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
         const ok = await updateCandidate(
           candidate.id,
           { status: 'pending', status_reason: '复评后恢复待分配' },
-          { expectedStatus: candidate.status }
+          { expectedStatus: candidate.status, expectedUpdatedAt: candidate.updated_at }
         );
         if (!ok) continue;
         candidate.status = 'pending';
+        candidate.updated_at = ok;
       }
       runnable.push(candidate);
     }
@@ -336,19 +349,20 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
         continue;
       }
       // 宏观乘数 × 行业乘数 × 冲突缩仓:三者共同作为分配路径的额外仓位缩放
-      //(打分里它们只影响排序,这里才真正进入买入金额)
+      //(打分里它们只影响排序,这里才真正进入买入金额)。
+      // 宏观分量(macroScale)单独传递:no_macro_filter 影子变体镜像时只还原这部分
+      const macroScale = Number(
+        ((Number(params.macroMultiplier) || 1) * (Number(candidate.sectorMult) || 1)).toFixed(4)
+      );
       const extraScale = Number(
-        (
-          (Number(params.macroMultiplier) || 1) *
-          (Number(candidate.sectorMult) || 1) *
-          (conflictScale ? conflictScale.scale : 1)
-        ).toFixed(4)
+        (macroScale * (conflictScale ? conflictScale.scale : 1)).toFixed(4)
       );
       let result;
       try {
         result = await executeCandidate(candidate, {
           macroContext,
           extraScale,
+          macroScale,
         });
       } catch (err) {
         console.warn(`[allocator] ${candidate.symbol} 执行失败(候选留池): ${err.message}`);
@@ -357,6 +371,7 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
 
       if (result?.trade) {
         allocated += 1;
+        if (Number.isFinite(cashNow)) cashNow -= Number(result.trade.amount) || 0;
         await updateCandidate(candidate.id, {
           status: 'allocated',
           trade_id: result.trade.id,
@@ -385,8 +400,8 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
             { expectedStatus: 'pending' }
           );
         }
-        if (Number.isFinite(cash)) {
-          allocatorStatus.capitalGate = { cash, day: etDayKey() };
+        if (Number.isFinite(cashNow)) {
+          allocatorStatus.capitalGate = { cash: cashNow, day: etDayKey() };
         }
         console.log(`[allocator] 资金/配额受限(${reason}),其余候选留池等待资金释放`);
         break;
@@ -440,11 +455,13 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
 
 /**
  * 批量提交刷分写入:shouldWriteScore 过滤掉无意义的纯分数写,其余 20 个一批并发,
- * 全部带乐观并发(expectedStatus=加载时状态)。返回未命中的候选 id 集合
- * (状态已被并发修改,调用方将其从本轮可执行集合中剔除)。
+ * 全部带乐观并发(expectedStatus=加载时状态 + expectedUpdatedAt 版本比对)。
+ * 返回 { missed: 未命中候选 id 集合(已被并发修改,本轮剔除),
+ *        stamped: id → 本次写入的 updated_at(调用方同步回内存快照) }。
  */
 async function flushCandidateWrites(writes) {
   const missed = new Set();
+  const stamped = new Map();
   const pending = (writes || []).filter((w) =>
     shouldWriteScore({
       prevScore: w.candidate.current_score,
@@ -457,12 +474,14 @@ async function flushCandidateWrites(writes) {
       pending.slice(i, i + 20).map(async (w) => {
         const ok = await updateCandidate(w.candidate.id, w.fields, {
           expectedStatus: w.candidate.status,
+          expectedUpdatedAt: w.candidate.updated_at,
         });
         if (!ok) missed.add(w.candidate.id);
+        else stamped.set(w.candidate.id, ok);
       })
     );
   }
-  return missed;
+  return { missed, stamped };
 }
 
 /** 候选同票的待开盘卖单(冲突消解输入);查询失败按空处理 */
