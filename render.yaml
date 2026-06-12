@@ -119,6 +119,8 @@ services:
         value: "0.1"
       - key: SHADOW_EQUAL_WEIGHT_FRACTION
         value: "0.05"
+      - key: ENABLE_DECISION_LOG
+        value: "true"
       - key: WATCHLIST
         value: "AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA"
       - key: ADMIN_TOKEN

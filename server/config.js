@@ -169,6 +169,10 @@ export const config = {
     macro_shock: { minCashReserve: 1, dailyBuyBudget: 0, maxGrossExposure: 0, macroMultiplier: 0, allowedTiers: [] },
   },
 
+  // LLM 交易决策可回放(018):每次交易员决策连同风控官审批落库完整 prompt/原始返回,
+  // 改 prompt/换模型后可用旧输入离线重放对比;表缺失自动停用
+  enableDecisionLog: process.env.ENABLE_DECISION_LOG !== 'false',
+
   // ── 影子组合 / 消融实验(017)──
   // 与实盘并行记账的多套虚拟组合,每套关闭一层防线(风控官/宏观过滤/候选池/LLM 仓位),
   // 外加 SPY 买入持有与纯现金基准;纯观测层,表缺失(未执行 017 迁移)时自动停用

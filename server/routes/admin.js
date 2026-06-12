@@ -10,6 +10,7 @@ import { getTodayMetrics } from '../services/metrics.js';
 import { listRecentRuns, aggregateRejectReasons, isCycleRunsAvailable } from '../services/cycleRuns.js';
 import { isTradingHalted, setTradingHalt } from '../services/tradingHalt.js';
 import { getRiskControlState } from '../services/riskControls.js';
+import { listRecentDecisions } from '../services/decisionLog.js';
 
 const router = Router();
 
@@ -123,6 +124,22 @@ router.get(
       pendingOrders,
       rejectReasons: aggregateRejectReasons(runs),
     });
+  })
+);
+
+/**
+ * LLM 交易决策回放记录(018):每次交易员决策连同风控官审批的完整记录。
+ * 默认不带大字段(完整 prompt/原始返回),?full=1 时包含——完整 prompt 含
+ * 组合明细等内部信息,因此本接口只在 token 门控的管理面提供。
+ * 表缺失(未执行 018 迁移)时返回 available:false。
+ */
+router.get(
+  '/decisions',
+  asyncHandler(async (req, res) => {
+    const limit = Math.min(Number(req.query.limit) || 50, 200);
+    const full = req.query.full === '1' || req.query.full === 'true';
+    const decisions = await listRecentDecisions({ limit, full });
+    res.json({ available: decisions !== null, decisions: decisions || [] });
   })
 );
 

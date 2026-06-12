@@ -35,6 +35,7 @@ import {
   mirrorBuy,
   mirrorSell,
 } from './shadowPortfolio.js';
+import { beginDecisionEpisode, attachOfficer, finishDecision } from './decisionLog.js';
 
 function round4(n) {
   return Math.round(n * 10000) / 10000;
@@ -262,9 +263,20 @@ export async function handleSignal(article, analysisRow) {
     },
     memories,
   });
+  // 决策回放(018):从这里到流程退出,每个分支都把结局落到 trade_decisions
+  const episode = beginDecisionEpisode({
+    path: 'immediate',
+    symbol,
+    article,
+    analysisRow,
+    decisionPrice: price,
+    decision,
+    runId: currentRunId(),
+  });
 
   if (!decision.symbolValid) {
     console.warn(`[trader] ${symbol} 标的核验未通过: ${decision.validationReason}`);
+    finishDecision(episode, { outcome: 'symbol_invalid', reason: decision.validationReason });
     recordReject('symbol_invalid');
     return null;
   }
@@ -275,6 +287,7 @@ export async function handleSignal(article, analysisRow) {
     if (held && analysisRow.sentiment === 'bearish' && analysisRow.tier === 1) {
       console.warn(`[trader] ${symbol} 一档利空且已持仓但决策为 hold: ${decision.reason}`);
     }
+    finishDecision(episode, { outcome: 'hold', reason: decision.reason });
     recordReject('llm_hold');
     return null;
   }
@@ -299,6 +312,7 @@ export async function handleSignal(article, analysisRow) {
       );
       decision.fraction = sized;
     }
+    episode.sizing.signal_scaled = sized;
 
     // 连亏降仓(确定性规则,先于风控官,缩放后的 fraction 对风控官可见):
     // 最近 N 笔卖出全部亏损说明当前判断系统性失准,买入比例打折
@@ -310,6 +324,7 @@ export async function handleSignal(article, analysisRow) {
       );
       decision.fraction = cut;
     }
+    episode.sizing.streak_mult = streakMult;
 
     // 风控官审批(TradingAgents 式独立风控):站在组合角度复核这笔买入,
     // 可放行/缩仓/否决。审批调用失败时 fail-closed 放弃买入(与去重失败即跳过的约定一致)。
@@ -342,6 +357,7 @@ export async function handleSignal(article, analysisRow) {
           },
           memories,
         });
+        attachOfficer(episode, verdict);
         if (!verdict.approve) {
           console.warn(`[riskofficer] 否决 ${symbol} 买入: ${verdict.reason}`);
           onOfficerVeto({
@@ -356,6 +372,7 @@ export async function handleSignal(article, analysisRow) {
             article,
             analysisRow,
           });
+          finishDecision(episode, { outcome: 'vetoed', reason: verdict.reason });
           recordReject('risk_officer_veto');
           return null;
         }
@@ -391,10 +408,12 @@ export async function handleSignal(article, analysisRow) {
           article,
           analysisRow,
         });
+        finishDecision(episode, { outcome: 'officer_error', reason: err.message });
         recordReject('risk_officer_error');
         return null;
       }
     }
+    episode.sizing.officer_scale = officerScale;
     if (decision.fraction <= 0) {
       onOfficerVeto({
         symbol,
@@ -408,9 +427,11 @@ export async function handleSignal(article, analysisRow) {
         article,
         analysisRow,
       });
+      finishDecision(episode, { outcome: 'vetoed', reason: '缩放后仓位归零' });
       recordReject('risk_officer_veto');
       return null;
     }
+    episode.sizing.final_fraction = decision.fraction;
 
     // 执行时间线:run_id + 决策窗口随成交记录落库(挂单路径不带,队列成交无运行上下文)
     const meta = {
@@ -435,9 +456,27 @@ export async function handleSignal(article, analysisRow) {
         analysis_id: analysisRow.id,
       });
       // 入队失败(010 迁移未执行等)退回旧行为:按休市价立即成交,信号不丢
-      if (pending) return { queued: true, pending };
+      if (pending) {
+        finishDecision(episode, { outcome: 'queued', reason: '休市,挂入开盘队列' });
+        return { queued: true, pending };
+      }
     }
-    return executeBuy({ symbol, price, decision, analysisRow, article, meta, shadowCtx: { officerScale } });
+    const result = await executeBuyStructured({
+      symbol,
+      price,
+      decision,
+      analysisRow,
+      article,
+      meta,
+      shadowCtx: { officerScale },
+    });
+    if (result?.trade) {
+      finishDecision(episode, { outcome: 'executed', trade: result.trade });
+      return result.trade;
+    }
+    console.log(`[trader] ${symbol} 买入跳过: ${result?.reject}`);
+    finishDecision(episode, { outcome: 'rejected', reason: result?.reject || result?.reason });
+    return null;
   }
 
   if (getMarketSession() === 'closed') {
@@ -450,9 +489,12 @@ export async function handleSignal(article, analysisRow) {
       news_id: article.id,
       analysis_id: analysisRow.id,
     });
-    if (pending) return { queued: true, pending };
+    if (pending) {
+      finishDecision(episode, { outcome: 'queued', reason: '休市,挂入开盘队列' });
+      return { queued: true, pending };
+    }
   }
-  return executeSellOrder({
+  const sellTrade = await executeSellOrder({
     symbol,
     price,
     fraction: decision.fraction,
@@ -466,6 +508,13 @@ export async function handleSignal(article, analysisRow) {
       decision_finished_at: new Date().toISOString(),
     },
   });
+  finishDecision(
+    episode,
+    sellTrade
+      ? { outcome: 'executed', trade: sellTrade }
+      : { outcome: 'sell_skipped', reason: '未持有该股票或卖出金额低于下限' }
+  );
+  return sellTrade;
 }
 
 /**
@@ -583,12 +632,25 @@ export async function executeCandidate(candidate, { macroContext = null, extraSc
     memories,
     macroContext,
   });
+  // 决策回放(018):分配路径同样全程记录(候选 id 关联回池)
+  const episode = beginDecisionEpisode({
+    path: 'allocation',
+    symbol,
+    article,
+    analysisRow,
+    candidateId: candidate.id,
+    decisionPrice: price,
+    decision,
+    runId: currentRunId(),
+  });
 
   if (!decision.symbolValid) {
+    finishDecision(episode, { outcome: 'symbol_invalid', reason: decision.validationReason });
     recordReject('symbol_invalid');
     return { reject: `标的核验未通过: ${decision.validationReason}`, reason: 'symbol_invalid' };
   }
   if (decision.action !== 'buy' || decision.fraction <= 0) {
+    finishDecision(episode, { outcome: 'hold', reason: decision.reason });
     recordReject('llm_hold');
     return { reject: `决策为${decision.action}: ${decision.reason}`.slice(0, 200), reason: 'llm_hold' };
   }
@@ -610,17 +672,20 @@ export async function executeCandidate(candidate, { macroContext = null, extraSc
     );
     decision.fraction = sized;
   }
+  episode.sizing.signal_scaled = sized;
   if (extraScale !== 1) {
     const scaled = round4(decision.fraction * extraScale);
     console.log(`[allocator] ${symbol} 宏观/行业/冲突缩放 ×${extraScale}: ${decision.fraction} → ${scaled}`);
     decision.fraction = scaled;
   }
+  episode.sizing.conflict_scale = extraScale;
   const streakMult = await getLossStreakMultiplier();
   if (streakMult < 1) {
     const cut = round4(decision.fraction * streakMult);
     console.log(`[allocator] ${symbol} 连亏降仓 ×${streakMult}: ${decision.fraction} → ${cut}`);
     decision.fraction = cut;
   }
+  episode.sizing.streak_mult = streakMult;
 
   // 否决前方案与缩仓系数同时喂给影子组合(no_risk_officer 变体消融的正是这一层)
   const preOfficerFraction = decision.fraction;
@@ -650,6 +715,7 @@ export async function executeCandidate(candidate, { macroContext = null, extraSc
         memories,
         macroContext,
       });
+      attachOfficer(episode, verdict);
       if (!verdict.approve) {
         console.warn(`[riskofficer] 否决 ${symbol} 买入: ${verdict.reason}`);
         onOfficerVeto({
@@ -664,6 +730,7 @@ export async function executeCandidate(candidate, { macroContext = null, extraSc
           article,
           analysisRow,
         });
+        finishDecision(episode, { outcome: 'vetoed', reason: verdict.reason });
         recordReject('risk_officer_veto');
         return { reject: `风控官否决: ${verdict.reason}`, reason: 'risk_officer_veto' };
       }
@@ -696,10 +763,12 @@ export async function executeCandidate(candidate, { macroContext = null, extraSc
         article,
         analysisRow,
       });
+      finishDecision(episode, { outcome: 'officer_error', reason: err.message });
       recordReject('risk_officer_error');
       return { reject: '风控官审批失败(fail-closed)', reason: 'risk_officer_error' };
     }
   }
+  episode.sizing.officer_scale = officerScale;
   if (decision.fraction <= 0) {
     onOfficerVeto({
       symbol,
@@ -713,11 +782,13 @@ export async function executeCandidate(candidate, { macroContext = null, extraSc
       article,
       analysisRow,
     });
+    finishDecision(episode, { outcome: 'vetoed', reason: '缩放后仓位归零' });
     recordReject('risk_officer_veto');
     return { reject: '缩放后仓位归零', reason: 'risk_officer_veto' };
   }
+  episode.sizing.final_fraction = decision.fraction;
 
-  return executeBuyStructured({
+  const result = await executeBuyStructured({
     symbol,
     price,
     decision,
@@ -732,6 +803,13 @@ export async function executeCandidate(candidate, { macroContext = null, extraSc
     pool: { entryPrice: candidate.entry_price ?? null, enteredAt: candidate.created_at ?? null },
     shadowCtx: { officerScale },
   });
+  finishDecision(
+    episode,
+    result?.trade
+      ? { outcome: 'executed', trade: result.trade }
+      : { outcome: 'rejected', reason: result?.reject || result?.reason }
+  );
+  return result;
 }
 
 /** 买入下单(结构化返回):漂移熔断 → 锁内结算。返回 { trade } | { reject, transient?, reason } */
@@ -772,15 +850,6 @@ async function executeBuyStructured({ symbol, price, decision, analysisRow, arti
       shadowCtx,
     });
   });
-}
-
-async function executeBuy(args) {
-  const result = await executeBuyStructured(args);
-  if (result?.reject) {
-    console.log(`[trader] ${args.symbol} 买入跳过: ${result.reject}`);
-    return null;
-  }
-  return result?.trade ?? null;
 }
 
 /**
