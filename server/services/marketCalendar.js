@@ -114,3 +114,29 @@ export function isTradingDay(dateStr) {
   if (wd === 0 || wd === 6) return false;
   return !isHoliday(dateStr);
 }
+
+/**
+ * 距常规时段开盘(美东 9:30,半日市开盘时间不变)的分钟数;
+ * 非交易日或尚未开盘返回 null。开盘后前 ~15 分钟点差/波动显著放宽,
+ * 滑点模型(execution.js)以此施加开盘窗口乘数——开盘触发的分配轮
+ * 与开盘队列成交都落在这个窗口。
+ */
+export function minutesSinceMarketOpen(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    weekday: 'short',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date);
+  const get = (type) => parts.find((p) => p.type === type)?.value;
+  const weekday = get('weekday');
+  if (weekday === 'Sat' || weekday === 'Sun') return null;
+  const dateStr = `${get('year')}-${get('month')}-${get('day')}`;
+  if (isHoliday(dateStr)) return null;
+  const minutes = Number(get('hour')) * 60 + Number(get('minute'));
+  return minutes >= 570 ? minutes - 570 : null;
+}

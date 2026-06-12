@@ -1,6 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isHoliday, isEarlyClose, isTradingDay } from '../server/services/marketCalendar.js';
+import {
+  isHoliday,
+  isEarlyClose,
+  isTradingDay,
+  minutesSinceMarketOpen,
+} from '../server/services/marketCalendar.js';
 
 // 日历全部按规则计算,这里用已知年份的官方 NYSE 日历做基准校验。
 // 一个算错的节假日 = 风控在交易日睡觉,或在休市日空转。
@@ -50,4 +55,15 @@ test('普通交易日与周末', () => {
   assert.equal(isTradingDay('2026-06-13'), false, '周六');
   assert.equal(isTradingDay('2026-06-14'), false, '周日');
   assert.equal(isTradingDay('bogus'), false, '畸形输入不抛错');
+});
+
+test('minutesSinceMarketOpen:距 9:30 开盘的分钟数,非交易日/开盘前为 null', () => {
+  // 2026-06-11 为普通周四,EDT(UTC-4):9:35 ET = 13:35 UTC
+  assert.equal(minutesSinceMarketOpen(new Date('2026-06-11T13:35:00Z')), 5);
+  assert.equal(minutesSinceMarketOpen(new Date('2026-06-11T13:30:00Z')), 0, '开盘整点为 0');
+  assert.equal(minutesSinceMarketOpen(new Date('2026-06-11T13:00:00Z')), null, '开盘前为 null');
+  assert.equal(minutesSinceMarketOpen(new Date('2026-06-13T14:00:00Z')), null, '周六为 null');
+  assert.equal(minutesSinceMarketOpen(new Date('2026-07-03T14:00:00Z')), null, '假日为 null');
+  // 半日市开盘时间不变:2026-11-27(感恩节次日,EST,UTC-5)9:31 ET = 14:31 UTC
+  assert.equal(minutesSinceMarketOpen(new Date('2026-11-27T14:31:00Z')), 1);
 });

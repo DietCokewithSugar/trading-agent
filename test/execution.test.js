@@ -47,6 +47,36 @@ test('微盘 + 休市 + 高波动:滑点封顶 SLIPPAGE_MAX_BPS', () => {
   assert.equal(fillPrice, 5.075); // 5 × (1 + 150bp)
 });
 
+test('开盘窗口乘数:开盘后 15 分钟内滑点放大,窗口外/非盘中不生效', () => {
+  const quote = { price: 100, effective_price: 100, session: 'regular', changesPercentage: 0 };
+  const profile = { marketCap: 300e9, averageVolume: 1e9 }; // 半点差 1bp,冲击可忽略
+  const inWindow = computeFill({ side: 'buy', quote, profile, notional: 100, minutesSinceOpen: 5 });
+  const outWindow = computeFill({ side: 'buy', quote, profile, notional: 100, minutesSinceOpen: 20 });
+  const noInfo = computeFill({ side: 'buy', quote, profile, notional: 100 });
+  // OPENING_SLIPPAGE_MULT 默认 ×2
+  assert.ok(Math.abs(inWindow.slippageBps - 2) < 0.1, '开盘 5 分钟:1bp × 2');
+  assert.ok(Math.abs(outWindow.slippageBps - 1) < 0.1, '开盘 20 分钟:窗口外不放大');
+  assert.equal(noInfo.slippageBps, outWindow.slippageBps, '未传开盘分钟数不放大');
+  // 非常规时段(pre)忽略开盘窗口参数,只按时段乘数
+  const pre = computeFill({
+    side: 'buy',
+    quote: { ...quote, session: 'pre' },
+    profile,
+    notional: 100,
+    minutesSinceOpen: 5,
+  });
+  assert.ok(Math.abs(pre.slippageBps - 3) < 0.1, 'pre 时段:1bp × 3,无开盘乘数');
+  // 封顶仍生效:微盘 30bp × 开盘 2 × 波动 3(20% 封顶)= 180 → 150
+  const capped = computeFill({
+    side: 'buy',
+    quote: { price: 5, effective_price: 5, session: 'regular', changesPercentage: 20 },
+    profile: null,
+    notional: 1_000,
+    minutesSinceOpen: 1,
+  });
+  assert.equal(capped.slippageBps, 150);
+});
+
 test('computePoolMetrics:入池→成交漂移与等待时长', () => {
   const enteredAt = '2026-06-11T14:00:00Z';
   const now = new Date('2026-06-11T14:37:00Z');

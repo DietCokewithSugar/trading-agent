@@ -20,7 +20,8 @@ const SESSION_MULT = { regular: 1, pre: 3, post: 3, closed: 4 };
 
 /**
  * 模拟成交价:在市场参考价上施加不利方向的滑点(买入更贵、卖出更便宜)。
- * 滑点 = 半点差(按市值)× 时段乘数 × 波动乘数 + 订单冲击 + 佣金,封顶 slippageMaxBps。
+ * 滑点 = 半点差(按市值)× 时段乘数 × 开盘窗口乘数 × 波动乘数 + 订单冲击 + 佣金,
+ * 封顶 slippageMaxBps。
  * 新闻驱动策略的真实瓶颈正是执行成本:消息后买在 spike、盘前盘后点差大、
  * 小盘股流动性差,不建模会系统性高估收益。
  *
@@ -29,9 +30,12 @@ const SESSION_MULT = { regular: 1, pre: 3, post: 3, closed: 4 };
  * @param {object} p.quote   getQuote 返回的报价(effective_price/session/volume/changePercentage)
  * @param {object|null} p.profile 公司档案(marketCap/averageVolume),可为 null
  * @param {number} p.notional 订单金额(美元),用于冲击成本
+ * @param {number|null} [p.minutesSinceOpen] 距常规时段开盘的分钟数(marketCalendar.js);
+ *   开盘竞价后的前 openingWindowMinutes 分钟点差/波动显著放宽,regular 时段内额外乘
+ *   openingSlippageMult——开盘触发的分配轮与开盘队列成交都落在这个窗口
  * @returns {{ fillPrice: number, slippageBps: number, refPrice: number }}
  */
-export function computeFill({ side, quote, profile, notional }) {
+export function computeFill({ side, quote, profile, notional, minutesSinceOpen = null }) {
   const refPrice = quote.effective_price ?? quote.price;
   if (!config.enableSlippage) {
     return { fillPrice: round4(refPrice), slippageBps: 0, refPrice };
@@ -39,6 +43,13 @@ export function computeFill({ side, quote, profile, notional }) {
 
   const half = baseHalfSpreadBps(profile?.marketCap ?? quote.marketCap);
   const sessionMult = SESSION_MULT[quote.session] ?? SESSION_MULT.closed;
+  const openMult =
+    quote.session === 'regular' &&
+    Number.isFinite(minutesSinceOpen) &&
+    minutesSinceOpen >= 0 &&
+    minutesSinceOpen < config.openingWindowMinutes
+      ? config.openingSlippageMult
+      : 1;
 
   // 当日波动越大点差越宽:涨跌 10% 时点差翻倍,上限 3 倍
   const changePct = Math.abs(Number(quote.changesPercentage ?? quote.changePercentage) || 0);
@@ -51,7 +62,7 @@ export function computeFill({ side, quote, profile, notional }) {
     dollarVolume > 0 && Number(notional) > 0 ? (notional / dollarVolume) * 10000 * 0.1 : 0;
 
   const totalBps = Math.min(
-    half * sessionMult * volMult + impactBps + config.commissionBps,
+    half * sessionMult * openMult * volMult + impactBps + config.commissionBps,
     config.slippageMaxBps
   );
 

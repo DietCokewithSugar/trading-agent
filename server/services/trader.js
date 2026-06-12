@@ -1,6 +1,7 @@
 import { supabase } from '../db.js';
 import { config } from '../config.js';
 import { getQuote, getProfile, getMarketSession, normalizeTs } from './fmp.js';
+import { minutesSinceMarketOpen } from './marketCalendar.js';
 import { currentRunId, recordReject } from './metrics.js';
 import { isTradingHalted } from './tradingHalt.js';
 import {
@@ -871,8 +872,14 @@ async function settleBuyLocked({
     }
   }
 
-  // 模拟成交:在参考价上施加不利滑点(点差/时段/波动/订单冲击)
-  const fill = computeFill({ side: 'buy', quote, profile, notional: spend });
+  // 模拟成交:在参考价上施加不利滑点(点差/时段/开盘窗口/波动/订单冲击)
+  const fill = computeFill({
+    side: 'buy',
+    quote,
+    profile,
+    notional: spend,
+    minutesSinceOpen: minutesSinceMarketOpen(),
+  });
   if (fill.slippageBps > 0) {
     console.log(
       `[trader] ${symbol} 买入滑点 ${fill.slippageBps}bp: $${fill.refPrice} → $${fill.fillPrice}`
@@ -1035,7 +1042,13 @@ export async function executeSellOrder({
     let fill;
     if (quote) {
       const refPrice = quote.effective_price ?? quote.price;
-      fill = computeFill({ side: 'sell', quote, profile: await getProfile(symbol).catch(() => null), notional: quantity * refPrice });
+      fill = computeFill({
+        side: 'sell',
+        quote,
+        profile: await getProfile(symbol).catch(() => null),
+        notional: quantity * refPrice,
+        minutesSinceOpen: minutesSinceMarketOpen(),
+      });
       if (fill.slippageBps > 0) {
         console.log(
           `[trader] ${symbol} 卖出滑点 ${fill.slippageBps}bp: $${fill.refPrice} → $${fill.fillPrice}`
