@@ -59,3 +59,26 @@ export function computeFill({ side, quote, profile, notional }) {
   const fillPrice = round4(refPrice * (1 + (direction * totalBps) / 10000));
   return { fillPrice, slippageBps: Math.round(totalBps * 100) / 100, refPrice };
 }
+
+/**
+ * 候选池排队成本(纯函数):入池价 → 成交价的漂移(百分比,正=买贵了)与等待分钟数。
+ * 新闻 alpha 衰减很快,排队换"更优资金分配"是否划算必须可度量——这两个指标
+ * 落到 trades.pool_*,评估层(signal-stats)按等待时长分桶对比前瞻收益捕获。
+ * 入池价/时间缺失或非法时对应字段为 null(016 之前的存量候选)。
+ */
+export function computePoolMetrics({ entryPrice, enteredAt, fillPrice, now = Date.now() } = {}) {
+  const entry = Number(entryPrice);
+  const fill = Number(fillPrice);
+  const enteredTs = enteredAt ? new Date(enteredAt).getTime() : NaN;
+  const nowTs = now instanceof Date ? now.getTime() : Number(now);
+  const validEntry = Number.isFinite(entry) && entry > 0;
+  return {
+    entryPrice: validEntry ? round4(entry) : null,
+    waitMinutes:
+      Number.isFinite(enteredTs) && Number.isFinite(nowTs)
+        ? Math.max(Math.round((nowTs - enteredTs) / 60_000), 0)
+        : null,
+    driftPercent:
+      validEntry && Number.isFinite(fill) ? Math.round((fill / entry - 1) * 10000) / 100 : null,
+  };
+}

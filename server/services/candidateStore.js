@@ -29,6 +29,11 @@ export function isPoolAvailable() {
   return config.enableMacro && !tableMissing;
 }
 
+// 016 迁移新增的可选列:旧库缺列时逐列剥离重试(入池绝不能因可选列失败——
+// 否则 016 未迁移的库会把信号踢回即时交易路径,行为静默回退)
+const OPTIONAL_CANDIDATE_COLUMNS = ['entry_price'];
+const missingCandidateColumns = new Set();
+
 /** 信号入池。失败返回 null,由调用方退回即时交易路径,信号不丢 */
 export async function enqueueCandidate(candidate) {
   if (!isPoolAvailable()) return null;
@@ -38,7 +43,16 @@ export async function enqueueCandidate(candidate) {
     status_reason: candidate.status_reason ? sanitizeProviderText(candidate.status_reason) : null,
     expires_at: new Date(Date.now() + config.candidateMaxAgeHours * 3600_000).toISOString(),
   };
-  const { data, error } = await supabase().from('candidate_signals').insert(row).select().single();
+  for (const col of missingCandidateColumns) delete row[col];
+  let { data, error } = await supabase().from('candidate_signals').insert(row).select().single();
+  while (error && /column|schema/i.test(error.message)) {
+    const col = OPTIONAL_CANDIDATE_COLUMNS.find((c) => c in row && error.message.includes(c));
+    if (!col) break;
+    missingCandidateColumns.add(col);
+    console.warn(`[pool] candidate_signals 缺少 ${col} 列,已降级不记录(请执行 016 迁移)`);
+    delete row[col];
+    ({ data, error } = await supabase().from('candidate_signals').insert(row).select().single());
+  }
   if (error) {
     if (isMissingTable(error)) warnMissingOnce();
     else console.warn(`[pool] ${candidate.symbol} 入池失败,退回即时交易: ${error.message}`);

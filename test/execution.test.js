@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { computeFill } from '../server/services/execution.js';
+import { computeFill, computePoolMetrics } from '../server/services/execution.js';
 
 // 默认配置:ENABLE_SLIPPAGE=true, SLIPPAGE_MAX_BPS=150, COMMISSION_BPS=0
 
@@ -45,6 +45,36 @@ test('微盘 + 休市 + 高波动:滑点封顶 SLIPPAGE_MAX_BPS', () => {
   });
   assert.equal(slippageBps, 150);
   assert.equal(fillPrice, 5.075); // 5 × (1 + 150bp)
+});
+
+test('computePoolMetrics:入池→成交漂移与等待时长', () => {
+  const enteredAt = '2026-06-11T14:00:00Z';
+  const now = new Date('2026-06-11T14:37:00Z');
+  const m = computePoolMetrics({ entryPrice: 100, enteredAt, fillPrice: 101.5, now });
+  assert.equal(m.entryPrice, 100);
+  assert.equal(m.waitMinutes, 37);
+  assert.equal(m.driftPercent, 1.5);
+  // 负漂移(排队期间价格回落,买得更便宜)
+  assert.equal(computePoolMetrics({ entryPrice: 100, enteredAt, fillPrice: 99, now }).driftPercent, -1);
+});
+
+test('computePoolMetrics:缺失/非法输入兜底为 null', () => {
+  const m = computePoolMetrics({ entryPrice: null, enteredAt: null, fillPrice: 100 });
+  assert.equal(m.entryPrice, null);
+  assert.equal(m.waitMinutes, null);
+  assert.equal(m.driftPercent, null);
+  // 入池价为 0/负数视为非法
+  assert.equal(computePoolMetrics({ entryPrice: 0, fillPrice: 100 }).driftPercent, null);
+  // 时钟回拨不出现负等待
+  assert.equal(
+    computePoolMetrics({
+      entryPrice: 10,
+      enteredAt: '2026-06-11T15:00:00Z',
+      fillPrice: 10,
+      now: new Date('2026-06-11T14:00:00Z'),
+    }).waitMinutes,
+    0
+  );
 });
 
 test('订单冲击随订单金额线性增长', () => {
