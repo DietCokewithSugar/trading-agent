@@ -8,7 +8,7 @@ import { getQuote } from '../services/fmp.js';
 import { getStats, getPerformance } from '../services/statsService.js';
 import { getSignalStats } from '../services/signalStats.js';
 import { listPendingOrders } from '../services/openQueue.js';
-import { getRegime, getRegimeParams } from '../services/macroRegime.js';
+import { getEffectiveRegime } from '../services/macroRegime.js';
 import { listRecentMacroEvents } from '../services/macroService.js';
 import { getBlackoutState, getUpcomingEvents } from '../services/macroCalendar.js';
 import { countByStatus, listPoolPreview } from '../services/candidateStore.js';
@@ -109,8 +109,9 @@ router.get(
     if (!config.enableMacro) {
       return res.json({ available: false });
     }
-    const regime = getRegime();
-    const params = getRegimeParams(regime.regime);
+    // 生效参数 = 新闻 regime ∩ 确定性市场核验(016):核验不同向时 risk_on 放大被钳制
+    const regime = getEffectiveRegime();
+    const params = regime.params;
     const events = await listRecentMacroEvents(config.macroEventValidityHours, 20).catch(
       () => null
     );
@@ -125,6 +126,8 @@ router.get(
         growth_signal: regime.growth_signal,
         shock_until: regime.shock_until,
         updated_at: regime.updated_at,
+        effective_regime: regime.effective_regime,
+        clamped: regime.clamped,
         params: {
           daily_buy_budget: params.dailyBuyBudget,
           min_cash_reserve: params.minCashReserve,
@@ -132,6 +135,15 @@ router.get(
           macro_multiplier: params.macroMultiplier,
           allowed_tiers: params.allowedTiers,
         },
+      },
+      // 确定性市场核验状态(纯市场数据,无供应商信息,可公开)
+      market_check: {
+        available: regime.market_check?.available || false,
+        trend: regime.market_check?.trend || null,
+        spy_price: regime.market_check?.spyPrice ?? null,
+        sma20: regime.market_check?.sma20 ?? null,
+        vix: regime.market_check?.vix ?? null,
+        fetched_at: regime.market_check?.fetchedAt ?? null,
       },
       events: events || [],
       calendar: {

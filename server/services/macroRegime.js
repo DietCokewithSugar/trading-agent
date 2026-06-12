@@ -4,6 +4,7 @@
 import { supabase } from '../db.js';
 import { config } from '../config.js';
 import { listRecentMacroEvents } from './macroService.js';
+import { getMarketCheck, intersectRegime } from './marketCheck.js';
 import { broadcast } from './bus.js';
 
 /** 事件档位权重:全市场级事件主导,情绪级只起微调作用 */
@@ -11,11 +12,36 @@ const TIER_WEIGHTS = { 1: 1.0, 2: 0.6, 3: 0.3 };
 /** 子标签(利率/通胀/增长)聚合的判定阈值 */
 const SUB_SIGNAL_THRESHOLD = 0.15;
 
-function eventWeight(event, nowTs, halfLifeHours) {
+export function eventWeight(event, nowTs, halfLifeHours) {
   const tierWeight = TIER_WEIGHTS[event.market_impact_tier] ?? 0.3;
   const conf = Number.isFinite(Number(event.confidence)) ? Number(event.confidence) : 0.5;
   const ageHours = Math.max((nowTs - new Date(event.created_at).getTime()) / 3600_000, 0);
-  return tierWeight * conf * Math.exp(-ageHours / halfLifeHours);
+  // 来源可信度(009 评分,016 起落在 macro_events 上):路透社头条与小站标题党不该同权。
+  // 缺失(016 前存量行)按 0.7(与 scoreCandidate/sizing 链缺省一致);
+  // clamp [0.4, 1] 防止单一低分来源把真实风险信号压没
+  const src = Number.isFinite(Number(event.source_score))
+    ? Math.min(Math.max(Number(event.source_score), 0.4), 1)
+    : 0.7;
+  return tierWeight * conf * src * Math.exp(-ageHours / halfLifeHours);
+}
+
+/**
+ * macro_shock 触发的佐证门(纯函数):单篇被 LLM 判成一档高置信 risk_off 的文章
+ * (如措辞激烈的评论文)不该独自冻结全部买入——要求归并报道篇数 ≥ minReports
+ * 或独立信源域名 ≥ minReports(复用个股侧交叉确认思路)。
+ * 015/016 之前的存量行两个字段都不存在时回退单篇即触发:shock 是风险下行安全线,
+ * 缺迁移不能让它静默失效。
+ */
+export function shockCorroborated(event, minReports = 2) {
+  if (!(minReports > 1)) return true;
+  const hasCount = 'article_count' in (event || {});
+  const hasDomains = 'source_domains' in (event || {});
+  if (!hasCount && !hasDomains) return true;
+  const reports = Number(event.article_count) || 1;
+  const domains = Array.isArray(event.source_domains)
+    ? new Set(event.source_domains.filter(Boolean)).size
+    : 0;
+  return reports >= minReports || domains >= minReports;
 }
 
 /**
@@ -93,6 +119,7 @@ export function aggregateRegime({ events = [], now = new Date(), prev = null, cf
     enterThreshold = 0.3,
     exitThreshold = 0.2,
     shockMinConfidence = 0.75,
+    shockMinReports = 2,
     duplicateDampening = 0.6,
   } = cfg;
   const nowTs = now instanceof Date ? now.getTime() : Number(now);
@@ -101,13 +128,15 @@ export function aggregateRegime({ events = [], now = new Date(), prev = null, cf
     return Number.isFinite(ts) && nowTs - ts <= validityHours * 3600_000 && ts <= nowTs;
   });
 
-  // 硬规则:一档高置信 risk_off 事件 → macro_shock 锁定期(取最近一次触发的到期时间)
+  // 硬规则:一档高置信 risk_off 事件 → macro_shock 锁定期(取最近一次触发的到期时间);
+  // 需通过佐证门(多篇报道或多个独立信源,见 shockCorroborated)
   let shockUntil = prev?.shockUntil && new Date(prev.shockUntil).getTime() > nowTs ? prev.shockUntil : null;
   for (const e of valid) {
     if (
       e.market_impact_tier === 1 &&
       e.macro_direction === 'risk_off' &&
-      Number(e.confidence) >= shockMinConfidence
+      Number(e.confidence) >= shockMinConfidence &&
+      shockCorroborated(e, shockMinReports)
     ) {
       const until = new Date(new Date(e.created_at).getTime() + shockHours * 3600_000);
       if (until.getTime() > nowTs && (!shockUntil || until.getTime() > new Date(shockUntil).getTime())) {
@@ -203,6 +232,34 @@ export function getRegimeParams(regime) {
   return config.macroRegimeParams[regime] || config.macroRegimeParams.neutral;
 }
 
+let lastClampLogged = false;
+
+/**
+ * 生效 regime 与参数(016,买入参数的唯一咽喉点——分配器与锁内结算都从这里取):
+ * 新闻推导的 regime 与确定性市场核验(SPY 趋势 + VIX,marketCheck.js)取交集,
+ * 仅当新闻 risk_on 且核验不同向时按 neutral 参数执行(只钳制放大、从不放松;
+ * 核验不可用时完全透传)。regime 字段仍为新闻 regime——macro_shock 门、
+ * 成交快照、冲突消解的语义不变,只有资金参数被钳制。
+ */
+export function getEffectiveRegime() {
+  const regime = getRegime();
+  const check = config.enableMarketCheck ? getMarketCheck() : { available: false, trend: null };
+  const { regime: effective, clamped } = intersectRegime(regime.regime, check);
+  if (clamped && !lastClampLogged) {
+    console.log(
+      `[market] 确定性核验不同向(趋势=${check.trend || '未知'}),risk_on 仓位放大钳制为 neutral 参数`
+    );
+  }
+  lastClampLogged = clamped;
+  return {
+    ...regime,
+    effective_regime: effective,
+    clamped,
+    params: getRegimeParams(effective),
+    market_check: check,
+  };
+}
+
 /** 启动时从 macro_state 加载上次状态(重启延续);表缺失保持 neutral */
 export async function initMacroRegime() {
   if (!config.enableMacro) return;
@@ -254,6 +311,7 @@ export async function recomputeRegime(trigger = 'decay') {
       cfg: {
         validityHours: config.macroEventValidityHours,
         shockHours: config.macroShockHours,
+        shockMinReports: config.macroShockMinReports,
       },
     });
 

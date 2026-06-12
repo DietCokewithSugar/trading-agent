@@ -7,6 +7,7 @@ import {
   mergeBySymbol,
   rankCandidates,
   planAllocations,
+  shouldWriteScore,
 } from '../server/services/allocator.js';
 
 const NOW = new Date('2026-06-11T15:00:00Z');
@@ -72,6 +73,30 @@ test('rankCandidates:分数降序,同分按综合置信度、入池时间', () =
   assert.deepEqual(
     ranked.map((c) => c.id),
     [2, 3, 4, 1]
+  );
+});
+
+test('shouldWriteScore:状态变化永远写,纯分数刷新按阈值过滤', () => {
+  assert.equal(
+    shouldWriteScore({ prevScore: 0.5, nextScore: 0.5005, statusChanged: true }),
+    true,
+    '状态变化即使分数几乎不变也要写'
+  );
+  assert.equal(
+    shouldWriteScore({ prevScore: 0.5, nextScore: 0.505, statusChanged: false }),
+    false,
+    '低于阈值的纯分数变化跳过写入'
+  );
+  assert.equal(shouldWriteScore({ prevScore: 0.5, nextScore: 0.52, statusChanged: false }), true);
+  assert.equal(
+    shouldWriteScore({ prevScore: null, nextScore: 0.5, statusChanged: false }),
+    true,
+    '首次刷分(prev 缺失)必须写'
+  );
+  assert.equal(
+    shouldWriteScore({ prevScore: 0.5, nextScore: 0.4, statusChanged: false, threshold: 0.2 }),
+    false,
+    '自定义阈值生效'
   );
 });
 

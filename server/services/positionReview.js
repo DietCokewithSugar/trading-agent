@@ -3,7 +3,8 @@ import { config } from '../config.js';
 import { getValuation } from './portfolio.js';
 import { reviewPositions } from './deepseek.js';
 import { executeSellOrder } from './trader.js';
-import { getMarketSession } from './fmp.js';
+import { getMarketSession, getQuote, getHistoricalPricesAdjusted } from './fmp.js';
+import { etDateOf, spyHoldingReturn } from './benchmark.js';
 import { broadcast } from './bus.js';
 import { isHalted } from './halt.js';
 
@@ -87,22 +88,55 @@ export async function maybeRunDailyReview() {
 
     const symbols = valuation.positions.map((p) => p.symbol);
     const analysesBySymbol = await getRecentAnalyses(symbols);
-    const positionsCtx = valuation.positions.map((p) => ({
-      代码: p.symbol,
-      数量: p.quantity,
-      平均成本: p.avg_cost,
-      现价: p.current_price,
-      浮动盈亏百分比: Math.round(p.unrealized_pnl_percent * 100) / 100,
-      止损价: p.stop_loss,
-      止盈价: p.take_profit,
-      建仓时间: p.opened_at,
-      近期相关分析: (analysesBySymbol.get(p.symbol) || []).map((a) => ({
-        方向: a.sentiment,
-        档位: a.tier,
-        事件: a.event_summary || a.reasoning,
-        时间: a.created_at,
-      })),
-    }));
+
+    // 持仓期 SPY 基准(016,fail-open):一次取数覆盖全部持仓,
+    // 让模型相对大盘评判表现——大盘红利不是论点质量。失败省略字段,复查照常
+    let spyRows = null;
+    let spyDayChange = null;
+    try {
+      const openedDates = valuation.positions.map((p) => etDateOf(p.opened_at)).filter(Boolean);
+      if (openedDates.length) {
+        const earliest = [...openedDates].sort()[0];
+        const from = new Date(`${earliest}T00:00:00Z`);
+        from.setUTCDate(from.getUTCDate() - 7);
+        ({ rows: spyRows } = await getHistoricalPricesAdjusted(
+          'SPY',
+          from.toISOString().slice(0, 10),
+          today
+        ));
+      }
+      const q = await getQuote('SPY');
+      const chg = Number(q?.changesPercentage ?? q?.changePercentage);
+      spyDayChange = Number.isFinite(chg) ? Math.round(chg * 100) / 100 : null;
+    } catch (err) {
+      console.warn(`[review] SPY 基准获取失败(按绝对盈亏退化复查): ${err.message}`);
+    }
+
+    const positionsCtx = valuation.positions.map((p) => {
+      const openedDate = etDateOf(p.opened_at);
+      // 当日建仓:日线无跨度,用 SPY 当日涨跌近似;跨日:收盘对收盘
+      const spyRet =
+        openedDate === today
+          ? spyDayChange
+          : spyHoldingReturn({ rows: spyRows || [], entryEtDate: openedDate, exitEtDate: today });
+      return {
+        代码: p.symbol,
+        数量: p.quantity,
+        平均成本: p.avg_cost,
+        现价: p.current_price,
+        浮动盈亏百分比: Math.round(p.unrealized_pnl_percent * 100) / 100,
+        止损价: p.stop_loss,
+        止盈价: p.take_profit,
+        建仓时间: p.opened_at,
+        ...(spyRet !== null && spyRet !== undefined ? { 同期SPY涨跌百分比: spyRet } : {}),
+        近期相关分析: (analysesBySymbol.get(p.symbol) || []).map((a) => ({
+          方向: a.sentiment,
+          档位: a.tier,
+          事件: a.event_summary || a.reasoning,
+          时间: a.created_at,
+        })),
+      };
+    });
 
     console.log(`[review] 开始每日持仓复查(${symbols.length} 只持仓)`);
     const reviews = await reviewPositions({

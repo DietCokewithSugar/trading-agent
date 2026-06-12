@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { aggregateRegime, sectorMultiplier, mergeMacroConfidence } from '../server/services/macroRegime.js';
+import {
+  aggregateRegime,
+  sectorMultiplier,
+  mergeMacroConfidence,
+  eventWeight,
+  shockCorroborated,
+} from '../server/services/macroRegime.js';
 
 const NOW = new Date('2026-06-11T15:00:00Z');
 
@@ -9,6 +15,7 @@ function ev(overrides = {}) {
     market_impact_tier: 1,
     macro_direction: 'risk_off',
     confidence: 0.9,
+    source_score: 1, // 016 来源分;置 1 保持本文件既有数值断言不变
     rates_signal: 'neutral',
     inflation_signal: 'neutral',
     growth_signal: 'neutral',
@@ -135,6 +142,55 @@ test('aggregateRegime:同类型不同方向各自全权重,互相抵消为 0', (
     ev({ event_type: 'FOMC', market_impact_tier: 2, confidence: 0.8, macro_direction: 'risk_on' }),
   ];
   assert.equal(aggregateRegime({ events, now: NOW }).riskScore, 0);
+});
+
+test('macro_shock 佐证门:单篇单源不触发,多篇或多独立信源触发', () => {
+  // 单篇单源:不触发(措辞激烈的单篇评论文不能独自冻结全部买入)
+  const lone = ev({ article_count: 1, source_domains: ['blog.example.com'] });
+  assert.notEqual(aggregateRegime({ events: [lone], now: NOW }).regime, 'macro_shock');
+  // 归并报道 ≥2 篇:触发
+  const corroborated = ev({ article_count: 2, source_domains: ['blog.example.com'] });
+  assert.equal(aggregateRegime({ events: [corroborated], now: NOW }).regime, 'macro_shock');
+  // 独立信源 ≥2 个:触发
+  const twoSources = ev({ article_count: 1, source_domains: ['reuters.com', 'cnbc.com'] });
+  assert.equal(aggregateRegime({ events: [twoSources], now: NOW }).regime, 'macro_shock');
+  // shockMinReports=1:恢复单篇即触发的旧行为
+  assert.equal(
+    aggregateRegime({ events: [lone], now: NOW, cfg: { shockMinReports: 1 } }).regime,
+    'macro_shock'
+  );
+});
+
+test('macro_shock 佐证门:015/016 之前的存量行(无佐证字段)回退单篇即触发', () => {
+  // ev() 不带 article_count/source_domains,模拟迁移前的行——安全线不静默失效
+  const legacy = ev();
+  assert.equal(shockCorroborated(legacy, 2), true);
+  assert.equal(aggregateRegime({ events: [legacy], now: NOW }).regime, 'macro_shock');
+  // 只有 015(article_count)没有 016(source_domains):按篇数判定
+  assert.equal(shockCorroborated(ev({ article_count: 1 }), 2), false);
+  assert.equal(shockCorroborated(ev({ article_count: 3 }), 2), true);
+  // 重复域名不算独立信源
+  assert.equal(shockCorroborated(ev({ article_count: 1, source_domains: ['a.com', 'a.com'] }), 2), false);
+});
+
+test('eventWeight:来源可信度乘入权重,缺失按 0.7,clamp 下限 0.4', () => {
+  const nowTs = NOW.getTime();
+  const base = ev({ source_score: 1 });
+  const low = ev({ source_score: 0.5 });
+  const floor = ev({ source_score: 0.1 });
+  const missing = ev();
+  delete missing.source_score;
+  const wBase = eventWeight(base, nowTs, 24);
+  assert.ok(Math.abs(eventWeight(low, nowTs, 24) - wBase * 0.5) < 1e-9, '低来源分线性削弱权重');
+  assert.ok(Math.abs(eventWeight(floor, nowTs, 24) - wBase * 0.4) < 1e-9, '下限 0.4');
+  assert.ok(Math.abs(eventWeight(missing, nowTs, 24) - wBase * 0.7) < 1e-9, '缺失按 0.7');
+  // 端到端:低来源分事件推出的风险分应弱于高来源分同款事件
+  const strong = aggregateRegime({ events: [ev({ market_impact_tier: 2 })], now: NOW }).riskScore;
+  const weak = aggregateRegime({
+    events: [ev({ market_impact_tier: 2, source_score: 0.5 })],
+    now: NOW,
+  }).riskScore;
+  assert.ok(Math.abs(weak) < Math.abs(strong), '小站标题党与路透社不该同权');
 });
 
 test('mergeMacroConfidence:较大值小幅增信,封顶 0.95,非法值兜底', () => {

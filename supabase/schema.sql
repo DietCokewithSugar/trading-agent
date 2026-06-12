@@ -477,6 +477,21 @@ create index if not exists idx_reflections_symbol on trade_reflections (symbol, 
 alter table trade_reflections enable row level security;
 create policy "public read trade_reflections" on trade_reflections for select using (true);
 
+-- 执行质量度量 + 宏观信源可信度 + 复盘基准(016):
+-- candidate_signals.entry_price 记录入池时市场价;trades.pool_* 记录候选池路径的
+-- 排队成本(入池价/等待分钟/入池→成交漂移);macro_events 记录来源可信度与独立信源
+-- 域名集合(eventWeight 乘来源分,macro_shock 触发需多篇报道或多个独立信源佐证);
+-- trade_reflections 记录同期 SPY 基准(复盘按超额收益评判,而非绝对盈亏)
+alter table candidate_signals add column if not exists entry_price numeric;
+alter table trades add column if not exists pool_entry_price numeric;
+alter table trades add column if not exists pool_wait_minutes integer;
+alter table trades add column if not exists pool_drift_percent numeric;
+alter table macro_events add column if not exists source_domain text;
+alter table macro_events add column if not exists source_score numeric;
+alter table macro_events add column if not exists source_domains jsonb not null default '[]'::jsonb;
+alter table trade_reflections add column if not exists spy_return_percent numeric;
+alter table trade_reflections add column if not exists excess_return_percent numeric;
+
 -- 初始资金 10 万美元(服务端也会在缺失时自动初始化)
 insert into portfolio_state (id, cash, initial_capital)
 values (1, 100000, 100000)

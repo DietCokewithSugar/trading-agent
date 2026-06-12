@@ -1,6 +1,7 @@
 import { supabase } from '../db.js';
 import { config } from '../config.js';
 import { getQuote, getProfile, getMarketSession, normalizeTs } from './fmp.js';
+import { minutesSinceMarketOpen } from './marketCalendar.js';
 import { currentRunId, recordReject } from './metrics.js';
 import { isTradingHalted } from './tradingHalt.js';
 import {
@@ -15,11 +16,11 @@ import {
   getNewPositionsToday,
   noteNewPositionOpened,
 } from './riskControls.js';
-import { getRegime, getRegimeParams } from './macroRegime.js';
+import { getRegime, getEffectiveRegime } from './macroRegime.js';
 import { decideTrade, reviewProposedTrade } from './deepseek.js';
 import { getPortfolio, getValuation } from './portfolio.js';
 import { reflectOnClosedTrade, getMemories } from './memoryService.js';
-import { computeFill } from './execution.js';
+import { computeFill, computePoolMetrics } from './execution.js';
 import { checkBuyEligibility } from './eligibility.js';
 import { scaleFraction } from './sizing.js';
 import { enqueuePendingOrder } from './openQueue.js';
@@ -190,7 +191,7 @@ export async function handleSignal(article, analysisRow) {
     // 候选入池(014):利好信号不再先到先得即时成交,而是进候选池由资金分配器
     // 统一打分排序后分配资金——信号时刻不发起任何 LLM 交易决策调用。
     // 入池失败(表缺失/未启用宏观)退回下方的旧即时交易路径,信号不丢
-    const pooled = await poolBullishSignal({ article, analysisRow, profile });
+    const pooled = await poolBullishSignal({ article, analysisRow, profile, price });
     if (pooled) return { pooled: true, candidate: pooled };
 
     // ── 以下为旧即时交易路径(候选池不可用时的退路)──
@@ -414,10 +415,11 @@ export async function handleSignal(article, analysisRow) {
 }
 
 /**
- * 利好信号入候选池(无任何 LLM 调用):打基础分、记宏观快照,
- * 同票已有待开盘卖单的出生即冲突搁置。表缺失/未启用返回 null,调用方退回即时路径。
+ * 利好信号入候选池(无任何 LLM 调用):打基础分、记宏观快照、记入池时市场价
+ * (entry_price,016:排队成本度量的基准),同票已有待开盘卖单的出生即冲突搁置。
+ * 表缺失/未启用返回 null,调用方退回即时路径。
  */
-async function poolBullishSignal({ article, analysisRow, profile }) {
+async function poolBullishSignal({ article, analysisRow, profile, price = null }) {
   if (!isPoolAvailable()) return null;
   const symbol = analysisRow.symbol;
 
@@ -460,6 +462,7 @@ async function poolBullishSignal({ article, analysisRow, profile }) {
     base_score: baseScore,
     current_score: baseScore,
     macro_regime: getRegime().regime,
+    entry_price: Number.isFinite(Number(price)) && Number(price) > 0 ? round4(Number(price)) : null,
     status: conflict ? 'conflict_hold' : 'pending',
     status_reason: conflict ? '同票存在待开盘卖单,入池即冲突搁置' : null,
   });
@@ -631,11 +634,13 @@ export async function executeCandidate(candidate, { macroContext = null, extraSc
       decision_started_at: decisionStartedAt.toISOString(),
       decision_finished_at: new Date().toISOString(),
     },
+    // 排队成本度量(016):入池价/入池时间随单传递,成交后算漂移与等待时长
+    pool: { entryPrice: candidate.entry_price ?? null, enteredAt: candidate.created_at ?? null },
   });
 }
 
 /** 买入下单(结构化返回):漂移熔断 → 锁内结算。返回 { trade } | { reject, transient?, reason } */
-async function executeBuyStructured({ symbol, price, decision, analysisRow, article, meta = null }) {
+async function executeBuyStructured({ symbol, price, decision, analysisRow, article, meta = null, pool = null }) {
   return withTradeLock(async () => {
     // 下单前重取最新报价:DeepSeek 决策(最长两次 90s 调用)耗时较长,
     // 决策前的价格可能已过期,绝不能按"消息发布瞬间的价格"成交
@@ -668,6 +673,7 @@ async function executeBuyStructured({ symbol, price, decision, analysisRow, arti
       newsId: article.id,
       analysisId: analysisRow.id,
       meta,
+      pool,
     });
   });
 }
@@ -733,6 +739,7 @@ async function settleBuyLocked({
   newsId,
   analysisId,
   meta = null,
+  pool = null,
 }) {
   // 组合状态以下单时刻为准
   const valuation = await getValuation();
@@ -765,9 +772,11 @@ async function settleBuyLocked({
   const existing = valuation.positions.find((p) => p.symbol === symbol);
 
   // 宏观环境硬风控(014,只拦买入;regime/配额都是临时状态 → transient 供池/队列重试):
-  // macro_shock 一律不开新仓;当日新开仓数配额(加仓不计)
-  const regime = getRegime();
-  const regimeParams = getRegimeParams(regime.regime);
+  // macro_shock 一律不开新仓;当日新开仓数配额(加仓不计)。
+  // 资金参数取生效值(新闻 regime ∩ 确定性市场核验,016);regime.regime 仍为新闻
+  // regime——shock 门与成交快照语义不变
+  const regime = getEffectiveRegime();
+  const regimeParams = regime.params;
   if (config.enableMacro) {
     if (regime.regime === 'macro_shock') {
       recordReject('macro_shock');
@@ -865,8 +874,14 @@ async function settleBuyLocked({
     }
   }
 
-  // 模拟成交:在参考价上施加不利滑点(点差/时段/波动/订单冲击)
-  const fill = computeFill({ side: 'buy', quote, profile, notional: spend });
+  // 模拟成交:在参考价上施加不利滑点(点差/时段/开盘窗口/波动/订单冲击)
+  const fill = computeFill({
+    side: 'buy',
+    quote,
+    profile,
+    notional: spend,
+    minutesSinceOpen: minutesSinceMarketOpen(),
+  });
   if (fill.slippageBps > 0) {
     console.log(
       `[trader] ${symbol} 买入滑点 ${fill.slippageBps}bp: $${fill.refPrice} → $${fill.fillPrice}`
@@ -875,11 +890,28 @@ async function settleBuyLocked({
   const quantity = round4(spend / fill.fillPrice);
   const amount = round2(quantity * fill.fillPrice);
 
+  // 候选池排队成本(016):入池价 → 成交价漂移与等待时长,评估层按此分桶
+  const poolMetrics = pool
+    ? computePoolMetrics({ entryPrice: pool.entryPrice, enteredAt: pool.enteredAt, fillPrice: fill.fillPrice })
+    : null;
+  if (poolMetrics?.entryPrice !== null && poolMetrics?.entryPrice !== undefined) {
+    console.log(
+      `[trader] ${symbol} 排队成本: 入池$${poolMetrics.entryPrice} → 成交$${fill.fillPrice}(漂移 ${poolMetrics.driftPercent}%,等待 ${poolMetrics.waitMinutes} 分钟)`
+    );
+  }
+
   // 执行时间线:成交所用报价自带的时间戳 + 决策窗口/run_id(队列成交无 meta,仅报价时间戳)
-  // + 成交时宏观环境快照(014)
+  // + 成交时宏观环境快照(014)+ 排队成本(016)
   const extras = {
     quote_timestamp: quoteTimestampOf(quote),
     ...(config.enableMacro ? { macro_regime: regime.regime } : {}),
+    ...(poolMetrics
+      ? {
+          pool_entry_price: poolMetrics.entryPrice,
+          pool_wait_minutes: poolMetrics.waitMinutes,
+          pool_drift_percent: poolMetrics.driftPercent,
+        }
+      : {}),
     ...(meta || {}),
   };
 
@@ -1012,7 +1044,13 @@ export async function executeSellOrder({
     let fill;
     if (quote) {
       const refPrice = quote.effective_price ?? quote.price;
-      fill = computeFill({ side: 'sell', quote, profile: await getProfile(symbol).catch(() => null), notional: quantity * refPrice });
+      fill = computeFill({
+        side: 'sell',
+        quote,
+        profile: await getProfile(symbol).catch(() => null),
+        notional: quantity * refPrice,
+        minutesSinceOpen: minutesSinceMarketOpen(),
+      });
       if (fill.slippageBps > 0) {
         console.log(
           `[trader] ${symbol} 卖出滑点 ${fill.slippageBps}bp: $${fill.refPrice} → $${fill.fillPrice}`
@@ -1098,7 +1136,7 @@ async function legacySell({ symbol, price, quantity, amount, reason, trigger, ne
   });
 }
 
-// trades 的可选明细列(008/012/014 迁移新增),旧库缺列时逐列剥离重试
+// trades 的可选明细列(008/012/014/016 迁移新增),旧库缺列时逐列剥离重试
 const OPTIONAL_TRADE_COLUMNS = [
   'quote_price',
   'slippage_bps',
@@ -1107,6 +1145,9 @@ const OPTIONAL_TRADE_COLUMNS = [
   'decision_started_at',
   'decision_finished_at',
   'macro_regime',
+  'pool_entry_price',
+  'pool_wait_minutes',
+  'pool_drift_percent',
 ];
 
 async function insertTrade(db, trade) {

@@ -10,7 +10,7 @@ import { getMarketSession } from './fmp.js';
 import { isHalted } from './halt.js';
 import { etDayKey } from './metrics.js';
 import { broadcast } from './bus.js';
-import { getRegime, getRegimeParams, sectorMultiplier } from './macroRegime.js';
+import { getEffectiveRegime, sectorMultiplier } from './macroRegime.js';
 import { listRecentMacroEvents } from './macroService.js';
 import { getBlackoutState } from './macroCalendar.js';
 import { resolveConflicts, tierScore } from './conflictResolver.js';
@@ -18,6 +18,7 @@ import {
   isPoolAvailable,
   listActiveCandidates,
   updateCandidate,
+  getCandidateStatus,
   expireStale,
   cancelLowScore,
   cancelSiblings,
@@ -70,6 +71,17 @@ export function mergeBySymbol(candidates) {
     for (const other of group.slice(1)) absorbed.push({ candidate: other, into: rep });
   }
   return { merged, absorbed };
+}
+
+/**
+ * 刷分是否需要落库(纯函数):状态变化永远写;纯分数刷新只在变化 ≥ threshold 时写,
+ * 避免每轮对全池(最多 200 行)做无意义的串行往返。prevScore 非法(NaN/首次)视为需要写。
+ */
+export function shouldWriteScore({ prevScore, nextScore, statusChanged, threshold = 0.01 } = {}) {
+  if (statusChanged) return true;
+  const prev = Number(prevScore);
+  if (!Number.isFinite(prev)) return true;
+  return Math.abs(Number(nextScore) - prev) >= threshold;
 }
 
 /** 排名:分数降序;同分按综合置信度降序、入池时间升序(先到先得只在同分时生效) */
@@ -134,8 +146,9 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
     allocatorStatus.lastRunDay = etDayKey();
     if (!candidates || !candidates.length) return;
 
-    const regime = getRegime();
-    const params = getRegimeParams(regime.regime);
+    // 生效参数 = 新闻 regime ∩ 确定性市场核验(016):核验不同向时 risk_on 放大被钳制
+    const regime = getEffectiveRegime();
+    const params = regime.params;
 
     // 宏观冲击:不执行任何买入,低分候选直接取消,高分候选留池待冲击解除
     if (regime.regime === 'macro_shock') {
@@ -164,9 +177,12 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
     ]);
     const events = macroEvents || [];
 
-    // 刷新分数(时效衰减 × 宏观乘数 × 行业乘数)并按 regime 过滤档位/置信度
+    // 刷新分数(时效衰减 × 宏观乘数 × 行业乘数)并按 regime 过滤档位/置信度。
+    // 写入先收集再批量提交:状态不变且分数变化 < 阈值的不写,其余 20 个一批并发,
+    // 全部带乐观并发(状态被其它路径并发改掉的候选本轮不再参与)
     const allowedTiers = new Set(params.allowedTiers || []);
-    const scored = [];
+    const preScored = [];
+    const scoreWrites = [];
     for (const candidate of candidates) {
       const sectorMult = sectorMultiplier(candidate.sector, events, now, {
         validityHours: config.macroEventValidityHours,
@@ -181,17 +197,23 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
         (params.minConfidence && Number(candidate.confidence || 0) < params.minConfidence)
       ) {
         // 非终态:regime 变化后自动回到排名
-        await updateCandidate(candidate.id, {
-          current_score: score,
-          status: 'macro_filtered',
-          status_reason: `当前宏观环境(${regime.regime})只允许档位 ${[...allowedTiers].join('/') || '无'}${params.minConfidence ? ` 且置信度≥${params.minConfidence}` : ''}`,
+        scoreWrites.push({
+          candidate,
+          statusChanged: candidate.status !== 'macro_filtered',
+          fields: {
+            current_score: score,
+            status: 'macro_filtered',
+            status_reason: `当前宏观环境(${regime.regime})只允许档位 ${[...allowedTiers].join('/') || '无'}${params.minConfidence ? ` 且置信度≥${params.minConfidence}` : ''}`,
+          },
         });
         continue;
       }
-      await updateCandidate(candidate.id, { current_score: score });
+      scoreWrites.push({ candidate, statusChanged: false, fields: { current_score: score } });
       // 曾被宏观过滤/冲突搁置的候选回到待分配(冲突由下方 resolveConflicts 重新判定)
-      scored.push({ ...candidate, score, sectorMult });
+      preScored.push({ ...candidate, score, sectorMult });
     }
+    const missedIds = await flushCandidateWrites(scoreWrites);
+    const scored = preScored.filter((c) => !missedIds.has(c.id));
     if (!scored.length) return;
 
     // 冲突消解(每轮全量重判:冲突窗口滑动,出窗后自动解除搁置)
@@ -205,23 +227,40 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
     });
     for (const { candidate, reason } of conflicts.held) {
       if (candidate.status !== 'conflict_hold') {
-        await updateCandidate(candidate.id, { status: 'conflict_hold', status_reason: reason });
+        await updateCandidate(
+          candidate.id,
+          { status: 'conflict_hold', status_reason: reason },
+          { expectedStatus: candidate.status }
+        );
       }
     }
     for (const { candidate, reason } of conflicts.cancelled) {
-      await updateCandidate(candidate.id, { status: 'cancelled', status_reason: reason });
+      await updateCandidate(
+        candidate.id,
+        { status: 'cancelled', status_reason: reason },
+        { expectedStatus: candidate.status }
+      );
     }
     const scaleById = new Map();
-    const runnable = [...conflicts.allowed];
+    const reEligible = [...conflicts.allowed];
     for (const { candidate, scale, reason } of conflicts.reducedSize) {
       scaleById.set(candidate.id, { scale, note: reason });
-      runnable.push(candidate);
+      reEligible.push(candidate);
     }
-    // 曾被搁置/过滤但本轮重新可跑的候选恢复 pending
-    for (const candidate of runnable) {
+    // 曾被搁置/过滤但本轮重新可跑的候选恢复 pending;乐观并发未命中
+    //(状态刚被其它路径改写,如新到利空触发的 conflict_hold)的候选本轮不再执行
+    const runnable = [];
+    for (const candidate of reEligible) {
       if (candidate.status !== 'pending') {
-        await updateCandidate(candidate.id, { status: 'pending', status_reason: '复评后恢复待分配' });
+        const ok = await updateCandidate(
+          candidate.id,
+          { status: 'pending', status_reason: '复评后恢复待分配' },
+          { expectedStatus: candidate.status }
+        );
+        if (!ok) continue;
+        candidate.status = 'pending';
       }
+      runnable.push(candidate);
     }
 
     // 同票合并 → 排名 → 取前 N 执行
@@ -232,7 +271,7 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
     });
     if (!planned.length) return;
     console.log(
-      `[allocator] 本轮(${trigger})候选 ${candidates.length} → 可执行 ${merged.length},执行前 ${planned.length} 个: ${planned.map((c) => `${c.symbol}(${c.score})`).join(' ')}`
+      `[allocator] 本轮(${trigger})候选 ${candidates.length} → 可执行 ${merged.length},执行前 ${planned.length} 个: ${planned.map((c) => `${c.symbol}(${c.score})`).join(' ')}${regime.clamped ? '(确定性核验钳制 risk_on 放大)' : ''}`
     );
 
     let allocated = 0;
@@ -248,6 +287,15 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
           candidate.sectorMult > 1 ? 'bullish' : candidate.sectorMult < 1 ? 'bearish' : null,
         conflictNote: conflictScale ? '同票近期存在反向信号(已缩仓)' : null,
       };
+      // 执行前重读状态:加载快照到此刻之间(尤其是排在前面的候选的 LLM 长调用期间)
+      // 候选可能已被并发改为 conflict_hold/cancelled,内存快照不可信
+      const freshStatus = await getCandidateStatus(candidate.id);
+      if (freshStatus !== 'pending') {
+        console.log(
+          `[allocator] ${candidate.symbol} 候选 #${candidate.id} 状态已变为 ${freshStatus || '未知'},本轮跳过执行`
+        );
+        continue;
+      }
       let result;
       try {
         result = await executeCandidate(candidate, {
@@ -275,10 +323,11 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
       if (CAPITAL_REASONS.has(reason)) {
         // 资金/配额耗尽:本候选与排名靠后的全部标记 capital_constrained,留池复评
         for (const rest of planned.slice(i)) {
-          await updateCandidate(rest.id, {
-            status: 'capital_constrained',
-            status_reason: result.reject,
-          });
+          await updateCandidate(
+            rest.id,
+            { status: 'capital_constrained', status_reason: result.reject },
+            { expectedStatus: 'pending' }
+          );
         }
         console.log(`[allocator] 资金/配额受限(${reason}),其余候选留池等待资金释放`);
         break;
@@ -293,7 +342,11 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
         console.log(`[allocator] ${candidate.symbol} 暂缓(${reason}),候选留池`);
         continue;
       }
-      await updateCandidate(candidate.id, { status: 'rejected', status_reason: result?.reject || reason });
+      await updateCandidate(
+        candidate.id,
+        { status: 'rejected', status_reason: result?.reject || reason },
+        { expectedStatus: 'pending' }
+      );
     }
 
     allocatorStatus.lastResult = {
@@ -314,6 +367,33 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
   } finally {
     allocatorStatus.running = false;
   }
+}
+
+/**
+ * 批量提交刷分写入:shouldWriteScore 过滤掉无意义的纯分数写,其余 20 个一批并发,
+ * 全部带乐观并发(expectedStatus=加载时状态)。返回未命中的候选 id 集合
+ * (状态已被并发修改,调用方将其从本轮可执行集合中剔除)。
+ */
+async function flushCandidateWrites(writes) {
+  const missed = new Set();
+  const pending = (writes || []).filter((w) =>
+    shouldWriteScore({
+      prevScore: w.candidate.current_score,
+      nextScore: w.fields.current_score,
+      statusChanged: w.statusChanged,
+    })
+  );
+  for (let i = 0; i < pending.length; i += 20) {
+    await Promise.all(
+      pending.slice(i, i + 20).map(async (w) => {
+        const ok = await updateCandidate(w.candidate.id, w.fields, {
+          expectedStatus: w.candidate.status,
+        });
+        if (!ok) missed.add(w.candidate.id);
+      })
+    );
+  }
+  return missed;
 }
 
 /** 候选同票的待开盘卖单(冲突消解输入);查询失败按空处理 */

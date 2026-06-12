@@ -27,8 +27,8 @@ const RATES_LABELS = { hawkish: '鹰派', dovish: '鸽派', neutral: '中性' };
 const UPDOWN_LABELS = { up: '上行', down: '下行', neutral: '中性' };
 const SECTOR_DIR_COLORS = { bullish: 'green', bearish: 'red' };
 
-/** 当前宏观环境卡片:状态 + 风险分 + 利率/通胀/增长子标签 + 生效的组合参数 */
-function RegimeCard({ regime }) {
+/** 当前宏观环境卡片:状态 + 风险分 + 利率/通胀/增长子标签 + 确定性核验 + 生效的组合参数 */
+function RegimeCard({ regime, marketCheck }) {
   const params = regime?.params || {};
   return (
     <Card size="small" title="当前宏观环境">
@@ -42,11 +42,22 @@ function RegimeCard({ regime }) {
         {regime.shock_until && (
           <Tag color="red">冲击锁定至 {fmtTime(regime.shock_until)}</Tag>
         )}
+        {regime.clamped && (
+          <Tag color="orange">市场核验不同向,仓位放大已钳制为中性参数</Tag>
+        )}
       </Space>
       <Space size={8} wrap style={{ marginBottom: 12 }}>
         <Tag>利率 {RATES_LABELS[regime.rates_signal] || '中性'}</Tag>
         <Tag>通胀 {UPDOWN_LABELS[regime.inflation_signal] || '中性'}</Tag>
         <Tag>增长 {UPDOWN_LABELS[regime.growth_signal] || '中性'}</Tag>
+        {marketCheck?.available && (
+          <Tag color={REGIME_TAG_COLORS[marketCheck.trend] || 'default'}>
+            市场核验 {REGIME_LABELS[marketCheck.trend] || marketCheck.trend}
+            {marketCheck.spy_price !== null && marketCheck.sma20 !== null
+              ? `(SPY $${marketCheck.spy_price} / 20日线 $${marketCheck.sma20}${marketCheck.vix !== null ? ` · VIX ${marketCheck.vix}` : ''})`
+              : ''}
+          </Tag>
+        )}
         <Typography.Text type="secondary" style={{ fontSize: 12.5, whiteSpace: 'nowrap' }}>
           更新于 {fmtTime(regime.updated_at)}
         </Typography.Text>
@@ -232,7 +243,7 @@ export default function MacroPage({ version = 0 }) {
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
       <Row gutter={[16, 16]}>
         <Col xs={24} lg={10}>
-          <RegimeCard regime={data.regime} />
+          <RegimeCard regime={data.regime} marketCheck={data.market_check} />
         </Col>
         <Col xs={24} lg={14}>
           <CalendarCard calendar={data.calendar} />

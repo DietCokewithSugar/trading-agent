@@ -29,6 +29,11 @@ export function isPoolAvailable() {
   return config.enableMacro && !tableMissing;
 }
 
+// 016 迁移新增的可选列:旧库缺列时逐列剥离重试(入池绝不能因可选列失败——
+// 否则 016 未迁移的库会把信号踢回即时交易路径,行为静默回退)
+const OPTIONAL_CANDIDATE_COLUMNS = ['entry_price'];
+const missingCandidateColumns = new Set();
+
 /** 信号入池。失败返回 null,由调用方退回即时交易路径,信号不丢 */
 export async function enqueueCandidate(candidate) {
   if (!isPoolAvailable()) return null;
@@ -38,7 +43,16 @@ export async function enqueueCandidate(candidate) {
     status_reason: candidate.status_reason ? sanitizeProviderText(candidate.status_reason) : null,
     expires_at: new Date(Date.now() + config.candidateMaxAgeHours * 3600_000).toISOString(),
   };
-  const { data, error } = await supabase().from('candidate_signals').insert(row).select().single();
+  for (const col of missingCandidateColumns) delete row[col];
+  let { data, error } = await supabase().from('candidate_signals').insert(row).select().single();
+  while (error && /column|schema/i.test(error.message)) {
+    const col = OPTIONAL_CANDIDATE_COLUMNS.find((c) => c in row && error.message.includes(c));
+    if (!col) break;
+    missingCandidateColumns.add(col);
+    console.warn(`[pool] candidate_signals 缺少 ${col} 列,已降级不记录(请执行 016 迁移)`);
+    delete row[col];
+    ({ data, error } = await supabase().from('candidate_signals').insert(row).select().single());
+  }
   if (error) {
     if (isMissingTable(error)) warnMissingOnce();
     else console.warn(`[pool] ${candidate.symbol} 入池失败,退回即时交易: ${error.message}`);
@@ -67,17 +81,47 @@ export async function listActiveCandidates() {
   return data || [];
 }
 
-/** 更新候选状态/分数(status_reason 出现在公共读表,统一脱敏) */
-export async function updateCandidate(id, fields) {
-  if (!isPoolAvailable()) return;
+/**
+ * 更新候选状态/分数(status_reason 出现在公共读表,统一脱敏)。
+ * expectedStatus(乐观并发):仅当行的当前状态仍为该值时才更新,防止分配轮用内存快照
+ * 覆盖并发写入(典型:利空信号在分配轮进行中触发的 conflict_hold)。返回是否实际更新。
+ */
+export async function updateCandidate(id, fields, { expectedStatus } = {}) {
+  if (!isPoolAvailable()) return false;
   const payload = {
     ...fields,
     ...(fields.status_reason ? { status_reason: sanitizeProviderText(String(fields.status_reason).slice(0, 200)) } : {}),
     updated_at: new Date().toISOString(),
     last_evaluated_at: new Date().toISOString(),
   };
-  const { error } = await supabase().from('candidate_signals').update(payload).eq('id', id);
-  if (error) console.warn(`[pool] 更新候选 #${id} 失败: ${error.message}`);
+  let query = supabase().from('candidate_signals').update(payload).eq('id', id);
+  if (expectedStatus) query = query.eq('status', expectedStatus);
+  const { data, error } = await query.select('id');
+  if (error) {
+    console.warn(`[pool] 更新候选 #${id} 失败: ${error.message}`);
+    return false;
+  }
+  if (expectedStatus && !(data || []).length) {
+    console.log(`[pool] 候选 #${id} 状态已非 ${expectedStatus}(并发修改),跳过本次更新`);
+    return false;
+  }
+  return true;
+}
+
+/** 执行前重读候选当前状态:关闭"读快照 → LLM 长调用 → 执行"窗口内的冲突搁置竞态。
+ *  读取失败返回 null,调用方按"不执行买入"处理(宁可错过,不可误买) */
+export async function getCandidateStatus(id) {
+  if (!isPoolAvailable()) return null;
+  const { data, error } = await supabase()
+    .from('candidate_signals')
+    .select('status')
+    .eq('id', id)
+    .maybeSingle();
+  if (error) {
+    console.warn(`[pool] 读取候选 #${id} 状态失败: ${error.message}`);
+    return null;
+  }
+  return data?.status || null;
 }
 
 /** 过期清理:超过有效期的活跃候选置为 expired,返回清理数 */

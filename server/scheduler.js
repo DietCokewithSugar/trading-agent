@@ -6,6 +6,7 @@ import { maybeRunDailyReview } from './services/positionReview.js';
 import { processPendingOrders } from './services/openQueue.js';
 import { backfillForwardReturns } from './services/signalReturns.js';
 import { refreshCalendar } from './services/macroCalendar.js';
+import { refreshMarketCheck } from './services/marketCheck.js';
 import { initMacroRegime, recomputeRegime } from './services/macroRegime.js';
 import { maybeRunAllocation } from './services/allocator.js';
 import { getMarketSession } from './services/fmp.js';
@@ -112,10 +113,24 @@ export function startScheduler() {
       );
     }, 60_000);
 
-    // 启动:加载上次宏观状态(重启延续)+ 先抓一次日历
+    // 确定性市场核验(SPY 趋势 + VIX):周期刷新,失败只停用核验本身
+    if (config.enableMarketCheck) {
+      setInterval(() => {
+        refreshMarketCheck().catch((err) =>
+          console.error(`[scheduler] 市场核验刷新失败: ${err.message}`)
+        );
+      }, Math.max(config.marketCheckPollMinutes, 1) * 60_000);
+    }
+
+    // 启动:加载上次宏观状态(重启延续)+ 先抓一次日历与市场核验
     setTimeout(() => {
       initMacroRegime().catch((err) => console.error(`[scheduler] 宏观状态加载失败: ${err.message}`));
       refreshCalendar().catch((err) => console.error(`[scheduler] 经济日历首抓失败: ${err.message}`));
+      if (config.enableMarketCheck) {
+        refreshMarketCheck().catch((err) =>
+          console.error(`[scheduler] 市场核验首抓失败: ${err.message}`)
+        );
+      }
     }, 10_000);
   }
 

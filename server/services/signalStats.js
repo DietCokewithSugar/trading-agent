@@ -65,6 +65,7 @@ function bucketRows(rows, buckets) {
 /**
  * 纯聚合(可单测):rows 为
  * { sentiment, tier, confidence, final_confidence, source_score, traded,
+ *   candidate_status, macro_regime, pool_wait_minutes, pool_drift_percent,
  *   fwd_return_1h, fwd_return_1d, fwd_return_5d }
  */
 export function summarizeSignals(rows) {
@@ -169,7 +170,72 @@ export function summarizeSignals(rows) {
         },
       ]),
     },
+    {
+      // 入池时的宏观环境快照(candidate_signals.macro_regime,014):
+      // 回答"避险/冲击状态下信号命中率是否真的更差"——验证宏观层价值的证据链
+      key: 'regime',
+      label: '按宏观环境(入池时)',
+      rows: bucketRows(enriched, [
+        { label: '风险偏好', match: (r) => r.macro_regime === 'risk_on' },
+        { label: '中性', match: (r) => r.macro_regime === 'neutral' },
+        { label: '避险', match: (r) => r.macro_regime === 'risk_off' },
+        { label: '宏观冲击', match: (r) => r.macro_regime === 'macro_shock' },
+        { label: '未入池', match: (r) => !r.macro_regime },
+      ]),
+    },
+    {
+      // 排队成本(trades.pool_wait_minutes,016):候选池把买入延迟了,
+      // 对比即时/入池路径与不同等待时长的 1h 前瞻收益,量化延迟丢掉的 alpha
+      key: 'exec_path',
+      label: '执行路径与排队时长(已成交)',
+      rows: bucketRows(enriched, [
+        { label: '即时成交', match: (r) => r.traded && num(r.pool_wait_minutes) === null },
+        { label: '入池成交(全部)', match: (r) => r.traded && num(r.pool_wait_minutes) !== null },
+        {
+          label: '入池 ≤15 分钟',
+          match: (r) => {
+            const w = num(r.pool_wait_minutes);
+            return r.traded && w !== null && w <= 15;
+          },
+        },
+        {
+          label: '入池 15~60 分钟',
+          match: (r) => {
+            const w = num(r.pool_wait_minutes);
+            return r.traded && w !== null && w > 15 && w <= 60;
+          },
+        },
+        {
+          label: '入池 1~4 小时',
+          match: (r) => {
+            const w = num(r.pool_wait_minutes);
+            return r.traded && w !== null && w > 60 && w <= 240;
+          },
+        },
+        {
+          label: '入池 >4 小时',
+          match: (r) => {
+            const w = num(r.pool_wait_minutes);
+            return r.traded && w !== null && w > 240;
+          },
+        },
+      ]),
+    },
   ];
+
+  // 排队成本总览:入池路径成交信号的平均等待时长与平均入池→成交价格漂移
+  const pooledFilled = enriched.filter((r) => r.traded && num(r.pool_wait_minutes) !== null);
+  const waits = pooledFilled.map((r) => num(r.pool_wait_minutes)).filter((v) => Number.isFinite(v));
+  const drifts = pooledFilled
+    .map((r) => num(r.pool_drift_percent))
+    .filter((v) => v !== null && Number.isFinite(v));
+  const pooling = {
+    n: pooledFilled.length,
+    avg_wait_minutes: waits.length ? round(waits.reduce((a, b) => a + b, 0) / waits.length, 1) : null,
+    avg_drift_percent: drifts.length
+      ? round(drifts.reduce((a, b) => a + b, 0) / drifts.length, 3)
+      : null,
+  };
 
   // IC:综合置信度 vs 方向调整收益
   const ic = {};
@@ -189,6 +255,7 @@ export function summarizeSignals(rows) {
     traded_count: rows.filter((r) => r.traded).length,
     groups,
     ic,
+    pooling,
   };
 }
 
@@ -211,24 +278,49 @@ export async function getSignalStats() {
     throw new Error(error.message);
   }
 
-  // 实际成交的分析集合(买卖都算)
-  const { data: tradedRows } = await db
-    .from('trades')
-    .select('analysis_id')
-    .not('analysis_id', 'is', null)
-    .limit(2000);
-  const tradedSet = new Set((tradedRows || []).map((t) => t.analysis_id));
+  // 实际成交的分析集合(买卖都算)+ 排队成本(016 迁移容忍:缺 pool_* 列退回只取 analysis_id)
+  let tradeRows = [];
+  {
+    const { data: tRows, error: tErr } = await db
+      .from('trades')
+      .select('analysis_id, side, pool_wait_minutes, pool_drift_percent')
+      .not('analysis_id', 'is', null)
+      .limit(2000);
+    if (tErr && /pool_|column|schema/i.test(tErr.message)) {
+      const { data: basic } = await db
+        .from('trades')
+        .select('analysis_id')
+        .not('analysis_id', 'is', null)
+        .limit(2000);
+      tradeRows = basic || [];
+    } else {
+      tradeRows = tRows || [];
+    }
+  }
+  const tradedSet = new Set(tradeRows.map((t) => t.analysis_id));
+  // 入池路径成交的排队度量(只看买入;同一分析多笔成交取首个有度量的)
+  const poolByAnalysis = new Map();
+  for (const t of tradeRows) {
+    if (t.side && t.side !== 'buy') continue;
+    if (t.pool_wait_minutes === null || t.pool_wait_minutes === undefined) continue;
+    if (!poolByAnalysis.has(t.analysis_id)) {
+      poolByAnalysis.set(t.analysis_id, {
+        wait: Number(t.pool_wait_minutes),
+        drift: t.pool_drift_percent === null || t.pool_drift_percent === undefined ? null : Number(t.pool_drift_percent),
+      });
+    }
+  }
 
-  // 候选池状态(014 迁移容忍:表缺失时全部按 null,traded 组退回两桶口径)
-  let candidateStatusById = new Map();
+  // 候选池状态 + 入池时宏观快照(014 迁移容忍:表缺失时全部按 null,相关分组自然为空)
+  let candidateById = new Map();
   try {
     const { data: candRows, error: candErr } = await db
       .from('candidate_signals')
-      .select('analysis_id, status')
+      .select('analysis_id, status, macro_regime')
       .not('analysis_id', 'is', null)
       .limit(2000);
     if (!candErr) {
-      candidateStatusById = new Map((candRows || []).map((c) => [c.analysis_id, c.status]));
+      candidateById = new Map((candRows || []).map((c) => [c.analysis_id, c]));
     }
   } catch {
     // 候选池不可用时静默退回(本统计是纯观测层)
@@ -244,7 +336,10 @@ export async function getSignalStats() {
         ? null
         : Number(a.news_articles.source_score),
     traded: tradedSet.has(a.id),
-    candidate_status: candidateStatusById.get(a.id) ?? null,
+    candidate_status: candidateById.get(a.id)?.status ?? null,
+    macro_regime: candidateById.get(a.id)?.macro_regime ?? null,
+    pool_wait_minutes: poolByAnalysis.get(a.id)?.wait ?? null,
+    pool_drift_percent: poolByAnalysis.get(a.id)?.drift ?? null,
     fwd_return_1h: a.fwd_return_1h === null ? null : Number(a.fwd_return_1h),
     fwd_return_1d: a.fwd_return_1d === null ? null : Number(a.fwd_return_1d),
     fwd_return_5d: a.fwd_return_5d === null ? null : Number(a.fwd_return_5d),
