@@ -12,6 +12,7 @@ import { getEffectiveRegime } from '../services/macroRegime.js';
 import { listRecentMacroEvents } from '../services/macroService.js';
 import { getBlackoutState, getUpcomingEvents } from '../services/macroCalendar.js';
 import { countByStatus, listPoolPreview } from '../services/candidateStore.js';
+import { getShadowOverview } from '../services/shadowPortfolio.js';
 import { safeTokenEqual, createAuthRateLimiter } from '../services/authGuard.js';
 
 const router = Router();
@@ -180,6 +181,60 @@ router.get(
   '/pool',
   asyncHandler(async (req, res) => {
     res.json({ pool: config.enableMacro ? await getPoolOverview() : null });
+  })
+);
+
+/**
+ * 影子组合 / 消融实验(017):各变体(无风控官/无宏观过滤/信号即时成交/等权/SPY/现金)
+ * 的实时估值、净值序列与最近影子成交,外加实盘组合同窗口对照。
+ * ?hours=168 限定净值序列窗口;表缺失或未启用返回 available:false。
+ */
+router.get(
+  '/shadow',
+  asyncHandler(async (req, res) => {
+    if (!config.enableShadow) return res.json({ available: false });
+    const hours = Number(req.query.hours);
+    const windowHours = Number.isFinite(hours) && hours > 0 ? Math.min(hours, 24 * 366) : 24 * 7;
+    const overview = await getShadowOverview({ hours: windowHours });
+    if (!overview) return res.json({ available: false });
+
+    // 实盘对照:同窗口净值序列(采样 RPC 优先)+ 当前估值
+    const since = new Date(Date.now() - windowHours * 3600_000).toISOString();
+    let actualSeries = [];
+    const rpc = await supabase().rpc('snapshots_sampled', { since, max_points: 300 });
+    if (!rpc.error) {
+      actualSeries = (rpc.data || []).map((s) => ({
+        t: s.created_at,
+        total_value: Number(s.total_value),
+      }));
+    } else {
+      const { data } = await supabase()
+        .from('portfolio_snapshots')
+        .select('total_value, created_at')
+        .gte('created_at', since)
+        .order('created_at', { ascending: true })
+        .limit(1000);
+      actualSeries = (data || []).map((s) => ({
+        t: s.created_at,
+        total_value: Number(s.total_value),
+      }));
+    }
+    const valuation = await getValuation().catch(() => null);
+    res.json({
+      available: true,
+      variants: overview.variants,
+      series: overview.series,
+      recent_trades: overview.recent_trades,
+      actual: {
+        total_value: valuation?.total_value ?? null,
+        cash: valuation?.cash ?? null,
+        initial_capital: valuation?.initial_capital ?? null,
+        pnl: valuation?.pnl ?? null,
+        pnl_percent: valuation?.pnl_percent ?? null,
+        positions_count: valuation?.positions?.length ?? null,
+        series: actualSeries,
+      },
+    });
   })
 );
 

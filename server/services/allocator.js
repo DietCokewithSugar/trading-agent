@@ -26,6 +26,7 @@ import {
 } from './candidateStore.js';
 import { executeCandidate } from './trader.js';
 import { getPortfolio } from './portfolio.js';
+import { onMacroFilteredCandidates } from './shadowPortfolio.js';
 
 export { tierScore };
 
@@ -154,6 +155,8 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
     if (regime.regime === 'macro_shock') {
       await cancelLowScore(0.3, '宏观冲击期间取消低分候选');
       console.log(`[allocator] 宏观冲击状态,本轮不执行买入(${candidates.length} 个候选留池)`);
+      // 影子组合:no_macro_filter 变体没有冲击门,头部候选照样重放(已买分析自动去重)
+      onMacroFilteredCandidates(candidates, '宏观冲击暂停买入');
       return;
     }
 
@@ -163,6 +166,7 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
       console.log(
         `[allocator] 数据发布黑窗(${blackout.event?.event || '未知事件'},至 ${blackout.until}),本轮不执行买入`
       );
+      onMacroFilteredCandidates(candidates, '数据发布黑窗暂停买入');
       return;
     }
 
@@ -183,6 +187,7 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
     const allowedTiers = new Set(params.allowedTiers || []);
     const preScored = [];
     const scoreWrites = [];
+    const regimeFiltered = [];
     for (const candidate of candidates) {
       const sectorMult = sectorMultiplier(candidate.sector, events, now, {
         validityHours: config.macroEventValidityHours,
@@ -206,6 +211,7 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
             status_reason: `当前宏观环境(${regime.regime})只允许档位 ${[...allowedTiers].join('/') || '无'}${params.minConfidence ? ` 且置信度≥${params.minConfidence}` : ''}`,
           },
         });
+        regimeFiltered.push({ ...candidate, current_score: score });
         continue;
       }
       scoreWrites.push({ candidate, statusChanged: false, fields: { current_score: score } });
@@ -213,6 +219,10 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
       preScored.push({ ...candidate, score, sectorMult });
     }
     const missedIds = await flushCandidateWrites(scoreWrites);
+    // 影子组合:被 regime 档位/置信度过滤的候选在 no_macro_filter 变体里照样重放
+    if (regimeFiltered.length) {
+      onMacroFilteredCandidates(regimeFiltered, `宏观过滤(${regime.regime})`);
+    }
     const scored = preScored.filter((c) => !missedIds.has(c.id));
     if (!scored.length) return;
 

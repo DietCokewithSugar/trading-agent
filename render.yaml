@@ -113,6 +113,12 @@ services:
         value: "3"
       - key: CONFLICT_WINDOW_MINUTES
         value: "120"
+      - key: ENABLE_SHADOW
+        value: "true"
+      - key: SHADOW_BASE_FRACTION
+        value: "0.1"
+      - key: SHADOW_EQUAL_WEIGHT_FRACTION
+        value: "0.05"
       - key: WATCHLIST
         value: "AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA"
       - key: ADMIN_TOKEN

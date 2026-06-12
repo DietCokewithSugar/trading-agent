@@ -6,6 +6,7 @@ import NewsFeed from './components/NewsFeed.jsx';
 import TradesPage from './components/TradesPage.jsx';
 import MacroPage from './components/MacroPage.jsx';
 import SignalStatsPage from './components/SignalStatsPage.jsx';
+import AblationPage from './components/AblationPage.jsx';
 import SymbolModal from './components/SymbolModal.jsx';
 import AdminPage from './components/AdminPage.jsx';
 import StrategyPage from './components/StrategyPage.jsx';
@@ -16,6 +17,7 @@ const TABS = [
   { key: 'trades', label: '交易记录' },
   { key: 'macro', label: '宏观' },
   { key: 'signals', label: '信号质量' },
+  { key: 'ablation', label: '消融实验' },
 ];
 
 const SESSION_TAG_COLORS = { pre: 'orange', regular: 'blue', post: 'orange', closed: 'default' };
@@ -242,6 +244,7 @@ function MainApp() {
         )}
         {tab === 'macro' && <MacroPage version={macroVersion} />}
         {tab === 'signals' && <SignalStatsPage />}
+        {tab === 'ablation' && <AblationPage />}
       </main>
 
       <footer className="footer">模拟交易,不构成投资建议</footer>

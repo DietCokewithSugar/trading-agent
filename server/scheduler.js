@@ -9,6 +9,11 @@ import { refreshCalendar } from './services/macroCalendar.js';
 import { refreshMarketCheck } from './services/marketCheck.js';
 import { initMacroRegime, recomputeRegime } from './services/macroRegime.js';
 import { maybeRunAllocation } from './services/allocator.js';
+import {
+  initShadowPortfolios,
+  checkShadowStops,
+  takeShadowSnapshots,
+} from './services/shadowPortfolio.js';
 import { getMarketSession } from './services/fmp.js';
 import { broadcast, clientCount } from './services/bus.js';
 
@@ -59,6 +64,12 @@ export function startScheduler() {
       }
       const snap = await takeSnapshot();
       broadcast('snapshot', snap);
+      // 影子组合净值快照搭车(内部限频到 SHADOW_SNAPSHOT_MINUTES 一次,失败只告警)
+      if (config.enableShadow) {
+        takeShadowSnapshots().catch((err) =>
+          console.warn(`[shadow] 净值快照失败: ${err.message}`)
+        );
+      }
     } catch (err) {
       console.error(`[scheduler] 快照失败: ${err.message}`);
     }
@@ -68,6 +79,19 @@ export function startScheduler() {
   setInterval(() => {
     checkStops().catch((err) => console.error(`[scheduler] 风控检查失败: ${err.message}`));
   }, riskSec * 1000);
+
+  // 影子组合(017,消融实验):启动时补建变体资金行;持仓止损/止盈与实盘同频监控
+  //(报价基本命中实盘监控刚拉过的缓存,不额外耗配额)
+  if (config.enableShadow) {
+    setTimeout(() => {
+      initShadowPortfolios().catch((err) =>
+        console.warn(`[shadow] 初始化失败: ${err.message}`)
+      );
+    }, 8_000);
+    setInterval(() => {
+      checkShadowStops().catch((err) => console.warn(`[shadow] 止损监控失败: ${err.message}`));
+    }, riskSec * 1000);
+  }
 
   // 每日持仓复查:每 10 分钟探测一次触发条件(盘中、美东指定小时后、当日未复查)
   setInterval(() => {
