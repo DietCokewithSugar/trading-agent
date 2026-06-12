@@ -1,12 +1,18 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Alert, Button, Card, Col, Empty, Row, Space, Spin, Statistic, Table, Typography } from 'antd';
+import { Alert, Button, Card, Col, Empty, Row, Segmented, Space, Spin, Statistic, Table, Typography } from 'antd';
 
-import { api } from '../api.js';
+import { api, fmtTime } from '../api.js';
 
 const HORIZONS = [
   { key: '1h', label: '1 小时' },
   { key: '1d', label: '1 个交易日' },
   { key: '5d', label: '5 个交易日' },
+];
+
+const RANGES = [
+  { key: '7d', label: '7天', days: 7 },
+  { key: '30d', label: '30天', days: 30 },
+  { key: 'all', label: '全部', days: null },
 ];
 
 function fmtSignedPct(v, digits = 2) {
@@ -15,7 +21,27 @@ function fmtSignedPct(v, digits = 2) {
   return `${n >= 0 ? '+' : ''}${n.toFixed(digits)}%`;
 }
 
-/** 一组分桶的统计表:每个口径展示 样本数 / 方向命中率 / 平均收益 */
+/**
+ * 命中率单元格:数值按统计显著性着色(95% 置信区间整体高于 50% 才算"显著好",
+ * 整体低于 50% 才算"显著差",区间跨过 50% 一律中性——小样本不下结论),
+ * 区间本身以小字标注在数值下方。
+ */
+function HitCell({ value, lo, hi }) {
+  if (value === null || value === undefined) return '—';
+  const tone = lo !== null && lo !== undefined && lo > 50 ? 'up' : hi !== null && hi !== undefined && hi < 50 ? 'down' : '';
+  return (
+    <span className="num">
+      <span className={tone}>{value.toFixed(0)}%</span>
+      {lo !== null && lo !== undefined && (
+        <div style={{ fontSize: 11, color: '#8c8c8c', lineHeight: 1.2 }}>
+          {lo.toFixed(0)}~{hi.toFixed(0)}
+        </div>
+      )}
+    </span>
+  );
+}
+
+/** 一组分桶的统计表:每个口径展示 样本数 / 方向命中率(95% 区间)/ 平均收益 */
 function GroupTable({ group }) {
   const columns = [
     { title: '分组', dataIndex: 'label', fixed: 'left', width: 150 },
@@ -32,14 +58,11 @@ function GroupTable({ group }) {
         {
           title: '命中率',
           dataIndex: `hit_${h.key}`,
-          width: 85,
+          width: 95,
           align: 'right',
-          render: (v) =>
-            v === null || v === undefined ? (
-              '—'
-            ) : (
-              <span className={`num ${v >= 55 ? 'up' : v < 45 ? 'down' : ''}`}>{v.toFixed(0)}%</span>
-            ),
+          render: (v, row) => (
+            <HitCell value={v} lo={row[`hit_lo_${h.key}`]} hi={row[`hit_hi_${h.key}`]} />
+          ),
         },
         {
           title: '平均收益',
@@ -64,7 +87,7 @@ function GroupTable({ group }) {
         columns={columns}
         dataSource={group.rows}
         pagination={false}
-        scroll={{ x: 760 }}
+        scroll={{ x: 790 }}
       />
     </Card>
   );
@@ -76,20 +99,23 @@ function GroupTable({ group }) {
  * 而未实际交易的信号;收益按信号方向调整(利空信号下跌计为正)。
  */
 export default function SignalStatsPage() {
+  const [rangeKey, setRangeKey] = useState('30d');
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
 
+  const range = RANGES.find((r) => r.key === rangeKey);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      setData(await api.signalStats());
+      setData(await api.signalStats(range.days));
       setError(null);
     } catch (err) {
       setError(err.message);
     }
     setLoading(false);
-  }, []);
+  }, [range.days]);
 
   useEffect(() => {
     load();
@@ -113,7 +139,17 @@ export default function SignalStatsPage() {
     );
   }
   if (!data || !data.total) {
-    return <Empty description="暂无信号样本。信号产生 1 小时后开始回填前瞻收益,随后在此汇总。" />;
+    return (
+      <Space direction="vertical" size={16} style={{ width: '100%' }}>
+        <Segmented
+          size="small"
+          options={RANGES.map((r) => ({ label: r.label, value: r.key }))}
+          value={rangeKey}
+          onChange={setRangeKey}
+        />
+        <Empty description={`${range.days ? `近 ${range.days} 天` : '当前'}暂无信号样本。信号产生 1 小时后开始回填前瞻收益,随后在此汇总。`} />
+      </Space>
+    );
   }
 
   const headerCards = [
@@ -133,6 +169,12 @@ export default function SignalStatsPage() {
     })),
   ];
 
+  const windowNote = data.window
+    ? data.window.days
+      ? `统计窗口:近 ${data.window.days} 天`
+      : '统计窗口:全部历史'
+    : null;
+
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
       <Row gutter={[12, 12]} align="middle">
@@ -144,17 +186,36 @@ export default function SignalStatsPage() {
           </Col>
         ))}
         <Col flex="auto" style={{ textAlign: 'right' }}>
-          <Button onClick={load} loading={loading}>
-            刷新
-          </Button>
+          <Space>
+            <Segmented
+              size="small"
+              options={RANGES.map((r) => ({ label: r.label, value: r.key }))}
+              value={rangeKey}
+              onChange={setRangeKey}
+            />
+            <Button onClick={load} loading={loading}>
+              刷新
+            </Button>
+          </Space>
         </Col>
       </Row>
 
+      {data.window?.truncated && (
+        <Alert
+          type="warning"
+          showIcon
+          message={`样本量达到上限 ${data.window.max_rows} 条,实际只覆盖到 ${fmtTime(data.window.covered_since)} 之后的信号——更早的信号未计入,请缩小时间范围查看完整窗口。`}
+        />
+      )}
+
       <Typography.Paragraph type="secondary" style={{ fontSize: 13, margin: 0 }}>
+        {windowNote ? `${windowNote} · 样本 ${data.total} 条。` : ''}
         本页评估的是「分析信号本身」的预测能力,与仓位大小、止损、组合表现解耦:统计覆盖全部非中性信号
         (含因事件去重、置信度不足而未实际交易的),前瞻收益按信号方向调整(利空信号对应股价下跌计为命中),
         IC 为综合置信度与方向调整收益的相关系数——IC 持续为正且置信度分桶的命中率单调上升,才说明信号有可用的
-        alpha,而不只是赶上了好行情。
+        alpha,而不只是赶上了好行情。命中率下方的小字为 Wilson 95% 置信区间,数值仅在区间整体高于(绿)或
+        低于(红)50% 时着色——区间跨过 50% 说明样本还不足以下结论。「实际交易 vs 拦截层」是各防线的机会成本:
+        被宏观过滤/风控官否决/资金受限拦下的信号若持续跑出正收益,说明该层过度保守;若为负,说明该层在创造价值。
       </Typography.Paragraph>
 
       {data.pooling && data.pooling.n > 0 && (

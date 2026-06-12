@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { summarizeSignals, pearson } from '../server/services/signalStats.js';
+import { summarizeSignals, pearson, wilsonInterval } from '../server/services/signalStats.js';
 
 function signal(overrides) {
   return {
@@ -113,4 +113,51 @@ test('pearson:样本不足或零方差返回 null', () => {
   assert.equal(pearson([1, 2], [1, 2]), null);
   assert.equal(pearson([1, 1, 1], [1, 2, 3]), null);
   assert.ok(Math.abs(pearson([1, 2, 3], [3, 2, 1]) + 1) < 1e-9);
+});
+
+test('wilsonInterval:小样本区间宽、大样本区间窄、边界钳制在 [0,100]', () => {
+  assert.equal(wilsonInterval(0, 0), null);
+  // 10 中 6:点估计 60%,但 95% 区间跨过 50%(样本不足以下结论)
+  const small = wilsonInterval(6, 10);
+  assert.ok(small.lo < 50 && small.hi > 50);
+  // 1000 中 600:同为 60%,区间收窄到 50% 以上
+  const big = wilsonInterval(600, 1000);
+  assert.ok(big.lo > 50 && big.hi < 70);
+  assert.ok(big.hi - big.lo < small.hi - small.lo, '样本越大区间越窄');
+  // 全中/全不中不越界
+  assert.equal(wilsonInterval(5, 5).hi <= 100, true);
+  assert.equal(wilsonInterval(0, 5).lo >= 0, true);
+});
+
+test('命中率带 Wilson 置信区间字段', () => {
+  const rows = [
+    signal({ fwd_return_1d: 1 }),
+    signal({ fwd_return_1d: 2 }),
+    signal({ fwd_return_1d: -1 }),
+  ];
+  const overall = summarizeSignals(rows)
+    .groups.find((g) => g.key === 'overall')
+    .rows.find((r) => r.label === '全部');
+  assert.equal(overall.hit_1d, 66.67);
+  assert.ok(overall.hit_lo_1d !== null && overall.hit_lo_1d < 66.67);
+  assert.ok(overall.hit_hi_1d !== null && overall.hit_hi_1d > 66.67);
+  // 无样本口径区间为 null
+  assert.equal(overall.hit_lo_1h, null);
+});
+
+test('拦截层机会成本分桶:风控官否决/候选过期单列,且不落入兜底桶', () => {
+  const rows = [
+    signal({ traded: true, fwd_return_1d: 1 }),
+    signal({ candidate_status: 'rejected', officer_veto: true, fwd_return_1d: -4 }),
+    signal({ candidate_status: 'expired', fwd_return_1d: 2 }),
+    signal({ candidate_status: 'rejected', officer_veto: false, fwd_return_1d: 3 }),
+    signal({ candidate_status: 'macro_filtered', fwd_return_1d: 5 }),
+  ];
+  const tradedRows = summarizeSignals(rows).groups.find((g) => g.key === 'traded').rows;
+  assert.equal(tradedRows.find((r) => r.label === '风控官否决').n_1d, 1);
+  assert.equal(tradedRows.find((r) => r.label === '风控官否决').avg_1d, -4);
+  assert.equal(tradedRows.find((r) => r.label === '候选过期/取消').n_1d, 1);
+  assert.equal(tradedRows.find((r) => r.label === '宏观过滤').avg_1d, 5);
+  // 非风控官的 rejected 落兜底桶
+  assert.equal(tradedRows.find((r) => r.label === '其他未交易(去重/挂起/否决)').n_1d, 1);
 });

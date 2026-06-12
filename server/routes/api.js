@@ -87,11 +87,20 @@ router.get(
   })
 );
 
-/** 信号质量统计:前瞻收益的方向命中率/平均收益/IC,按档位/来源/置信度分桶 */
+/**
+ * 信号质量统计:前瞻收益的方向命中率(含 95% 置信区间)/平均收益/IC,
+ * 按档位/来源/置信度/拦截层(机会成本)分桶。?days=7|30 限定统计窗口(缺省全量,
+ * 超过采样上限时截断并在 window.truncated 标明)。
+ */
 router.get(
   '/signal-stats',
   asyncHandler(async (req, res) => {
-    res.json(await getSignalStats());
+    const days = Number(req.query.days);
+    res.json(
+      await getSignalStats({
+        days: Number.isFinite(days) && days > 0 ? Math.min(days, 366) : null,
+      })
+    );
   })
 );
 

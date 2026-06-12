@@ -21,7 +21,7 @@ export const api = {
   },
   stats: () => get('/stats'),
   performance: () => get('/performance'),
-  signalStats: () => get('/signal-stats'),
+  signalStats: (days) => get(`/signal-stats${days ? `?days=${days}` : ''}`),
   shadow: (hours) => get(`/shadow${hours ? `?hours=${hours}` : ''}`),
   macro: () => get('/macro'),
   pool: () => get('/pool'),

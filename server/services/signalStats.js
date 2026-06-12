@@ -7,11 +7,19 @@ import { supabase } from '../db.js';
  *
  * 口径说明:
  *  - 前瞻收益按信号方向调整:利空信号取负,正值即"方向判对";
- *  - 命中率 = 方向调整收益 > 0 的比例(收益恰为 0 计为未命中);
- *  - IC = 综合置信度与方向调整收益的皮尔逊相关系数(信号强度是否预测收益幅度)。
+ *  - 命中率 = 方向调整收益 > 0 的比例(收益恰为 0 计为未命中),
+ *    并附 Wilson 95% 置信区间——小样本的命中率区间很宽,防止 20 条样本就下结论;
+ *  - IC = 综合置信度与方向调整收益的皮尔逊相关系数(信号强度是否预测收益幅度);
+ *  - 机会成本:被各拦截层(资金受限/宏观过滤/冲突搁置/风控官否决)拦下的信号
+ *    同样记录了前瞻收益——被拦信号若持续大涨说明该层过度保守,若大跌说明该层有价值。
+ *
+ * 时间窗口:?days= 限定统计窗口(默认全量),分页拉取突破 PostgREST 单次
+ * 1000 行上限,超过 MAX_SAMPLE_ROWS 时截断并在响应里明示(window.truncated)。
  */
 
 const HORIZONS = ['1h', '1d', '5d'];
+const PAGE_SIZE = 1000;
+const MAX_SAMPLE_ROWS = 5000;
 
 function round(n, digits = 2) {
   const f = 10 ** digits;
@@ -38,7 +46,24 @@ export function pearson(xs, ys) {
   return cov / Math.sqrt(vx * vy);
 }
 
-/** 一组信号在三个前瞻口径上的样本量/命中率/平均方向调整收益 */
+/**
+ * 命中率的 Wilson 95% 置信区间(返回百分比 { lo, hi });n=0 返回 null。
+ * 用 Wilson 而非正态近似:小样本与命中率接近 0/1 时正态区间会越界且过窄。
+ */
+export function wilsonInterval(hits, n, z = 1.96) {
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const p = hits / n;
+  const z2 = z * z;
+  const denom = 1 + z2 / n;
+  const center = (p + z2 / (2 * n)) / denom;
+  const margin = (z * Math.sqrt((p * (1 - p)) / n + z2 / (4 * n * n))) / denom;
+  return {
+    lo: round(Math.max(center - margin, 0) * 100, 1),
+    hi: round(Math.min(center + margin, 1) * 100, 1),
+  };
+}
+
+/** 一组信号在三个前瞻口径上的样本量/命中率(含 95% 置信区间)/平均方向调整收益 */
 function horizonMetrics(rows) {
   const out = {};
   for (const h of HORIZONS) {
@@ -46,8 +71,11 @@ function horizonMetrics(rows) {
       .map((r) => r[`adj_${h}`])
       .filter((v) => v !== null && v !== undefined && Number.isFinite(v));
     const hits = adj.filter((v) => v > 0).length;
+    const ci = wilsonInterval(hits, adj.length);
     out[`n_${h}`] = adj.length;
     out[`hit_${h}`] = adj.length ? round((hits / adj.length) * 100) : null;
+    out[`hit_lo_${h}`] = ci ? ci.lo : null;
+    out[`hit_hi_${h}`] = ci ? ci.hi : null;
     out[`avg_${h}`] = adj.length ? round(adj.reduce((a, b) => a + b, 0) / adj.length, 3) : null;
   }
   return out;
@@ -148,23 +176,32 @@ export function summarizeSignals(rows) {
       ]),
     },
     {
+      // 拦截层机会成本:被各层拦下的信号同样回填前瞻收益——
+      // 与「已交易」基准对比,被拦信号持续走高说明该层过度保守(拦掉了 alpha),
+      // 走低说明该层有价值(躲过了亏损)。风控官否决目前只覆盖分配路径
+      // (候选 rejected 且理由以"风控官"开头);即时路径的否决无落库记录。
       key: 'traded',
-      label: '实际交易 vs 未交易',
+      label: '实际交易 vs 拦截层(机会成本)',
       rows: bucketRows(enriched, [
         { label: '已交易', match: (r) => r.traded },
-        // 候选池状态细分(014):资金受限/宏观过滤/冲突搁置说明"信号好但没轮到钱/被组合层拦下",
-        // 它们的前瞻收益是衡量分配器机会成本的关键
         {
           label: '资金受限未交易',
           match: (r) => !r.traded && r.candidate_status === 'capital_constrained',
         },
         { label: '宏观过滤', match: (r) => !r.traded && r.candidate_status === 'macro_filtered' },
         { label: '冲突搁置', match: (r) => !r.traded && r.candidate_status === 'conflict_hold' },
+        { label: '风控官否决', match: (r) => !r.traded && r.officer_veto },
+        {
+          label: '候选过期/取消',
+          match: (r) =>
+            !r.traded && !r.officer_veto && ['expired', 'cancelled'].includes(r.candidate_status),
+        },
         {
           label: '其他未交易(去重/挂起/否决)',
           match: (r) =>
             !r.traded &&
-            !['capital_constrained', 'macro_filtered', 'conflict_hold'].includes(
+            !r.officer_veto &&
+            !['capital_constrained', 'macro_filtered', 'conflict_hold', 'expired', 'cancelled'].includes(
               r.candidate_status
             ),
         },
@@ -259,42 +296,79 @@ export function summarizeSignals(rows) {
   };
 }
 
-/** /api/signal-stats 的数据来源;011 迁移未执行时返回 { available: false } */
-export async function getSignalStats() {
+/**
+ * 分页拉取(突破 PostgREST 单次 1000 行上限):buildQuery 每次返回新查询,
+ * 按 PAGE_SIZE 翻页直到取尽或达到 maxRows。返回 { rows, truncated, error }
+ * (error 为首个失败页的 supabase 错误,调用方按迁移容忍逻辑处理)。
+ */
+async function fetchPaged(buildQuery, maxRows = MAX_SAMPLE_ROWS) {
+  const rows = [];
+  for (let from = 0; from < maxRows; from += PAGE_SIZE) {
+    const { data, error } = await buildQuery().range(from, from + PAGE_SIZE - 1);
+    if (error) return { rows, truncated: false, error };
+    rows.push(...(data || []));
+    if (!data || data.length < PAGE_SIZE) return { rows, truncated: false, error: null };
+  }
+  return { rows, truncated: true, error: null };
+}
+
+/**
+ * /api/signal-stats 的数据来源;011 迁移未执行时返回 { available: false }。
+ * days 限定统计窗口(美东无关,按 UTC 时间差;null=全量,但受 MAX_SAMPLE_ROWS 截断,
+ * 截断时 window.truncated=true 且 window.covered_since 给出实际覆盖到的最早信号时间)。
+ */
+export async function getSignalStats({ days = null } = {}) {
   const db = supabase();
-  const { data, error } = await db
-    .from('news_analyses')
-    .select(
-      'id, symbol, sentiment, tier, confidence, final_confidence, signal_price, fwd_return_1h, fwd_return_1d, fwd_return_5d, created_at, news_articles(source_score)'
+  const since =
+    Number.isFinite(days) && days > 0 ? new Date(Date.now() - days * 86400_000).toISOString() : null;
+  const withSince = (q) => (since ? q.gte('created_at', since) : q);
+
+  const analysesFetch = await fetchPaged(() =>
+    withSince(
+      db
+        .from('news_analyses')
+        .select(
+          'id, symbol, sentiment, tier, confidence, final_confidence, signal_price, fwd_return_1h, fwd_return_1d, fwd_return_5d, created_at, news_articles(source_score)'
+        )
+        .not('signal_price', 'is', null)
+        .in('sentiment', ['bullish', 'bearish'])
+        .order('created_at', { ascending: false })
     )
-    .not('signal_price', 'is', null)
-    .in('sentiment', ['bullish', 'bearish'])
-    .order('created_at', { ascending: false })
-    .limit(1000);
-  if (error) {
-    if (/signal_price|fwd_return/.test(error.message)) {
+  );
+  if (analysesFetch.error) {
+    if (/signal_price|fwd_return/.test(analysesFetch.error.message)) {
       return { available: false };
     }
-    throw new Error(error.message);
+    throw new Error(analysesFetch.error.message);
   }
+  const data = analysesFetch.rows;
 
-  // 实际成交的分析集合(买卖都算)+ 排队成本(016 迁移容忍:缺 pool_* 列退回只取 analysis_id)
+  // 实际成交的分析集合(买卖都算)+ 排队成本(016 迁移容忍:缺 pool_* 列退回只取 analysis_id)。
+  // 同窗口过滤 + 时间倒序:全量截断时优先保住与最近分析对齐的成交
   let tradeRows = [];
   {
-    const { data: tRows, error: tErr } = await db
-      .from('trades')
-      .select('analysis_id, side, pool_wait_minutes, pool_drift_percent')
-      .not('analysis_id', 'is', null)
-      .limit(2000);
-    if (tErr && /pool_|column|schema/i.test(tErr.message)) {
-      const { data: basic } = await db
-        .from('trades')
-        .select('analysis_id')
-        .not('analysis_id', 'is', null)
-        .limit(2000);
-      tradeRows = basic || [];
+    const full = await fetchPaged(() =>
+      withSince(
+        db
+          .from('trades')
+          .select('analysis_id, side, pool_wait_minutes, pool_drift_percent, created_at')
+          .not('analysis_id', 'is', null)
+          .order('created_at', { ascending: false })
+      )
+    );
+    if (full.error && /pool_|column|schema/i.test(full.error.message)) {
+      const basic = await fetchPaged(() =>
+        withSince(
+          db
+            .from('trades')
+            .select('analysis_id, created_at')
+            .not('analysis_id', 'is', null)
+            .order('created_at', { ascending: false })
+        )
+      );
+      tradeRows = basic.rows;
     } else {
-      tradeRows = tRows || [];
+      tradeRows = full.rows;
     }
   }
   const tradedSet = new Set(tradeRows.map((t) => t.analysis_id));
@@ -311,39 +385,60 @@ export async function getSignalStats() {
     }
   }
 
-  // 候选池状态 + 入池时宏观快照(014 迁移容忍:表缺失时全部按 null,相关分组自然为空)
+  // 候选池状态 + 入池时宏观快照 + 状态理由(014 迁移容忍:表缺失时全部按 null,相关分组自然为空)。
+  // status_reason 用于识别分配路径的风控官否决(rejected 且理由以"风控官"开头)
   let candidateById = new Map();
   try {
-    const { data: candRows, error: candErr } = await db
-      .from('candidate_signals')
-      .select('analysis_id, status, macro_regime')
-      .not('analysis_id', 'is', null)
-      .limit(2000);
-    if (!candErr) {
-      candidateById = new Map((candRows || []).map((c) => [c.analysis_id, c]));
+    const candFetch = await fetchPaged(() =>
+      withSince(
+        db
+          .from('candidate_signals')
+          .select('analysis_id, status, status_reason, macro_regime, created_at')
+          .not('analysis_id', 'is', null)
+          .order('created_at', { ascending: false })
+      )
+    );
+    if (!candFetch.error) {
+      candidateById = new Map(candFetch.rows.map((c) => [c.analysis_id, c]));
     }
   } catch {
     // 候选池不可用时静默退回(本统计是纯观测层)
   }
 
-  const rows = (data || []).map((a) => ({
-    sentiment: a.sentiment,
-    tier: a.tier,
-    confidence: a.confidence === null ? null : Number(a.confidence),
-    final_confidence: a.final_confidence === null ? null : Number(a.final_confidence),
-    source_score:
-      a.news_articles?.source_score === null || a.news_articles?.source_score === undefined
-        ? null
-        : Number(a.news_articles.source_score),
-    traded: tradedSet.has(a.id),
-    candidate_status: candidateById.get(a.id)?.status ?? null,
-    macro_regime: candidateById.get(a.id)?.macro_regime ?? null,
-    pool_wait_minutes: poolByAnalysis.get(a.id)?.wait ?? null,
-    pool_drift_percent: poolByAnalysis.get(a.id)?.drift ?? null,
-    fwd_return_1h: a.fwd_return_1h === null ? null : Number(a.fwd_return_1h),
-    fwd_return_1d: a.fwd_return_1d === null ? null : Number(a.fwd_return_1d),
-    fwd_return_5d: a.fwd_return_5d === null ? null : Number(a.fwd_return_5d),
-  }));
+  const rows = (data || []).map((a) => {
+    const cand = candidateById.get(a.id);
+    return {
+      sentiment: a.sentiment,
+      tier: a.tier,
+      confidence: a.confidence === null ? null : Number(a.confidence),
+      final_confidence: a.final_confidence === null ? null : Number(a.final_confidence),
+      source_score:
+        a.news_articles?.source_score === null || a.news_articles?.source_score === undefined
+          ? null
+          : Number(a.news_articles.source_score),
+      traded: tradedSet.has(a.id),
+      candidate_status: cand?.status ?? null,
+      officer_veto: cand?.status === 'rejected' && /^风控官/.test(cand?.status_reason || ''),
+      macro_regime: cand?.macro_regime ?? null,
+      pool_wait_minutes: poolByAnalysis.get(a.id)?.wait ?? null,
+      pool_drift_percent: poolByAnalysis.get(a.id)?.drift ?? null,
+      fwd_return_1h: a.fwd_return_1h === null ? null : Number(a.fwd_return_1h),
+      fwd_return_1d: a.fwd_return_1d === null ? null : Number(a.fwd_return_1d),
+      fwd_return_5d: a.fwd_return_5d === null ? null : Number(a.fwd_return_5d),
+    };
+  });
 
-  return { available: true, generated_at: new Date().toISOString(), ...summarizeSignals(rows) };
+  return {
+    available: true,
+    generated_at: new Date().toISOString(),
+    window: {
+      days: since ? days : null,
+      since,
+      max_rows: MAX_SAMPLE_ROWS,
+      truncated: analysesFetch.truncated,
+      // 截断时实际覆盖到的最早信号时间(时间倒序,最后一行最旧)
+      covered_since: data.length ? data[data.length - 1].created_at : null,
+    },
+    ...summarizeSignals(rows),
+  };
 }
