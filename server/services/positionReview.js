@@ -22,30 +22,36 @@ const ET_HOUR_FMT = new Intl.DateTimeFormat('en-US', {
 let lastReviewedEtDate = null;
 let running = false;
 
-/** 持仓股最近的新闻分析(每只最多 2 条),作为"论点是否过时"的判断输入 */
+/**
+ * 持仓股最近的新闻分析(每只最多 2 条),作为"论点是否过时"的判断输入。
+ * 逐票限量查询:全局按时间排序的单查询会让新闻活跃的一只票吃掉全部配额,
+ * 其余持仓拿到空上下文(持仓数受 MAX_OPEN_POSITIONS 约束,并发量可控)
+ */
 async function getRecentAnalyses(symbols) {
-  const { data, error } = await supabase()
-    .from('news_analyses')
-    .select('symbol, sentiment, tier, event_summary, reasoning, created_at')
-    .in('symbol', symbols)
-    .order('created_at', { ascending: false })
-    .limit(symbols.length * 2);
-  if (error) {
-    console.warn(`[review] 读取持仓相关分析失败: ${error.message}`);
-    return new Map();
-  }
   const map = new Map();
-  for (const row of data || []) {
-    const list = map.get(row.symbol) || [];
-    if (list.length < 2) {
-      list.push(row);
-      map.set(row.symbol, list);
-    }
-  }
+  await Promise.all(
+    symbols.map(async (symbol) => {
+      const { data, error } = await supabase()
+        .from('news_analyses')
+        .select('symbol, sentiment, tier, event_summary, reasoning, created_at')
+        .eq('symbol', symbol)
+        .order('created_at', { ascending: false })
+        .limit(2);
+      if (error) {
+        console.warn(`[review] 读取 ${symbol} 相关分析失败: ${error.message}`);
+        return;
+      }
+      if (data?.length) map.set(symbol, data);
+    })
+  );
   return map;
 }
 
-/** 收紧止损:只升不降,且不超过现价 */
+/**
+ * 收紧止损:只升不降,且不超过现价。
+ * 同时把 peak_price 重锚到现价(只升不降):收紧后的止损可能高于陈旧峰值,
+ * 否则移动止损会因"距离 ≤ 0"从此静默失效;列缺失(007 未迁移)时降级只写止损
+ */
 async function tightenStop(position, newStopLossPercent, price, reason) {
   const newStop = round4(price * (1 - newStopLossPercent / 100));
   const current = position.stop_loss !== null ? Number(position.stop_loss) : null;
@@ -53,10 +59,17 @@ async function tightenStop(position, newStopLossPercent, price, reason) {
     console.log(`[review] ${position.symbol} 建议止损 $${newStop} 不高于现值 $${current},忽略`);
     return;
   }
-  const { error } = await supabase()
-    .from('positions')
-    .update({ stop_loss: newStop, updated_at: new Date().toISOString() })
-    .eq('symbol', position.symbol);
+  const prevPeak = position.peak_price !== null && position.peak_price !== undefined ? Number(position.peak_price) : null;
+  const update = {
+    stop_loss: newStop,
+    updated_at: new Date().toISOString(),
+    ...(prevPeak === null || price > prevPeak ? { peak_price: round4(price) } : {}),
+  };
+  let { error } = await supabase().from('positions').update(update).eq('symbol', position.symbol);
+  if (error && /peak_price/.test(error.message)) {
+    const { peak_price, ...legacy } = update;
+    ({ error } = await supabase().from('positions').update(legacy).eq('symbol', position.symbol));
+  }
   if (error) {
     console.warn(`[review] ${position.symbol} 收紧止损失败: ${error.message}`);
     return;

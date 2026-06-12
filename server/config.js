@@ -9,8 +9,19 @@ function num0(value, fallback) {
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
+// 反向代理跳数解析:false/0=不信任(直连部署),正整数=信任前 N 跳(Render 单层代理为 1)
+function parseTrustProxy(value) {
+  if (value === undefined || value === '') return 1;
+  if (/^(false|0)$/i.test(String(value).trim())) return false;
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1;
+}
+
 export const config = {
   port: process.env.PORT || 3000,
+  // 信任的反向代理跳数:决定 req.ip 的取值,鉴权失败限流按 IP 计数。
+  // 无代理直连部署必须设 TRUST_PROXY=0,否则客户端可伪造 X-Forwarded-For 绕过限流
+  trustProxy: parseTrustProxy(process.env.TRUST_PROXY),
 
   // FMP (Financial Modeling Prep) — Ultimate 订阅
   fmpApiKey: process.env.FMP_API_KEY || '',
@@ -79,8 +90,9 @@ export const config = {
     .map((s) => s.trim().toUpperCase())
     .filter(Boolean),
   // 公司公告类来源(新闻稿通道)的利好信号置信度折价(0~1,1=不折价):
-  // 公告真实性高但立场天然偏多,折价后多数会落入"挂起等独立媒体交叉确认"流程
-  pressBullishPenalty: Math.min(num(process.env.PRESS_BULLISH_PENALTY, 0.75), 1),
+  // 公告真实性高但立场天然偏多,折价后多数会落入"挂起等独立媒体交叉确认"流程。
+  // num0:显式配置 0(完全不信任公告类利好)也合法,不静默回退默认值
+  pressBullishPenalty: Math.min(num0(process.env.PRESS_BULLISH_PENALTY, 0.75), 1),
   // 开盘队列:休市时段的交易信号挂单等待下一开盘,超过该时长(小时)未成交自动作废
   //(默认 96 小时,覆盖周末与三天长假)
   pendingOrderMaxAgeHours: num(process.env.PENDING_ORDER_MAX_AGE_HOURS, 96),

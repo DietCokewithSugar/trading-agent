@@ -385,8 +385,10 @@ export async function decideTrade({ analysis, article, quote, profile, portfolio
     return Math.min(Math.max(n, min), max);
   };
 
-  // 标的核验未通过时,无论模型返回什么动作都强制 hold
-  const symbolValid = result.symbol_valid !== false;
+  // 标的核验未通过时,无论模型返回什么动作都强制 hold。
+  // 字段缺失按未通过处理(fail-closed,与风控官 approve === true 同向):
+  // 核验层静默失效的代价(误买错票)高于偶发漏字段错过一笔交易
+  const symbolValid = result.symbol_valid === true;
   const action =
     symbolValid && ['buy', 'sell', 'hold'].includes(result.action) ? result.action : 'hold';
   return {

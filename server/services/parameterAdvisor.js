@@ -253,7 +253,10 @@ export function evaluateSignalRules(rawRows, cfg, t = ADVISOR_THRESHOLDS) {
 
 /**
  * 影子组合对照规则(纯函数):每个消融变体与实盘同窗收益差超过阈值才发声。
- * variants 为 getShadowOverview 的变体行,actualReturnPct 为实盘同窗收益(百分点)。
+ * variants 为 getShadowOverview 的变体行,须带 window_return_pct(同窗收益,由窗口内
+ * 净值序列首末两点算出)——变体的 pnl_percent 是自建立以来的累计收益,运行天数超过
+ * 统计窗后与实盘窗口收益口径错配,会产出方向错误的建议,这里不使用。
+ * actualReturnPct 为实盘同窗收益(百分点)。
  */
 export function evaluateShadowRules({ variants, actualReturnPct, now = Date.now() }, t = ADVISOR_THRESHOLDS) {
   const suggestions = [];
@@ -281,8 +284,13 @@ export function evaluateShadowRules({ variants, actualReturnPct, now = Date.now(
       });
       continue;
     }
-    const diff = round(Number(v.pnl_percent) - Number(actualReturnPct));
-    const evidence = `运行 ${Math.floor(runtimeDays)} 天:该变体收益 ${v.pnl_percent >= 0 ? '+' : ''}${v.pnl_percent}%,实盘同窗 ${actualReturnPct >= 0 ? '+' : ''}${round(Number(actualReturnPct))}%,差 ${diff >= 0 ? '+' : ''}${diff} 个百分点`;
+    const variantPct = Number(v.window_return_pct);
+    if (!Number.isFinite(variantPct)) {
+      skipped.push({ id: `shadow_${variant}`, title, reason: '窗口内净值序列不足,无法计算同窗收益' });
+      continue;
+    }
+    const diff = round(variantPct - Number(actualReturnPct));
+    const evidence = `运行 ${Math.floor(runtimeDays)} 天:该变体同窗收益 ${variantPct >= 0 ? '+' : ''}${round(variantPct)}%,实盘同窗 ${actualReturnPct >= 0 ? '+' : ''}${round(Number(actualReturnPct))}%,差 ${diff >= 0 ? '+' : ''}${diff} 个百分点`;
     if (diff >= t.shadowEdgePercent) {
       suggestions.push({
         id: `shadow_${variant}`,
@@ -350,7 +358,18 @@ export async function getParameterAdvice({ days = 30 } = {}) {
         Math.max(Date.now() - days * 86400_000, earliestStart ? new Date(earliestStart).getTime() : 0)
       ).toISOString();
       const actualPct = await actualWindowReturn(since);
-      shadow = evaluateShadowRules({ variants: overview.variants, actualReturnPct: actualPct });
+      // 同窗口径:各变体的窗口收益由窗口内净值序列首末两点算出,与实盘窗口对齐
+      const variants = overview.variants.map((v) => {
+        const points = overview.series?.[v.variant] || [];
+        const first = Number(points[0]?.total_value);
+        const last = Number(points[points.length - 1]?.total_value);
+        const windowReturnPct =
+          points.length >= 2 && first > 0 && Number.isFinite(last)
+            ? ((last - first) / first) * 100
+            : null;
+        return { ...v, window_return_pct: windowReturnPct };
+      });
+      shadow = evaluateShadowRules({ variants, actualReturnPct: actualPct });
     }
   } catch (err) {
     console.warn(`[advisor] 影子组合对照不可用: ${err.message}`);

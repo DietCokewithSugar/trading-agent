@@ -282,17 +282,27 @@ router.get(
   })
 );
 
-/** 交易记录(含关联新闻标题与分析) */
+/**
+ * 交易记录(含关联新闻标题与分析)。
+ * ?before=<ISO> 游标分页:取该时刻之前的记录——SSE 推送会让列表头部增长,
+ * 纯 offset 翻页的偏移会随之漂移漏行,加载更多一律走游标。
+ */
 router.get(
   '/trades',
   asyncHandler(async (req, res) => {
     const limit = Math.min(Number(req.query.limit) || 100, 500);
     const offset = Math.max(Number(req.query.offset) || 0, 0);
-    const { data, error } = await supabase()
+    const before = req.query.before ? new Date(String(req.query.before)) : null;
+    let query = supabase()
       .from('trades')
       .select('*, news_articles(title, url), news_analyses(sentiment, tier, reasoning)')
-      .order('created_at', { ascending: false })
-      .range(offset, offset + limit - 1);
+      .order('created_at', { ascending: false });
+    if (before && !Number.isNaN(before.getTime())) {
+      query = query.lt('created_at', before.toISOString()).range(0, limit - 1);
+    } else {
+      query = query.range(offset, offset + limit - 1);
+    }
+    const { data, error } = await query;
     if (error) throw new Error(error.message);
     res.json(data || []);
   })
@@ -301,13 +311,16 @@ router.get(
 /**
  * 新闻流(含分析结果)。过滤在数据库端完成,前端不再为筛选拉全量数据:
  * ?analyzed=true 只看已分析;?sentiment=bullish|bearish 按方向过滤(隐含已分析且有档位);
- * ?q=xxx 按标题/股票代码搜索。
+ * ?q=xxx 按标题/股票代码搜索;?before=<ISO> 游标分页(发布时间早于该时刻,
+ * 防 SSE 推送让 offset 漂移漏行)。
  */
 router.get(
   '/news',
   asyncHandler(async (req, res) => {
     const limit = Math.min(Number(req.query.limit) || 50, 200);
     const offset = Math.max(Number(req.query.offset) || 0, 0);
+    const beforeRaw = req.query.before ? new Date(String(req.query.before)) : null;
+    const before = beforeRaw && !Number.isNaN(beforeRaw.getTime()) ? beforeRaw : null;
     const onlyAnalyzed = req.query.analyzed === 'true';
     const sentiment = ['bullish', 'bearish'].includes(req.query.sentiment)
       ? req.query.sentiment
@@ -323,8 +336,12 @@ router.get(
       let query = supabase()
         .from('news_articles')
         .select(`${cols}, ${sentiment ? 'news_analyses!inner(*)' : 'news_analyses(*)'}`)
-        .order('published_at', { ascending: false, nullsFirst: false })
-        .range(offset, offset + limit - 1);
+        .order('published_at', { ascending: false, nullsFirst: false });
+      if (before) {
+        query = query.lt('published_at', before.toISOString()).range(0, limit - 1);
+      } else {
+        query = query.range(offset, offset + limit - 1);
+      }
       if (sentiment) {
         query = query
           .eq('news_analyses.sentiment', sentiment)

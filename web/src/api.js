@@ -10,10 +10,18 @@ async function get(path) {
 export const api = {
   portfolio: () => get('/portfolio'),
   snapshots: (hours) => get(`/snapshots${hours ? `?hours=${hours}` : ''}`),
-  trades: (limit = 100, offset = 0) => get(`/trades?limit=${limit}&offset=${offset}`),
+  // before 游标分页:SSE 推送让列表头部增长后 offset 会漂移漏行,加载更多用游标
+  trades: (limit = 100, { offset = 0, before = null } = {}) => {
+    const params = new URLSearchParams({ limit });
+    if (before) params.set('before', before);
+    else params.set('offset', offset);
+    return get(`/trades?${params.toString()}`);
+  },
   // 新闻流:筛选/搜索在服务端完成,前端不再为过滤拉全量数据
-  news: ({ limit = 60, offset = 0, filter = 'all', q = '' } = {}) => {
-    const params = new URLSearchParams({ limit, offset });
+  news: ({ limit = 60, offset = 0, before = null, filter = 'all', q = '' } = {}) => {
+    const params = new URLSearchParams({ limit });
+    if (before) params.set('before', before);
+    else params.set('offset', offset);
     if (filter === 'analyzed') params.set('analyzed', 'true');
     if (filter === 'bullish' || filter === 'bearish') params.set('sentiment', filter);
     if (q) params.set('q', q);
@@ -192,6 +200,7 @@ export const LLM_PURPOSE_LABELS = {
   review: '持仓复查',
   reflection: '平仓复盘',
   'macro-analyst': '宏观分析',
+  'macro-event-matcher': '宏观事件归并',
   other: '其他',
 };
 
@@ -218,4 +227,9 @@ export const REJECT_LABELS = {
   daily_budget: '当日预算耗尽',
   gross_exposure: '总敞口上限',
   cooldown: '冷却期',
+  position_cap: '单票仓位上限',
+  candidate_state_changed: '候选状态已变更',
+  valuation_unreliable: '持仓报价缺失',
+  buy_on_non_bullish: '非利好信号买入拦截',
+  candidate_orphan: '候选关联数据缺失',
 };

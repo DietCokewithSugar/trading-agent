@@ -14,7 +14,10 @@ import { extractDomain } from './credibility.js';
  *     (此前未出现过的域名)的重复报道视为交叉确认,通过冷却期后以 confirmable
  *     返回,由上层用加成后的综合置信度重新评估是否放行;
  *  4. 新事件放行前再过一道同向交易冷却期,作为 LLM 误判的兜底;
- *  5. news_events 表不可用(迁移未执行)或归并失败时,退回纯冷却期判断,保证主流程不中断。
+ *  5. news_events 表缺失(003 迁移未执行)时退回纯冷却期判断(迁移容忍);
+ *     其余归并失败(LLM 瞬时故障/读写错误)按 fail-closed 约定跳过本次交易——
+ *     冷却期只有 30 分钟而去重窗口 72 小时,退回冷却期会让已交易事件的
+ *     数小时后重复报道被当作新事件再次交易,宁可错过也不重复下单。
  *
  * 返回 { proceed, eventId, reason, confirmable?, distinctSources? }。
  */
@@ -102,7 +105,16 @@ export async function resolveEvent(article, analysisRow) {
     eventId = created.id;
     await linkAnalysis(db, analysisRow.id, eventId);
   } catch (err) {
-    console.warn(`[event] ${symbol} 事件归并不可用(${err.message}),退回冷却期判断`);
+    // 表缺失(003 迁移未执行)= 永久性降级,退回冷却期判断;
+    // 其余失败(matchEvent 瞬时故障/读写错误)fail-closed:跳过本次交易,下一篇报道再判
+    const missingTable =
+      /news_events/.test(err.message || '') &&
+      /not find|does not exist|schema cache|PGRST205/i.test(err.message || '');
+    if (!missingTable) {
+      console.warn(`[event] ${symbol} 事件归并失败(${err.message}),按约定跳过本次交易(fail-closed)`);
+      return { proceed: false, eventId, reason: `事件归并失败,跳过交易(fail-closed): ${err.message}`.slice(0, 200) };
+    }
+    console.warn(`[event] ${symbol} news_events 表不可用(${err.message}),退回冷却期判断`);
   }
 
   // 新事件(或归并不可用)仍需通过同向交易冷却期才放行

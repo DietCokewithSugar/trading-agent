@@ -320,7 +320,9 @@ export async function recomputeRegime(trigger = 'decay') {
       Math.abs(next.riskScore - Number(state.cached.risk_score)) >= 0.05 ||
       next.rates !== state.cached.rates_signal ||
       next.inflation !== state.cached.inflation_signal ||
-      next.growth !== state.cached.growth_signal;
+      next.growth !== state.cached.growth_signal ||
+      // shock_until 延长也要落库:否则冲击期内再次触发只更新进程内缓存,重启后提前解除
+      String(next.shockUntil || '') !== String(state.cached.shock_until || '');
     const regimeSwitched = next.regime !== state.cached.regime;
 
     const row = {

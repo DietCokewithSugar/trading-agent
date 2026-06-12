@@ -76,6 +76,9 @@ export async function getValuation({ quoteMaxAgeMs = 10_000 } = {}) {
     pnl_percent: initial > 0 ? ((totalValue - initial) / initial) * 100 : 0,
     market_session: getMarketSession(),
     positions: enriched,
+    // 报价缺失的持仓按成本价计入估值:浮亏被抹平,当日亏损熔断/敞口钳制都会失真,
+    // 买入路径据此 fail-closed(missing_quotes 非空时暂缓买入)
+    missing_quotes: enriched.filter((p) => !p.live_quote).map((p) => p.symbol),
   };
 }
 

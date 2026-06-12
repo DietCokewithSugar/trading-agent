@@ -367,7 +367,13 @@ export async function loadSignalRows({ days = null } = {}) {
             .order('created_at', { ascending: false })
         )
       );
+      // 缺列之外的失败同样不可吞:静默用空集会把全部信号标成"未交易"
+      if (basic.error) throw new Error(basic.error.message);
       tradeRows = basic.rows;
+    } else if (full.error) {
+      // 非缺列类失败(网络/超时):不能拿部分/空结果继续——
+      // 全部信号会被静默标成"未交易",机会成本统计整组失真
+      throw new Error(full.error.message);
     } else {
       tradeRows = full.rows;
     }

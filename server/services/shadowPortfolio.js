@@ -25,6 +25,7 @@ import { minutesSinceMarketOpen } from './marketCalendar.js';
 import { computeFill } from './execution.js';
 import { scaleFraction } from './sizing.js';
 import { sanitizeProviderText } from './metrics.js';
+import { isHalted } from './halt.js';
 import {
   computeShadowSpend,
   applyBuy,
@@ -76,16 +77,27 @@ export function isShadowAvailable() {
 }
 
 // 进程内串行链:所有改账操作排队执行,避免现金读-改-写交错;
-// 钩子一律 fire-and-forget,失败只告警(纯观测层不允许影响交易主链路)
+// 钩子一律 fire-and-forget,失败只告警(纯观测层不允许影响交易主链路)。
+// 全局 halt(管理重置)期间不入队也不执行:截库后才执行的幻影成交会写进全新影子账本
 let chain = Promise.resolve();
 function enqueue(label, fn) {
-  if (!isShadowAvailable()) return Promise.resolve();
-  const run = chain.then(fn).catch((err) => {
-    if (isMissingTable(err)) warnMissingOnce();
-    else console.warn(`[shadow] ${label} 失败: ${err.message}`);
-  });
+  if (!isShadowAvailable() || isHalted()) return Promise.resolve();
+  const run = chain
+    .then(() => {
+      if (isHalted()) return undefined;
+      return fn();
+    })
+    .catch((err) => {
+      if (isMissingTable(err)) warnMissingOnce();
+      else console.warn(`[shadow] ${label} 失败: ${err.message}`);
+    });
   chain = run;
   return run;
+}
+
+/** 管理重置前排空影子串行链(随后入队的任务被 halt 旗标挡住) */
+export function drainShadowQueue() {
+  return chain.catch(() => {});
 }
 
 /** supabase 响应解包:错误时抛出(由 enqueue 统一告警);缺表错误标记停用 */
@@ -231,22 +243,24 @@ async function shadowBuy(
   const amount = round2(quantity * price);
 
   // 写入顺序:先记成交(去重依赖它),再改持仓与现金;非事务 best-effort,模拟盘可接受
-  unwrap(
-    await supabase().from('shadow_trades').insert({
-      variant,
-      symbol,
-      side: 'buy',
-      quantity,
-      price,
-      amount,
-      reason: reason ? sanitizeProviderText(String(reason).slice(0, 300)) : null,
-      trigger,
-      news_id: newsId,
-      analysis_id: analysisId,
-      mirror_trade_id: mirrorTradeId,
-    }),
-    `影子买入记录 ${variant}/${symbol}`
-  );
+  const insRes = await supabase().from('shadow_trades').insert({
+    variant,
+    symbol,
+    side: 'buy',
+    quantity,
+    price,
+    amount,
+    reason: reason ? sanitizeProviderText(String(reason).slice(0, 300)) : null,
+    trigger,
+    news_id: newsId,
+    analysis_id: analysisId,
+    mirror_trade_id: mirrorTradeId,
+  });
+  // 唯一索引(019)挡下的重复买入:进程内先查后插的兜底防线生效,静默跳过
+  if (insRes.error && (insRes.error.code === '23505' || /duplicate key/i.test(insRes.error.message))) {
+    return;
+  }
+  unwrap(insRes, `影子买入记录 ${variant}/${symbol}`);
   const next = applyBuy(existing || null, { quantity, amount, stopLossPercent, takeProfitPercent });
   unwrap(
     await supabase()
@@ -559,9 +573,9 @@ export function mirrorSell(trade, { fraction = 1 } = {}) {
 
 let stopsRunning = false;
 
-/** 影子持仓止损/止盈监控:与实盘 riskMonitor 同口径(全仓卖出),休市跳过 */
+/** 影子持仓止损/止盈监控:与实盘 riskMonitor 同口径(全仓卖出),休市/全局 halt 跳过 */
 export async function checkShadowStops() {
-  if (!isShadowAvailable() || stopsRunning) return;
+  if (!isShadowAvailable() || stopsRunning || isHalted()) return;
   if (getMarketSession() === 'closed') return;
   stopsRunning = true;
   try {

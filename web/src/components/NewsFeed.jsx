@@ -109,11 +109,22 @@ export default function NewsFeed({ version, onSymbolClick }) {
   const loadMore = async () => {
     setLoadingMore(true);
     try {
-      const next = await api.news({ limit: PAGE_SIZE, offset: items.length, filter, q: query });
+      // 游标分页:以已加载最旧一条的发布时间为界,SSE 推送的新文章不会让翻页漏行
+      //(最旧一条缺发布时间的极少数情况退回 offset)
+      const oldest = items[items.length - 1]?.published_at;
+      const next = await api.news({
+        limit: PAGE_SIZE,
+        ...(oldest ? { before: oldest } : { offset: items.length }),
+        filter,
+        q: query,
+      });
       if (next.length < PAGE_SIZE) setNoMore(true);
       setItems((prev) => {
         const seen = new Set(prev.map((p) => p.id));
-        return [...prev, ...next.filter((n) => !seen.has(n.id))];
+        const merged = [...prev, ...next.filter((n) => !seen.has(n.id))];
+        // 本地展示上限与 SSE 合并路径一致(防长会话内存膨胀);达到上限即不再翻页
+        if (merged.length >= MAX_ITEMS) setNoMore(true);
+        return merged.slice(0, MAX_ITEMS);
       });
     } catch {
       /* 下次再试 */
@@ -150,7 +161,7 @@ export default function NewsFeed({ version, onSymbolClick }) {
               <div style={{ marginTop: 6 }}>
                 <Space size={8} wrap>
                   <Typography.Text type="secondary" style={{ fontSize: 12.5 }}>
-                    {n.publisher || n.source}
+                    {n.publisher || '未知来源'}
                   </Typography.Text>
                   {typeof n.source_score === 'number' || typeof n.source_score === 'string' ? (
                     <Tag

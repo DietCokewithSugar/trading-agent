@@ -68,7 +68,7 @@ create table if not exists trades (
   price numeric not null,
   amount numeric not null,
   reason text,
-  -- 触发来源:news=新闻信号, stop_loss=自动止损, take_profit=自动止盈
+  -- 触发来源:news=新闻信号, stop_loss=自动止损, take_profit=自动止盈, review=每日持仓复查
   trigger text not null default 'news',
   news_id bigint references news_articles(id) on delete set null,
   analysis_id bigint references news_analyses(id) on delete set null,
@@ -539,8 +539,9 @@ create table if not exists shadow_trades (
   created_at timestamptz not null default now()
 );
 create index if not exists idx_shadow_trades_variant on shadow_trades (variant, created_at desc);
--- 同一变体对同一条分析最多买一次(防宏观过滤逐轮重放/留池候选后续真实成交导致的重复买入)
-create index if not exists idx_shadow_trades_buy_dedup on shadow_trades (variant, analysis_id)
+-- 同一变体对同一条分析最多买一次(防宏观过滤逐轮重放/留池候选后续真实成交导致的重复买入);
+-- 唯一索引(019):数据库级硬约束,进程内先查后插只是第一道防线
+create unique index if not exists idx_shadow_trades_buy_dedup on shadow_trades (variant, analysis_id)
   where side = 'buy' and analysis_id is not null;
 
 create table if not exists shadow_snapshots (
