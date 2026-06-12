@@ -68,7 +68,7 @@ create table if not exists trades (
   price numeric not null,
   amount numeric not null,
   reason text,
-  -- 触发来源:news=新闻信号, stop_loss=自动止损, take_profit=自动止盈
+  -- 触发来源:news=新闻信号, stop_loss=自动止损, take_profit=自动止盈, review=每日持仓复查
   trigger text not null default 'news',
   news_id bigint references news_articles(id) on delete set null,
   analysis_id bigint references news_analyses(id) on delete set null,

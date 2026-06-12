@@ -21,6 +21,8 @@ services:
         sync: false
       - key: DEEPSEEK_MODEL
         value: deepseek-chat
+      - key: DEEPSEEK_BASE_URL
+        value: "https://api.deepseek.com"
       - key: DEEPSEEK_COST_PER_1M_INPUT
         value: "0.56"
       - key: DEEPSEEK_COST_PER_1M_OUTPUT
@@ -41,6 +43,10 @@ services:
         value: "2"
       - key: MIN_FINAL_CONFIDENCE
         value: "0.35"
+      - key: EVENT_DEDUP_HOURS
+        value: "72"
+      - key: TRADE_COOLDOWN_MINUTES
+        value: "30"
       - key: ENABLE_REFLECTION
         value: "true"
       - key: ENABLE_TRAILING_STOP
@@ -123,5 +129,9 @@ services:
         value: "true"
       - key: WATCHLIST
         value: "AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA"
+      - key: ENABLE_YAHOO
+        value: "true"
+      - key: TRUST_PROXY
+        value: "1" # Render 单层反向代理;直连部署须设 0
       - key: ADMIN_TOKEN
         sync: false # 管理后台(#/admin)登录口令,在 Render 控制台填写

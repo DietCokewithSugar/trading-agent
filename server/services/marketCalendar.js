@@ -58,6 +58,10 @@ const yearCache = new Map();
 function buildYear(year) {
   const holidays = new Set();
 
+  // 元旦:1/1 落周六时 observed 返回上一年 12/31,但放进的是本年缓存,
+  // 而查询 12/31 用的是上一年缓存——该键永远查不到。这恰好符合 NYSE 规则
+  // (1/1 落周六不补休,如 2021-12-31 正常开市),是"碰巧正确":
+  // 不要"修复"这个键错位,把 12/31 放进上一年缓存反而会错误地休市
   holidays.add(observed(year, 1, 1)); // 元旦
   holidays.add(fmt(year, 1, nthWeekday(year, 1, 1, 3))); // MLK 日:1 月第 3 个周一
   holidays.add(fmt(year, 2, nthWeekday(year, 2, 1, 3))); // 总统日:2 月第 3 个周一
