@@ -51,6 +51,7 @@ export const adminApi = {
   verify: (token) => adminRequest('/verify', { token }),
   status: (token) => adminRequest('/status', { token }),
   metrics: (token) => adminRequest('/metrics', { token }),
+  advisor: (token) => adminRequest('/advisor', { token }),
   tradingHalt: (token, halted) =>
     adminRequest('/trading-halt', { method: 'POST', token, body: { halted } }),
   runCycle: (token) => adminRequest('/run-cycle', { method: 'POST', token }),

@@ -1,4 +1,5 @@
 import { supabase } from '../db.js';
+import { isPressRelease } from './credibility.js';
 
 /**
  * 信号质量统计:基于前瞻收益(signalReturns.js 回填)评估"分类信号本身"的预测能力,
@@ -313,11 +314,11 @@ async function fetchPaged(buildQuery, maxRows = MAX_SAMPLE_ROWS) {
 }
 
 /**
- * /api/signal-stats 的数据来源;011 迁移未执行时返回 { available: false }。
- * days 限定统计窗口(美东无关,按 UTC 时间差;null=全量,但受 MAX_SAMPLE_ROWS 截断,
- * 截断时 window.truncated=true 且 window.covered_since 给出实际覆盖到的最早信号时间)。
+ * 加载评估层原始行(getSignalStats 与参数建议器共用):每行一条非中性信号,
+ * 带前瞻收益、成交/候选状态、排队度量与来源信息。011 未迁移时返回 null。
+ * days 限定窗口(null=全量,受 MAX_SAMPLE_ROWS 截断)。
  */
-export async function getSignalStats({ days = null } = {}) {
+export async function loadSignalRows({ days = null } = {}) {
   const db = supabase();
   const since =
     Number.isFinite(days) && days > 0 ? new Date(Date.now() - days * 86400_000).toISOString() : null;
@@ -328,7 +329,7 @@ export async function getSignalStats({ days = null } = {}) {
       db
         .from('news_analyses')
         .select(
-          'id, symbol, sentiment, tier, confidence, final_confidence, signal_price, fwd_return_1h, fwd_return_1d, fwd_return_5d, created_at, news_articles(source_score)'
+          'id, symbol, sentiment, tier, confidence, final_confidence, signal_price, fwd_return_1h, fwd_return_1d, fwd_return_5d, created_at, news_articles(source_score, source, source_domain, url)'
         )
         .not('signal_price', 'is', null)
         .in('sentiment', ['bullish', 'bearish'])
@@ -337,7 +338,7 @@ export async function getSignalStats({ days = null } = {}) {
   );
   if (analysesFetch.error) {
     if (/signal_price|fwd_return/.test(analysesFetch.error.message)) {
-      return { available: false };
+      return null;
     }
     throw new Error(analysesFetch.error.message);
   }
@@ -407,15 +408,18 @@ export async function getSignalStats({ days = null } = {}) {
 
   const rows = (data || []).map((a) => {
     const cand = candidateById.get(a.id);
+    const article = a.news_articles || {};
     return {
       sentiment: a.sentiment,
       tier: a.tier,
       confidence: a.confidence === null ? null : Number(a.confidence),
       final_confidence: a.final_confidence === null ? null : Number(a.final_confidence),
       source_score:
-        a.news_articles?.source_score === null || a.news_articles?.source_score === undefined
+        article.source_score === null || article.source_score === undefined
           ? null
-          : Number(a.news_articles.source_score),
+          : Number(article.source_score),
+      // 公司公告类来源(新闻稿通道):参数建议器评估 PRESS_BULLISH_PENALTY 用
+      is_press: isPressRelease(article),
       traded: tradedSet.has(a.id),
       candidate_status: cand?.status ?? null,
       officer_veto: cand?.status === 'rejected' && /^风控官/.test(cand?.status_reason || ''),
@@ -429,8 +433,7 @@ export async function getSignalStats({ days = null } = {}) {
   });
 
   return {
-    available: true,
-    generated_at: new Date().toISOString(),
+    rows,
     window: {
       days: since ? days : null,
       since,
@@ -439,6 +442,21 @@ export async function getSignalStats({ days = null } = {}) {
       // 截断时实际覆盖到的最早信号时间(时间倒序,最后一行最旧)
       covered_since: data.length ? data[data.length - 1].created_at : null,
     },
-    ...summarizeSignals(rows),
+  };
+}
+
+/**
+ * /api/signal-stats 的数据来源;011 迁移未执行时返回 { available: false }。
+ * days 限定统计窗口(美东无关,按 UTC 时间差;null=全量,但受 MAX_SAMPLE_ROWS 截断,
+ * 截断时 window.truncated=true 且 window.covered_since 给出实际覆盖到的最早信号时间)。
+ */
+export async function getSignalStats({ days = null } = {}) {
+  const loaded = await loadSignalRows({ days });
+  if (!loaded) return { available: false };
+  return {
+    available: true,
+    generated_at: new Date().toISOString(),
+    window: loaded.window,
+    ...summarizeSignals(loaded.rows),
   };
 }
