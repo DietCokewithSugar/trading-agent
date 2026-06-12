@@ -10,6 +10,7 @@ import { isHalted, setHalted } from './halt.js';
 import { resetMetrics } from './metrics.js';
 import { resetRiskControlState } from './riskControls.js';
 import { resetRegimeState } from './macroRegime.js';
+import { resetShadowState, initShadowPortfolios } from './shadowPortfolio.js';
 
 /** admin_reset_data RPC 尚未部署(未执行 005 迁移)时的判定 */
 function isMissingResetRpc(error) {
@@ -44,6 +45,11 @@ async function legacyReset(db) {
     // 候选池 / 宏观事件(014 迁移新增,缺表时容忍);candidate_signals 引用 trades,先删
     { table: 'candidate_signals', filter: (q) => q.neq('id', 0), optional: true },
     { table: 'macro_events', filter: (q) => q.neq('id', 0), optional: true },
+    // 影子组合(017 迁移新增,缺表时容忍);positions 引用 portfolios,先删
+    { table: 'shadow_trades', filter: (q) => q.neq('id', 0), optional: true },
+    { table: 'shadow_snapshots', filter: (q) => q.neq('id', 0), optional: true },
+    { table: 'shadow_positions', filter: (q) => q.neq('symbol', ''), optional: true },
+    { table: 'shadow_portfolios', filter: (q) => q.neq('variant', ''), optional: true },
     { table: 'trades', filter: (q) => q.neq('id', 0) },
     { table: 'news_events', filter: (q) => q.neq('id', 0) },
     { table: 'news_analyses', filter: (q) => q.neq('id', 0) },
@@ -117,11 +123,15 @@ export async function resetAllData() {
       });
       if (!error) {
         // 数据库里可能还是 005/012 版函数(truncate 列表不含后续新表),补一次 best-effort 清理;
-        // 014 版函数已清过,这里删空表无副作用,缺表/失败仅告警
+        // 014/017 版函数已清过,这里删空表无副作用,缺表/失败仅告警
         const cleanups = [
           ['cycle_runs', (q) => q.not('run_id', 'is', null)],
           ['candidate_signals', (q) => q.neq('id', 0)],
           ['macro_events', (q) => q.neq('id', 0)],
+          ['shadow_trades', (q) => q.neq('id', 0)],
+          ['shadow_snapshots', (q) => q.neq('id', 0)],
+          ['shadow_positions', (q) => q.neq('symbol', '')],
+          ['shadow_portfolios', (q) => q.neq('variant', '')],
         ];
         for (const [table, filter] of cleanups) {
           const { error: cleanErr } = await filter(db.from(table).delete());
@@ -147,6 +157,14 @@ export async function resetAllData() {
     cycleStatus.lastResult = null;
     cycleStatus.lastError = null;
     cycleStatus.lastRunAt = null;
+
+    // 影子组合:清进程内状态并重建各变体资金行(消融实验从零重新积累;失败仅告警)
+    if (config.enableShadow) {
+      resetShadowState();
+      await initShadowPortfolios().catch((err) =>
+        console.warn(`[admin] 影子组合重建失败(可忽略): ${err.message}`)
+      );
+    }
 
     console.log('[admin] 全量数据重置完成,现金已恢复为 $' + config.initialCapital);
   } finally {

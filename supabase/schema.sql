@@ -423,7 +423,10 @@ begin
     positions,
     cycle_runs,
     macro_events,
-    candidate_signals
+    candidate_signals,
+    shadow_portfolios,
+    shadow_trades,
+    shadow_snapshots
   restart identity cascade;
 
   -- 宏观状态复位(单行表不 truncate,避免丢失行)
@@ -492,6 +495,82 @@ alter table macro_events add column if not exists source_domains jsonb not null 
 alter table trade_reflections add column if not exists spy_return_percent numeric;
 alter table trade_reflections add column if not exists excess_return_percent numeric;
 
+-- 影子组合 / 消融实验(017):与实盘并行记账的多套虚拟组合,每套关闭一层防线
+-- (风控官/宏观过滤/候选池/LLM 仓位),外加 SPY 买入持有与纯现金基准,
+-- 用事后净值对比回答"哪一层真的贡献收益,哪一层只是减少交易"。纯观测层,
+-- 表缺失时服务端自动停用,交易主链路不受影响。变体见 shadow_portfolios.variant 注释(017 迁移)。
+create table if not exists shadow_portfolios (
+  variant text primary key,
+  cash numeric not null,
+  initial_capital numeric not null,
+  started_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists shadow_positions (
+  variant text not null references shadow_portfolios(variant) on delete cascade,
+  symbol text not null,
+  quantity numeric not null,
+  avg_cost numeric not null,
+  stop_loss numeric,
+  take_profit numeric,
+  opened_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  primary key (variant, symbol)
+);
+
+create table if not exists shadow_trades (
+  id bigint generated always as identity primary key,
+  variant text not null,
+  symbol text not null,
+  side text not null check (side in ('buy', 'sell')),
+  quantity numeric not null,
+  price numeric not null,
+  amount numeric not null,
+  reason text,
+  -- news=信号 / stop_loss / take_profit / review=镜像复查卖出 / benchmark=基准建仓
+  trigger text not null default 'news',
+  realized_pnl numeric,
+  -- 镜像自实盘成交时的源交易(消融变体跟随实盘的部分)
+  mirror_trade_id bigint references trades(id) on delete set null,
+  news_id bigint references news_articles(id) on delete set null,
+  analysis_id bigint references news_analyses(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+create index if not exists idx_shadow_trades_variant on shadow_trades (variant, created_at desc);
+-- 同一变体对同一条分析最多买一次(防宏观过滤逐轮重放/留池候选后续真实成交导致的重复买入)
+create index if not exists idx_shadow_trades_buy_dedup on shadow_trades (variant, analysis_id)
+  where side = 'buy' and analysis_id is not null;
+
+create table if not exists shadow_snapshots (
+  id bigint generated always as identity primary key,
+  variant text not null,
+  cash numeric not null,
+  positions_value numeric not null,
+  total_value numeric not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists idx_shadow_snapshots_variant on shadow_snapshots (variant, created_at);
+
+-- 影子净值序列的均匀采样(全部变体一次取回,绕过 PostgREST 单次 1000 行上限)
+create or replace function shadow_snapshots_sampled(p_since timestamptz, p_max_points int default 300)
+returns setof shadow_snapshots
+language sql stable as $$
+  with filtered as (
+    select s.*,
+           row_number() over (partition by variant order by created_at) as rn,
+           count(*) over (partition by variant) as total
+    from shadow_snapshots s
+    where created_at >= p_since
+  )
+  select id, variant, cash, positions_value, total_value, created_at
+  from filtered
+  where total <= p_max_points
+     or rn % ceil(total::numeric / p_max_points)::int = 0
+     or rn = total
+  order by variant, created_at;
+$$;
+
 -- 初始资金 10 万美元(服务端也会在缺失时自动初始化)
 insert into portfolio_state (id, cash, initial_capital)
 values (1, 100000, 100000)
@@ -513,6 +592,10 @@ alter table cycle_runs enable row level security;
 alter table macro_events enable row level security;
 alter table macro_state enable row level security;
 alter table candidate_signals enable row level security;
+alter table shadow_portfolios enable row level security;
+alter table shadow_positions enable row level security;
+alter table shadow_trades enable row level security;
+alter table shadow_snapshots enable row level security;
 
 create policy "public read news_articles" on news_articles for select using (true);
 create policy "public read news_analyses" on news_analyses for select using (true);
@@ -525,3 +608,7 @@ create policy "public read pending_orders" on pending_orders for select using (t
 create policy "public read macro_events" on macro_events for select using (true);
 create policy "public read macro_state" on macro_state for select using (true);
 create policy "public read candidate_signals" on candidate_signals for select using (true);
+create policy "public read shadow_portfolios" on shadow_portfolios for select using (true);
+create policy "public read shadow_positions" on shadow_positions for select using (true);
+create policy "public read shadow_trades" on shadow_trades for select using (true);
+create policy "public read shadow_snapshots" on shadow_snapshots for select using (true);

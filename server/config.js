@@ -169,6 +169,21 @@ export const config = {
     macro_shock: { minCashReserve: 1, dailyBuyBudget: 0, maxGrossExposure: 0, macroMultiplier: 0, allowedTiers: [] },
   },
 
+  // ── 影子组合 / 消融实验(017)──
+  // 与实盘并行记账的多套虚拟组合,每套关闭一层防线(风控官/宏观过滤/候选池/LLM 仓位),
+  // 外加 SPY 买入持有与纯现金基准;纯观测层,表缺失(未执行 017 迁移)时自动停用
+  enableShadow: process.env.ENABLE_SHADOW !== 'false',
+  // 影子组合中无 LLM 决策路径的确定性基础仓位(占组合总值比例,
+  // 再叠加 sizing.js 的档位/置信度/来源缩放;immediate_trade 与宏观拦截重放用)
+  shadowBaseFraction: Math.min(num(process.env.SHADOW_BASE_FRACTION, 0.1), 1),
+  // equal_weight 变体的固定等权买入比例(占组合总值)
+  shadowEqualWeightFraction: Math.min(num(process.env.SHADOW_EQUAL_WEIGHT_FRACTION, 0.05), 1),
+  // 影子组合确定性买入的默认止损/止盈百分比(代码常量,沿 macroRegimeParams 先例;
+  // 与 LLM 给出参数的钳制区间 3–15% / 5–30% 一致取中段)
+  shadowDefaultStops: { stopLossPercent: 8, takeProfitPercent: 20 },
+  // 影子净值快照最小间隔(分钟,搭车主快照循环并自行限频)
+  shadowSnapshotMinutes: 10,
+
   // 关注列表(用于 Yahoo RSS 抓取),持仓股票会自动加入
   watchlist: (process.env.WATCHLIST || 'AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA')
     .split(',')

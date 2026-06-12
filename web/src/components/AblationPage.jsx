@@ -1,0 +1,393 @@
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  Alert,
+  Button,
+  Card,
+  Empty,
+  Segmented,
+  Space,
+  Spin,
+  Table,
+  Tag,
+  Typography,
+} from 'antd';
+import {
+  ResponsiveContainer,
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ReferenceLine,
+  CartesianGrid,
+  Legend,
+} from 'recharts';
+import {
+  api,
+  fmtMoney,
+  fmtNum,
+  fmtPercent,
+  fmtTime,
+  SHADOW_VARIANT_LABELS,
+  SHADOW_VARIANT_DESCRIPTIONS,
+  TRIGGER_LABELS,
+} from '../api.js';
+import { CHART, PIE_COLORS, COLOR_UP, COLOR_DOWN } from '../theme.js';
+
+const RANGES = [
+  { key: '1d', label: '1天', hours: 24 },
+  { key: '1w', label: '1周', hours: 24 * 7 },
+  { key: '1m', label: '1月', hours: 24 * 30 },
+  { key: 'all', label: '全部', hours: 24 * 366 },
+];
+
+// 各序列的识别色(取自主题调色板;实盘用主色,基准用灰)
+const VARIANT_COLORS = {
+  actual: PIE_COLORS[0], // 蓝
+  no_risk_officer: PIE_COLORS[4], // 紫
+  no_macro_filter: PIE_COLORS[3], // 金
+  immediate_trade: PIE_COLORS[5], // 青
+  equal_weight: PIE_COLORS[6], // 品红
+  spy_benchmark: CHART.benchmark,
+  cash: CHART.reference,
+};
+
+const VARIANT_ORDER = [
+  'actual',
+  'no_risk_officer',
+  'no_macro_filter',
+  'immediate_trade',
+  'equal_weight',
+  'spy_benchmark',
+  'cash',
+];
+
+const SHADOW_TRIGGER_LABELS = { ...TRIGGER_LABELS, benchmark: '基准建仓', news: '新闻信号' };
+
+function pctClass(v) {
+  return v > 0 ? 'up' : v < 0 ? 'down' : '';
+}
+
+/**
+ * 消融实验页:实盘与各影子变体的净值曲线(窗口起点归一为 0%)与汇总对比。
+ * 影子组合从启用时刻开始与实盘并行记账,每套关闭一层防线——
+ * 差值就是该层防线在这段行情里的净贡献。
+ */
+export default function AblationPage() {
+  const [rangeKey, setRangeKey] = useState('1w');
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  const range = RANGES.find((r) => r.key === rangeKey);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      setData(await api.shadow(range.hours));
+      setError(null);
+    } catch (err) {
+      setError(err.message);
+    }
+    setLoading(false);
+  }, [range.hours]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  // 各序列重基:窗口内首点 = 0%,统一为相对收益曲线(各组合起始资金/时点不同,绝对值不可比)
+  const chartSeries = useMemo(() => {
+    if (!data?.available) return [];
+    const all = { actual: data.actual?.series || [], ...(data.series || {}) };
+    return VARIANT_ORDER.filter((v) => (all[v] || []).length > 1).map((variant) => {
+      const rows = all[variant];
+      const base = Number(rows[0].total_value);
+      return {
+        variant,
+        name: SHADOW_VARIANT_LABELS[variant] || variant,
+        color: VARIANT_COLORS[variant] || CHART.axis,
+        rows: rows.map((p) => ({
+          time: new Date(p.t).getTime(),
+          pct: base > 0 ? ((Number(p.total_value) - base) / base) * 100 : 0,
+        })),
+      };
+    });
+  }, [data]);
+
+  const tableRows = useMemo(() => {
+    if (!data?.available) return [];
+    const rows = [];
+    if (data.actual && data.actual.total_value !== null) {
+      rows.push({
+        variant: 'actual',
+        total_value: data.actual.total_value,
+        pnl_percent: data.actual.pnl_percent,
+        cash: data.actual.cash,
+        positions_count: data.actual.positions_count,
+        trades_count: null,
+        started_at: null,
+      });
+    }
+    const byVariant = new Map((data.variants || []).map((v) => [v.variant, v]));
+    for (const key of VARIANT_ORDER) {
+      const v = byVariant.get(key);
+      if (!v) continue;
+      rows.push({
+        variant: v.variant,
+        total_value: v.total_value,
+        pnl_percent: v.pnl_percent,
+        cash: v.cash,
+        positions_count: v.positions?.length ?? 0,
+        trades_count: v.trades_count,
+        started_at: v.started_at,
+      });
+    }
+    return rows;
+  }, [data]);
+
+  if (loading && !data) {
+    return (
+      <div style={{ textAlign: 'center', padding: 48 }}>
+        <Spin />
+      </div>
+    );
+  }
+  if (error) return <Alert type="error" message={error} />;
+  if (data && data.available === false) {
+    return (
+      <Alert
+        type="info"
+        message="影子组合 / 消融实验尚未启用"
+        description="数据库还没有影子组合相关表(017 迁移),执行迁移后系统会自动开始与实盘并行记账。"
+      />
+    );
+  }
+  if (!data) return <Empty description="暂无数据" />;
+
+  const summaryColumns = [
+    {
+      title: '组合',
+      dataIndex: 'variant',
+      width: 150,
+      render: (v) => (
+        <Tag color={v === 'actual' ? 'blue' : 'default'} style={{ marginRight: 0 }}>
+          {SHADOW_VARIANT_LABELS[v] || v}
+        </Tag>
+      ),
+    },
+    {
+      title: '说明',
+      dataIndex: 'variant',
+      key: 'desc',
+      ellipsis: true,
+      render: (v) => (
+        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+          {SHADOW_VARIANT_DESCRIPTIONS[v] || ''}
+        </Typography.Text>
+      ),
+    },
+    {
+      title: '总资产',
+      dataIndex: 'total_value',
+      width: 120,
+      align: 'right',
+      render: (v) => <span className="num">{fmtMoney(v)}</span>,
+    },
+    {
+      title: '自启用收益',
+      dataIndex: 'pnl_percent',
+      width: 110,
+      align: 'right',
+      render: (v) =>
+        v === null || v === undefined ? '—' : <span className={`num ${pctClass(Number(v))}`}>{fmtPercent(v)}</span>,
+    },
+    {
+      title: '现金',
+      dataIndex: 'cash',
+      width: 120,
+      align: 'right',
+      render: (v) => <span className="num">{fmtMoney(v)}</span>,
+    },
+    {
+      title: '持仓',
+      dataIndex: 'positions_count',
+      width: 70,
+      align: 'right',
+      render: (v) => (v === null || v === undefined ? '—' : <span className="num">{v}</span>),
+    },
+    {
+      title: '交易笔数',
+      dataIndex: 'trades_count',
+      width: 90,
+      align: 'right',
+      render: (v) => (v === null || v === undefined ? '—' : <span className="num">{v}</span>),
+    },
+  ];
+
+  const tradeColumns = [
+    { title: '时间', dataIndex: 'created_at', width: 110, render: (v) => fmtTime(v) },
+    {
+      title: '组合',
+      dataIndex: 'variant',
+      width: 120,
+      render: (v) => SHADOW_VARIANT_LABELS[v] || v,
+    },
+    {
+      title: '方向',
+      dataIndex: 'side',
+      width: 60,
+      render: (v) => <span className={v === 'buy' ? 'up' : 'down'}>{v === 'buy' ? '买入' : '卖出'}</span>,
+    },
+    { title: '代码', dataIndex: 'symbol', width: 80 },
+    {
+      title: '数量',
+      dataIndex: 'quantity',
+      width: 90,
+      align: 'right',
+      render: (v) => <span className="num">{fmtNum(v, 4)}</span>,
+    },
+    {
+      title: '价格',
+      dataIndex: 'price',
+      width: 90,
+      align: 'right',
+      render: (v) => <span className="num">{fmtMoney(v)}</span>,
+    },
+    {
+      title: '盈亏',
+      dataIndex: 'realized_pnl',
+      width: 90,
+      align: 'right',
+      render: (v) =>
+        v === null || v === undefined ? '—' : <span className={`num ${pctClass(Number(v))}`}>{fmtMoney(v)}</span>,
+    },
+    {
+      title: '触发',
+      dataIndex: 'trigger',
+      width: 90,
+      render: (v) => SHADOW_TRIGGER_LABELS[v] || v,
+    },
+    { title: '理由', dataIndex: 'reason', ellipsis: true },
+  ];
+
+  return (
+    <Space direction="vertical" size={16} style={{ width: '100%' }}>
+      <Card
+        size="small"
+        title="净值对比(窗口起点归一为 0%)"
+        extra={
+          <Space>
+            <Segmented
+              size="small"
+              options={RANGES.map((r) => ({ label: r.label, value: r.key }))}
+              value={rangeKey}
+              onChange={setRangeKey}
+            />
+            <Button size="small" onClick={load} loading={loading}>
+              刷新
+            </Button>
+          </Space>
+        }
+      >
+        {!chartSeries.length ? (
+          <Typography.Text type="secondary">
+            该时间范围内暂无足够的净值快照(影子组合每 10 分钟记一次净值,启用后会逐渐积累)。
+          </Typography.Text>
+        ) : (
+          <ResponsiveContainer width="100%" height={360}>
+            <LineChart margin={{ top: 10, right: 8, bottom: 0, left: 4 }}>
+              <CartesianGrid stroke={CHART.grid} strokeDasharray="3 3" />
+              <XAxis
+                dataKey="time"
+                type="number"
+                domain={['dataMin', 'dataMax']}
+                tickFormatter={(t) =>
+                  new Date(t).toLocaleString('zh-CN', {
+                    month: '2-digit',
+                    day: '2-digit',
+                    hour: '2-digit',
+                    minute: '2-digit',
+                  })
+                }
+                stroke={CHART.axis}
+                fontSize={12}
+                allowDuplicatedCategory={false}
+              />
+              <YAxis
+                tickFormatter={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`}
+                stroke={CHART.axis}
+                fontSize={12}
+                width={62}
+              />
+              <Tooltip
+                contentStyle={{
+                  background: CHART.tooltipBg,
+                  border: `1px solid ${CHART.tooltipBorder}`,
+                  borderRadius: 8,
+                  boxShadow: CHART.tooltipShadow,
+                }}
+                labelFormatter={(t) => new Date(t).toLocaleString('zh-CN')}
+                formatter={(value, name) => [
+                  <span key="v" style={{ color: value >= 0 ? COLOR_UP : COLOR_DOWN }}>
+                    {fmtPercent(value)}
+                  </span>,
+                  name,
+                ]}
+              />
+              <Legend />
+              <ReferenceLine y={0} stroke={CHART.reference} strokeDasharray="4 4" />
+              {chartSeries.map((s) => (
+                <Line
+                  key={s.variant}
+                  data={s.rows}
+                  name={s.name}
+                  dataKey="pct"
+                  type="monotone"
+                  stroke={s.color}
+                  strokeWidth={s.variant === 'actual' ? 2.5 : 1.5}
+                  strokeDasharray={
+                    s.variant === 'spy_benchmark' || s.variant === 'cash' ? '5 4' : undefined
+                  }
+                  dot={false}
+                  isAnimationActive={false}
+                />
+              ))}
+            </LineChart>
+          </ResponsiveContainer>
+        )}
+      </Card>
+
+      <Card size="small" title="组合对比">
+        <Table
+          rowKey="variant"
+          size="small"
+          columns={summaryColumns}
+          dataSource={tableRows}
+          pagination={false}
+          scroll={{ x: 860 }}
+        />
+        <Typography.Paragraph type="secondary" style={{ fontSize: 13, margin: '12px 0 0' }}>
+          每套影子组合与实盘并行记账、各自从初始资金起步,只关闭一层防线:若「无风控官」长期跑输实盘,
+          说明风控官的否决在创造价值;若「无宏观过滤」跑赢,说明宏观层可能过度拦截;「信号即时成交」
+          对比实盘可衡量候选池 + LLM 决策链的净价值;「信号等权买入」对比实盘可检验 LLM 仓位分配是否有效。
+          注意:影子组合没有走 LLM 的路径(宏观拦截重放/即时成交/等权)使用确定性仓位与默认止损止盈,
+          是消融近似而非完整重放;结论应结合「信号质量」页的前瞻收益统计交叉验证,样本不足一个月时不要下结论。
+        </Typography.Paragraph>
+      </Card>
+
+      {Boolean(data.recent_trades?.length) && (
+        <Card size="small" title="最近影子成交">
+          <Table
+            rowKey="id"
+            size="small"
+            columns={tradeColumns}
+            dataSource={data.recent_trades}
+            pagination={false}
+            scroll={{ x: 920 }}
+          />
+        </Card>
+      )}
+    </Space>
+  );
+}

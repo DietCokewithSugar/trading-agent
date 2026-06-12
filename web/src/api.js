@@ -22,6 +22,7 @@ export const api = {
   stats: () => get('/stats'),
   performance: () => get('/performance'),
   signalStats: () => get('/signal-stats'),
+  shadow: (hours) => get(`/shadow${hours ? `?hours=${hours}` : ''}`),
   macro: () => get('/macro'),
   pool: () => get('/pool'),
   pendingOrders: () => get('/pending-orders'),
@@ -136,6 +137,28 @@ export const CANDIDATE_STATUS_LABELS = {
   rejected: '已拒绝',
   expired: '已过期',
   cancelled: '已取消',
+};
+
+// ===== 影子组合 / 消融实验(017)的标签映射 =====
+
+export const SHADOW_VARIANT_LABELS = {
+  actual: '实盘组合',
+  no_risk_officer: '无风控官',
+  no_macro_filter: '无宏观过滤',
+  immediate_trade: '信号即时成交',
+  equal_weight: '信号等权买入',
+  spy_benchmark: 'SPY 买入持有',
+  cash: '纯现金',
+};
+
+export const SHADOW_VARIANT_DESCRIPTIONS = {
+  actual: '当前真实模拟组合(全部防线开启)',
+  no_risk_officer: '跟随实盘,但风控官否决/缩仓的买入按否决前方案照样执行',
+  no_macro_filter: '跟随实盘,但被宏观层(环境过滤/冲击/黑窗/预算钳制)拦截的买入照样执行',
+  immediate_trade: '独立组合:可交易利好信号到达即按确定性仓位买入,不经候选池与 LLM 决策',
+  equal_weight: '独立组合:可交易信号一律按固定比例等权买入,检验 LLM 仓位是否有效',
+  spy_benchmark: '启用时一次性全仓买入 SPY 并持有',
+  cash: '不做任何交易的现金基准',
 };
 
 export const MACRO_EVENT_TYPE_LABELS = {
