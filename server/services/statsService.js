@@ -1,6 +1,7 @@
 import { supabase } from '../db.js';
 import { getHistoricalPricesAdjusted } from './fmp.js';
 import { isTradingDay } from './marketCalendar.js';
+import { etMidnightUtcIso } from './riskControls.js';
 
 function round2(n) {
   return Math.round(n * 100) / 100;
@@ -39,13 +40,42 @@ async function fetchRecentTrades() {
   return data || [];
 }
 
+/**
+ * 今日盈亏的精确锚点:美东今日零点前的最后一条快照 + 全局最新一条快照。
+ * 均匀采样 600 点的序列历史越长越稀,"昨日最后一条"可能偏离数小时,
+ * 今日盈亏改用两条定点查询;失败返回 null(调用方退回采样序列口径)。
+ */
+async function fetchDayPnlAnchors() {
+  const db = supabase();
+  const midnight = etMidnightUtcIso();
+  const pick = (res) => (res.error ? null : res.data?.[0] || null);
+  const [baseRes, lastRes] = await Promise.all([
+    db
+      .from('portfolio_snapshots')
+      .select('total_value, created_at')
+      .lt('created_at', midnight)
+      .order('created_at', { ascending: false })
+      .limit(1),
+    db
+      .from('portfolio_snapshots')
+      .select('total_value, created_at')
+      .order('created_at', { ascending: false })
+      .limit(1),
+  ]);
+  const baseline = pick(baseRes);
+  const latest = pick(lastRes);
+  if (!baseline || !latest) return null;
+  return { baseline, latest };
+}
+
 /** 组合统计(今日盈亏、已实现盈亏、胜率、最大回撤),纯计算 */
-function computeStats(trades, snaps) {
+function computeStats(trades, snaps, anchors = null) {
   const sells = trades.filter((t) => t.side === 'sell' && t.realized_pnl !== null);
   const realizedPnl = sells.reduce((sum, t) => sum + Number(t.realized_pnl), 0);
   const wins = sells.filter((t) => Number(t.realized_pnl) > 0).length;
 
-  // 最大回撤(基于采样后的净值序列)
+  // 最大回撤(基于采样后的净值序列;600 点均匀采样,历史很长时峰谷可能被抹掉,
+  // 属展示层可接受的近似——精确回撤需要全量快照遍历,成本不成比例)
   let peak = -Infinity;
   let maxDrawdown = 0;
   for (const s of snaps) {
@@ -54,14 +84,19 @@ function computeStats(trades, snaps) {
     if (peak > 0) maxDrawdown = Math.max(maxDrawdown, ((peak - v) / peak) * 100);
   }
 
-  // 今日盈亏:最新净值 vs 美东今日首个快照之前的最后一个净值
+  // 今日盈亏:优先用定点查询的精确锚点(美东今日零点前最后一条 vs 全局最新一条),
+  // 锚点不可用时退回采样序列推算
   const today = etDate(new Date().toISOString());
-  let baseline = null;
-  for (const s of snaps) {
-    if (etDate(s.created_at) < today) baseline = s;
-    else break;
+  let baseline = anchors?.baseline || null;
+  let latest = anchors?.latest || null;
+  if (!baseline || !latest) {
+    baseline = null;
+    for (const s of snaps) {
+      if (etDate(s.created_at) < today) baseline = s;
+      else break;
+    }
+    latest = snaps[snaps.length - 1] || null;
   }
-  const latest = snaps[snaps.length - 1] || null;
   const dayPnl =
     latest && baseline ? Number(latest.total_value) - Number(baseline.total_value) : null;
   const dayPnlPercent =
@@ -83,11 +118,12 @@ function computeStats(trades, snaps) {
 
 /** /api/stats 的数据来源(行为与原内联实现一致:快照不可用时容忍为空) */
 export async function getStats() {
-  const [trades, snaps] = await Promise.all([
+  const [trades, snaps, anchors] = await Promise.all([
     fetchRecentTrades(),
     fetchSampledSnapshots().catch(() => []),
+    fetchDayPnlAnchors().catch(() => null),
   ]);
-  return computeStats(trades, snaps);
+  return computeStats(trades, snaps, anchors);
 }
 
 /**
@@ -161,13 +197,14 @@ async function getBenchmark({ symbol, name }, daily, initialCapital) {
  */
 export async function getPerformance() {
   const db = supabase();
-  const [trades, snaps, stateRes] = await Promise.all([
+  const [trades, snaps, anchors, stateRes] = await Promise.all([
     fetchRecentTrades(),
     fetchSampledSnapshots().catch(() => []),
+    fetchDayPnlAnchors().catch(() => null),
     db.from('portfolio_state').select('initial_capital').eq('id', 1).maybeSingle(),
   ]);
 
-  const stats = computeStats(trades, snaps);
+  const stats = computeStats(trades, snaps, anchors);
   const initialCapital = Number(stateRes.data?.initial_capital) || null;
   const daily = toDailySeries(snaps);
 

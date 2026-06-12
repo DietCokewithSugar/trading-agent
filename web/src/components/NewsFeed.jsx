@@ -121,7 +121,10 @@ export default function NewsFeed({ version, onSymbolClick }) {
       if (next.length < PAGE_SIZE) setNoMore(true);
       setItems((prev) => {
         const seen = new Set(prev.map((p) => p.id));
-        return [...prev, ...next.filter((n) => !seen.has(n.id))];
+        const merged = [...prev, ...next.filter((n) => !seen.has(n.id))];
+        // 本地展示上限与 SSE 合并路径一致(防长会话内存膨胀);达到上限即不再翻页
+        if (merged.length >= MAX_ITEMS) setNoMore(true);
+        return merged.slice(0, MAX_ITEMS);
       });
     } catch {
       /* 下次再试 */
