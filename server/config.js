@@ -94,6 +94,10 @@ export const config = {
   // 买入漂移熔断:下单时最新价相对 LLM 决策时价格的偏移超过该百分比即放弃
   //(上漂=追 spike 顶部,下漂=行情已反转,决策依据的价格均已失效)
   buyPriceDriftAbortPercent: num(process.env.BUY_PRICE_DRIFT_ABORT_PERCENT, 5),
+  // 开盘窗口滑点放大:开盘竞价后的前 N 分钟点差/波动显著放宽(开盘触发的分配轮
+  // 与开盘队列成交都落在这个窗口),regular 时段内对滑点额外乘以该系数
+  openingWindowMinutes: num0(process.env.OPENING_WINDOW_MINUTES, 15),
+  openingSlippageMult: num(process.env.OPENING_SLIPPAGE_MULT, 2),
 
   // 平仓后是否用 DeepSeek 复盘并沉淀经验教训(注入后续交易决策)
   enableReflection: process.env.ENABLE_REFLECTION !== 'false',
@@ -130,6 +134,16 @@ export const config = {
   macroEventValidityHours: num(process.env.MACRO_EVENT_VALIDITY_HOURS, 72),
   // 宏观冲击持续时长(小时):一档高置信 risk_off 事件触发 macro_shock 后的锁定期
   macroShockHours: num(process.env.MACRO_SHOCK_HOURS, 6),
+  // macro_shock 触发所需的最少佐证:归并报道篇数 ≥ N 或独立信源域名 ≥ N
+  //(1=恢复单篇即触发的旧行为;016 之前的存量行缺佐证字段时回退旧行为,安全线不静默失效)
+  macroShockMinReports: num(process.env.MACRO_SHOCK_MIN_REPORTS, 2),
+  // 确定性市场环境核验:SPY 趋势(20 日均线)+ VIX 推出与新闻无关的 regime,
+  // 仅当其同向时才放行 risk_on 的仓位放大(否则按 neutral 参数执行);
+  // VIX 报价不可用自动退化为仅 SPY 趋势,SPY 历史不可用则整体停用(fail-open 不影响交易)
+  enableMarketCheck: process.env.ENABLE_MARKET_CHECK !== 'false',
+  marketCheckPollMinutes: num(process.env.MARKET_CHECK_POLL_MINUTES, 10),
+  // 核验阈值(代码常量,沿 macroRegimeParams 先例):SMA 缓冲带 ±0.5%,VIX<20 才算 risk_on、≥26 即 risk_off
+  marketCheckParams: { smaDays: 20, smaBufferPercent: 0.5, vixRiskOnMax: 20, vixRiskOffMin: 26 },
   // 重大数据发布黑窗:发布前/后 N 分钟内不执行新的买入分配(卖出/止损不受影响;0=关闭)
   blackoutBeforeMinutes: num0(process.env.BLACKOUT_BEFORE_MINUTES, 30),
   blackoutAfterMinutes: num0(process.env.BLACKOUT_AFTER_MINUTES, 30),
