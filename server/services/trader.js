@@ -24,7 +24,7 @@ import { computeFill, computePoolMetrics } from './execution.js';
 import { checkBuyEligibility } from './eligibility.js';
 import { scaleFraction } from './sizing.js';
 import { enqueuePendingOrder } from './openQueue.js';
-import { enqueueCandidate, holdBuyCandidates, isPoolAvailable } from './candidateStore.js';
+import { enqueueCandidate, holdBuyCandidates, isPoolAvailable, getCandidateStatus } from './candidateStore.js';
 import { scoreCandidate } from './allocator.js';
 import { checkTradeCooldown } from './eventService.js';
 import {
@@ -289,6 +289,15 @@ export async function handleSignal(article, analysisRow) {
     }
     finishDecision(episode, { outcome: 'hold', reason: decision.reason });
     recordReject('llm_hold');
+    return null;
+  }
+
+  // 买入只允许来自利好信号:eligibility gate 只在 bullish 分支前置执行,
+  // 利空/中性信号若被 LLM 决策为 buy 会绕过准入门槛(微盘/OTC 无防线),一律放弃
+  if (decision.action === 'buy' && analysisRow.sentiment !== 'bullish') {
+    console.warn(`[trader] ${symbol} 非利好信号(${analysisRow.sentiment})的买入决策被拦截(未过准入门槛)`);
+    finishDecision(episode, { outcome: 'rejected', reason: '非利好信号的买入决策(绕过准入门槛)' });
+    recordReject('buy_on_non_bullish');
     return null;
   }
 
@@ -802,6 +811,14 @@ export async function executeCandidate(candidate, { macroContext = null, extraSc
     // 排队成本度量(016):入池价/入池时间随单传递,成交后算漂移与等待时长
     pool: { entryPrice: candidate.entry_price ?? null, enteredAt: candidate.created_at ?? null },
     shadowCtx: { officerScale },
+    // 锁内结算前最后一次状态复核:decideTrade+风控官的长 LLM 窗口(最长两次 90s)期间
+    // 新到利空可能已把候选改为 conflict_hold,不能对着刚出利空的票继续买入。
+    // 读取失败(null)不据此阻断——分配器侧刚核验过,瞬时读库失败不应杀掉买入
+    preSettleCheck: async () => {
+      const status = await getCandidateStatus(candidate.id);
+      if (status && status !== 'pending') return { ok: false, status };
+      return { ok: true };
+    },
   });
   finishDecision(
     episode,
@@ -813,7 +830,7 @@ export async function executeCandidate(candidate, { macroContext = null, extraSc
 }
 
 /** 买入下单(结构化返回):漂移熔断 → 锁内结算。返回 { trade } | { reject, transient?, reason } */
-async function executeBuyStructured({ symbol, price, decision, analysisRow, article, meta = null, pool = null, shadowCtx = null }) {
+async function executeBuyStructured({ symbol, price, decision, analysisRow, article, meta = null, pool = null, shadowCtx = null, preSettleCheck = null }) {
   return withTradeLock(async () => {
     // 下单前重取最新报价:DeepSeek 决策(最长两次 90s 调用)耗时较长,
     // 决策前的价格可能已过期,绝不能按"消息发布瞬间的价格"成交
@@ -834,6 +851,16 @@ async function executeBuyStructured({ symbol, price, decision, analysisRow, arti
       );
       recordReject('price_drift_abort');
       return { reject: '下单时价格漂移超过熔断阈值', transient: true, reason: 'price_drift_abort' };
+    }
+
+    // 调用方的锁内前置复核(分配路径用于复读候选状态,关闭 LLM 决策窗口内的冲突竞态)
+    if (preSettleCheck) {
+      const check = await preSettleCheck();
+      if (!check.ok) {
+        console.log(`[trader] ${symbol} 结算前候选状态已变为 ${check.status},放弃买入`);
+        recordReject('candidate_state_changed');
+        return { reject: `候选状态已变为 ${check.status}`, transient: true, reason: 'candidate_state_changed' };
+      }
     }
 
     return settleBuyLocked({
@@ -944,8 +971,9 @@ async function settleBuyLocked({
     maxOpenPositions: config.maxOpenPositions,
   });
   if (!maxPos.ok) {
+    // 持仓数上限与当日配额同类:平仓后自行解除 → transient,候选池/开盘队列保留重试
     recordReject('max_positions');
-    return { reject: maxPos.reason, reason: 'max_positions' };
+    return { reject: maxPos.reason, transient: true, reason: 'max_positions' };
   }
 
   const existing = valuation.positions.find((p) => p.symbol === symbol);
@@ -987,6 +1015,16 @@ async function settleBuyLocked({
   const existingValue = existing ? existing.market_value : 0;
   const positionCap = config.maxPositionFraction * valuation.total_value - existingValue;
   spend = Math.min(spend, Math.max(positionCap, 0));
+  if (spend < config.minOrderAmount && positionCap < config.minOrderAmount) {
+    // 单票仓位帽钳出的不足是临时状态(减仓/行情变化后自行释放),
+    // 不能落入下方的永久性 below_min_amount——候选/挂单应保留复评
+    recordReject('position_cap');
+    return {
+      reject: `该股票仓位已接近单票上限 ${Math.round(config.maxPositionFraction * 100)}%,买入金额钳制后低于下限`,
+      transient: true,
+      reason: 'position_cap',
+    };
+  }
 
   // 宏观环境三重钳制:现金保留下限 / 当日买入预算(基数=日初总值)/ 持仓总敞口上限
   if (config.enableMacro) {
@@ -1069,7 +1107,9 @@ async function settleBuyLocked({
       `[trader] ${symbol} 买入滑点 ${fill.slippageBps}bp: $${fill.refPrice} → $${fill.fillPrice}`
     );
   }
-  const quantity = round4(spend / fill.fillPrice);
+  // 股数向下取整到 4 位小数:就近舍入的上行误差(≤0.00005 股)在高价股满现金买入时
+  // 会让 amount 超出 spend 并击穿 execute_trade RPC 的 1 美分现金容差
+  const quantity = Math.floor((spend / fill.fillPrice) * 1e4) / 1e4;
   const amount = round2(quantity * fill.fillPrice);
 
   // 候选池排队成本(016):入池价 → 成交价漂移与等待时长,评估层按此分桶

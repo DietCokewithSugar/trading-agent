@@ -25,7 +25,9 @@ export async function getYahooNews(symbols, perSymbolLimit = 5) {
             title: String(item.title),
             url: String(item.link),
             text: item.description ? String(item.description) : '',
-            publisher: 'Yahoo Finance',
+            // 公开页展示的是 publisher:用 RSS 自带的原始发布方,缺失留空——
+            // 抓取渠道名不得出现在公开 UI(约定),可信度打分走 URL 域名不受影响
+            publisher: item.source ? String(item.source) : null,
             site: 'finance.yahoo.com',
             publishedDate: item.pubDate ? new Date(item.pubDate).toISOString() : null,
           });

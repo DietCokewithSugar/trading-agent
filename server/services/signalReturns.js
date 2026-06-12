@@ -1,5 +1,5 @@
 import { supabase } from '../db.js';
-import { getQuotes, getHistoricalPrices } from './fmp.js';
+import { getQuotes, getHistoricalPrices, getMarketSession } from './fmp.js';
 import { isHalted } from './halt.js';
 
 /**
@@ -67,6 +67,10 @@ export function computeDailyForwardReturns({ rows, signalEtDate, signalPrice }) 
 
 /** 1 小时口径:信号后 60~120 分钟窗口内用实时报价回填(窗口被休市/宕机错过则保持空) */
 async function backfill1h() {
+  // 休市时段不回填:夜间/周末取到的是停滞价,收益恒≈0 会被当成有效样本
+  // 系统性压低 1h 命中率;窗口落在休市内的信号按口径约定保持空、统计时剔除。
+  // 盘前盘后有真实成交价,照常回填
+  if (getMarketSession() === 'closed') return 0;
   const now = Date.now();
   const { data, error } = await supabase()
     .from('news_analyses')

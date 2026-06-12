@@ -29,16 +29,53 @@ function withCredibility(article) {
   return { ...article, source_domain: domain, source_score: score };
 }
 
+/**
+ * FMP 的 publishedDate 是不带时区的美东本地时间字符串("YYYY-MM-DD HH:mm:ss"),
+ * 直接 new Date 会按服务器时区(UTC 部署)解析,published_at 偏早 4~5 小时,
+ * 时效分被系统性折价。沿 etMidnightUtcIso 的先例分别尝试 EST/EDT 偏移,
+ * 取换算回美东后与原字符串一致的那个;已带时区标识的按原样解析。
+ */
+const ET_PARTS_FMT = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'America/New_York',
+  hourCycle: 'h23',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+});
+export function parseFmpPublishedDate(value) {
+  if (!value) return null;
+  const str = String(value).trim();
+  const m = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})(?::\d{2})?$/.exec(str);
+  if (!m) {
+    const d = new Date(str);
+    return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  }
+  const [, datePart, timePart] = m;
+  for (const offset of ['-05:00', '-04:00']) {
+    const candidate = new Date(`${datePart}T${timePart}:00${offset}`);
+    if (Number.isNaN(candidate.getTime())) continue;
+    const p = Object.fromEntries(ET_PARTS_FMT.formatToParts(candidate).map((x) => [x.type, x.value]));
+    if (`${p.year}-${p.month}-${p.day}` === datePart && `${p.hour}:${p.minute}` === timePart) {
+      return candidate.toISOString();
+    }
+  }
+  // 理论不可达的兜底:按 EST 计
+  return new Date(`${datePart}T${timePart}:00-05:00`).toISOString();
+}
+
 function normalizeFmpItem(item, source) {
   return withCredibility({
     url: item.url,
     title: item.title,
     text_content: item.text || '',
     source,
-    publisher: item.publisher || item.site || source,
+    // 发布方缺失时不回退内部渠道标识(fmp-*)——publisher 出现在公开新闻页
+    publisher: item.publisher || item.site || null,
     image: item.image || null,
     symbols: item.symbol ? [String(item.symbol).toUpperCase()] : [],
-    published_at: item.publishedDate ? new Date(item.publishedDate).toISOString() : null,
+    published_at: parseFmpPublishedDate(item.publishedDate),
   });
 }
 

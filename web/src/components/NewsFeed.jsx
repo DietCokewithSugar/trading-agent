@@ -150,7 +150,7 @@ export default function NewsFeed({ version, onSymbolClick }) {
               <div style={{ marginTop: 6 }}>
                 <Space size={8} wrap>
                   <Typography.Text type="secondary" style={{ fontSize: 12.5 }}>
-                    {n.publisher || n.source}
+                    {n.publisher || '未知来源'}
                   </Typography.Text>
                   {typeof n.source_score === 'number' || typeof n.source_score === 'string' ? (
                     <Tag

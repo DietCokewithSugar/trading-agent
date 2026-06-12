@@ -20,7 +20,6 @@ import {
   updateCandidate,
   getCandidateStatus,
   expireStale,
-  cancelLowScore,
   cancelSiblings,
   countByStatus,
 } from './candidateStore.js';
@@ -112,10 +111,15 @@ export const allocatorStatus = {
   lastRunAt: null, // 毫秒时间戳
   lastRunDay: null, // 美东日(开盘首跑判定)
   lastResult: null,
+  // 资金受限闸门:上次预算类拒绝时的现金水位与美东日。现金未高于该水位且未跨日时,
+  // capital_constrained 候选不复位重跑(省去注定再被预算拒绝的整条 LLM 决策链)
+  capitalGate: null,
 };
 
 /** 资金/配额类拒绝:候选标记 capital_constrained 留池,卖出释放现金或次日配额恢复后复评 */
 const CAPITAL_REASONS = new Set(['cash_reserve', 'daily_budget', 'gross_exposure', 'new_position_quota']);
+/** 单候选级的容量类拒绝:只约束该候选自身(加仓豁免持仓数上限/单票帽只限同票),不级联其它候选 */
+const PER_CANDIDATE_CAPITAL_REASONS = new Set(['max_positions', 'position_cap']);
 /** 全局临时状态:本轮直接停止执行,候选保持原状态等下一轮 */
 const GLOBAL_TRANSIENT_REASONS = new Set(['trading_halted', 'daily_loss_halt', 'macro_shock']);
 
@@ -142,18 +146,32 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
   try {
     await expireStale();
     const candidates = await listActiveCandidates();
-    // 节奏标记在加载后就绪时更新:本轮无论结果如何都算跑过
+    // 读库失败(null)不消耗节奏标记:开盘首跑碰上瞬时 DB 错误时,下一 tick 立即重试
+    // 而不是把隔夜候选清算推迟一个完整 interval
+    if (!Array.isArray(candidates)) return;
+    // 节奏标记在加载成功后更新:本轮无论结果如何都算跑过
     allocatorStatus.lastRunAt = startedAt;
     allocatorStatus.lastRunDay = etDayKey();
-    if (!candidates || !candidates.length) return;
+    if (!candidates.length) return;
 
     // 生效参数 = 新闻 regime ∩ 确定性市场核验(016):核验不同向时 risk_on 放大被钳制
     const regime = getEffectiveRegime();
     const params = regime.params;
 
-    // 宏观冲击:不执行任何买入,低分候选直接取消,高分候选留池待冲击解除
+    // 宏观冲击:不执行任何买入,低分候选直接取消,高分候选留池待冲击解除。
+    // 取消判定用即时重算的分数(时效衰减),不依赖上一正常轮留下的 stale current_score
     if (regime.regime === 'macro_shock') {
-      await cancelLowScore(0.3, '宏观冲击期间取消低分候选');
+      const shockNow = new Date();
+      for (const candidate of candidates) {
+        const fresh = scoreCandidate(candidate, { now: shockNow });
+        if (fresh < 0.3) {
+          await updateCandidate(
+            candidate.id,
+            { status: 'cancelled', current_score: fresh, status_reason: '宏观冲击期间取消低分候选' },
+            { expectedStatus: candidate.status }
+          );
+        }
+      }
       console.log(`[allocator] 宏观冲击状态,本轮不执行买入(${candidates.length} 个候选留池)`);
       // 影子组合:no_macro_filter 变体没有冲击门,头部候选照样重放(已买分析自动去重)
       onMacroFilteredCandidates(candidates, '宏观冲击暂停买入');
@@ -173,13 +191,20 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
     // 上下文:近期宏观事件(行业乘数)、持仓、待开盘卖单、冲突窗口内的利空信号
     const now = new Date();
     const symbols = [...new Set(candidates.map((c) => c.symbol))];
-    const [macroEvents, { positions }, sellOrders, opposing] = await Promise.all([
+    const [macroEvents, { state: portfolioState, positions }, sellOrders, opposing] = await Promise.all([
       listRecentMacroEvents(config.macroEventValidityHours).catch(() => []),
       getPortfolio(),
       loadPendingSellOrders(symbols),
       loadOpposingSignals(symbols, now),
     ]);
     const events = macroEvents || [];
+    const cash = Number(portfolioState?.cash);
+    // 资金受限闸门:现金高于上次受限水位($1 容差)或已跨美东日(预算/配额重置)才放行复评;
+    // 现金读取异常按放行处理(fail-open,宁可多花一次 LLM 也不长期冻结候选)
+    const gate = allocatorStatus.capitalGate;
+    const capitalFreed =
+      !gate || gate.day !== etDayKey() || !Number.isFinite(cash) || cash > gate.cash + 1;
+    if (capitalFreed) allocatorStatus.capitalGate = null;
 
     // 刷新分数(时效衰减 × 宏观乘数 × 行业乘数)并按 regime 过滤档位/置信度。
     // 写入先收集再批量提交:状态不变且分数变化 < 阈值的不写,其余 20 个一批并发,
@@ -261,6 +286,9 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
     //(状态刚被其它路径改写,如新到利空触发的 conflict_hold)的候选本轮不再执行
     const runnable = [];
     for (const candidate of reEligible) {
+      // 资金未释放期间 capital_constrained 不复评:复位后必然再走一遍
+      // decideTrade+风控官然后被同一预算约束拒绝,白烧两次 LLM 调用
+      if (candidate.status === 'capital_constrained' && !capitalFreed) continue;
       if (candidate.status !== 'pending') {
         const ok = await updateCandidate(
           candidate.id,
@@ -274,9 +302,10 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
     }
 
     // 同票合并 → 排名 → 取前 N 执行
-    const { merged } = mergeBySymbol(runnable);
+    const { merged, absorbed } = mergeBySymbol(runnable);
+    const ranked = rankCandidates(merged);
     const planned = planAllocations({
-      ranked: rankCandidates(merged),
+      ranked,
       maxPerRun: config.maxAllocationsPerRun,
     });
     if (!planned.length) return;
@@ -306,11 +335,20 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
         );
         continue;
       }
+      // 宏观乘数 × 行业乘数 × 冲突缩仓:三者共同作为分配路径的额外仓位缩放
+      //(打分里它们只影响排序,这里才真正进入买入金额)
+      const extraScale = Number(
+        (
+          (Number(params.macroMultiplier) || 1) *
+          (Number(candidate.sectorMult) || 1) *
+          (conflictScale ? conflictScale.scale : 1)
+        ).toFixed(4)
+      );
       let result;
       try {
         result = await executeCandidate(candidate, {
           macroContext,
-          extraScale: conflictScale ? conflictScale.scale : 1,
+          extraScale,
         });
       } catch (err) {
         console.warn(`[allocator] ${candidate.symbol} 执行失败(候选留池): ${err.message}`);
@@ -331,16 +369,37 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
       }
       const reason = result?.reason || 'unknown';
       if (CAPITAL_REASONS.has(reason)) {
-        // 资金/配额耗尽:本候选与排名靠后的全部标记 capital_constrained,留池复评
-        for (const rest of planned.slice(i)) {
+        // 资金/配额耗尽:本候选与排名靠后的全部(含同票被合并吸收的候选,不止本轮计划内的前 N)
+        // 标记 capital_constrained 留池;同时记下现金水位闸门,资金释放/跨日前不再复评
+        const fromIdx = ranked.findIndex((c) => c.id === candidate.id);
+        const constrainIds = new Set(
+          (fromIdx >= 0 ? ranked.slice(fromIdx) : planned.slice(i)).map((c) => c.id)
+        );
+        for (const a of absorbed) {
+          if (constrainIds.has(a.into.id)) constrainIds.add(a.candidate.id);
+        }
+        for (const id of constrainIds) {
           await updateCandidate(
-            rest.id,
+            id,
             { status: 'capital_constrained', status_reason: result.reject },
             { expectedStatus: 'pending' }
           );
         }
+        if (Number.isFinite(cash)) {
+          allocatorStatus.capitalGate = { cash, day: etDayKey() };
+        }
         console.log(`[allocator] 资金/配额受限(${reason}),其余候选留池等待资金释放`);
         break;
+      }
+      if (PER_CANDIDATE_CAPITAL_REASONS.has(reason)) {
+        // 持仓数上限/单票仓位帽:平仓或估值变化后自行释放,留池复评;不影响其余候选
+        await updateCandidate(
+          candidate.id,
+          { status: 'capital_constrained', status_reason: result.reject },
+          { expectedStatus: 'pending' }
+        );
+        console.log(`[allocator] ${candidate.symbol} 容量受限(${reason}),候选留池复评`);
+        continue;
       }
       if (GLOBAL_TRANSIENT_REASONS.has(reason)) {
         console.log(`[allocator] 全局暂停(${reason}),本轮停止执行`);

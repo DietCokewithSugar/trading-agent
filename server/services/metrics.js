@@ -188,5 +188,6 @@ export function resetMetrics() {
  * (供应商信息只允许出现在 token 门控的管理面),完整原文随 cycle_runs 落库。
  */
 export function sanitizeProviderText(text) {
-  return String(text || '').replace(/deepseek|fmp|yahoo/gi, '上游服务');
+  // financialmodelingprep 不含连续子串 "fmp",必须单独列出(上游错误 body 常带完整域名)
+  return String(text || '').replace(/financialmodelingprep|deepseek|fmp|yahoo|supabase/gi, '上游服务');
 }
