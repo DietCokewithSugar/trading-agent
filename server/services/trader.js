@@ -16,7 +16,7 @@ import {
   getNewPositionsToday,
   noteNewPositionOpened,
 } from './riskControls.js';
-import { getRegime, getRegimeParams } from './macroRegime.js';
+import { getRegime, getEffectiveRegime } from './macroRegime.js';
 import { decideTrade, reviewProposedTrade } from './deepseek.js';
 import { getPortfolio, getValuation } from './portfolio.js';
 import { reflectOnClosedTrade, getMemories } from './memoryService.js';
@@ -772,9 +772,11 @@ async function settleBuyLocked({
   const existing = valuation.positions.find((p) => p.symbol === symbol);
 
   // 宏观环境硬风控(014,只拦买入;regime/配额都是临时状态 → transient 供池/队列重试):
-  // macro_shock 一律不开新仓;当日新开仓数配额(加仓不计)
-  const regime = getRegime();
-  const regimeParams = getRegimeParams(regime.regime);
+  // macro_shock 一律不开新仓;当日新开仓数配额(加仓不计)。
+  // 资金参数取生效值(新闻 regime ∩ 确定性市场核验,016);regime.regime 仍为新闻
+  // regime——shock 门与成交快照语义不变
+  const regime = getEffectiveRegime();
+  const regimeParams = regime.params;
   if (config.enableMacro) {
     if (regime.regime === 'macro_shock') {
       recordReject('macro_shock');

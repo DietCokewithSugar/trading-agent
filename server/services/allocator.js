@@ -10,7 +10,7 @@ import { getMarketSession } from './fmp.js';
 import { isHalted } from './halt.js';
 import { etDayKey } from './metrics.js';
 import { broadcast } from './bus.js';
-import { getRegime, getRegimeParams, sectorMultiplier } from './macroRegime.js';
+import { getEffectiveRegime, sectorMultiplier } from './macroRegime.js';
 import { listRecentMacroEvents } from './macroService.js';
 import { getBlackoutState } from './macroCalendar.js';
 import { resolveConflicts, tierScore } from './conflictResolver.js';
@@ -146,8 +146,9 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
     allocatorStatus.lastRunDay = etDayKey();
     if (!candidates || !candidates.length) return;
 
-    const regime = getRegime();
-    const params = getRegimeParams(regime.regime);
+    // 生效参数 = 新闻 regime ∩ 确定性市场核验(016):核验不同向时 risk_on 放大被钳制
+    const regime = getEffectiveRegime();
+    const params = regime.params;
 
     // 宏观冲击:不执行任何买入,低分候选直接取消,高分候选留池待冲击解除
     if (regime.regime === 'macro_shock') {
@@ -270,7 +271,7 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
     });
     if (!planned.length) return;
     console.log(
-      `[allocator] 本轮(${trigger})候选 ${candidates.length} → 可执行 ${merged.length},执行前 ${planned.length} 个: ${planned.map((c) => `${c.symbol}(${c.score})`).join(' ')}`
+      `[allocator] 本轮(${trigger})候选 ${candidates.length} → 可执行 ${merged.length},执行前 ${planned.length} 个: ${planned.map((c) => `${c.symbol}(${c.score})`).join(' ')}${regime.clamped ? '(确定性核验钳制 risk_on 放大)' : ''}`
     );
 
     let allocated = 0;

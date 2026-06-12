@@ -4,6 +4,7 @@
 import { supabase } from '../db.js';
 import { config } from '../config.js';
 import { listRecentMacroEvents } from './macroService.js';
+import { getMarketCheck, intersectRegime } from './marketCheck.js';
 import { broadcast } from './bus.js';
 
 /** 事件档位权重:全市场级事件主导,情绪级只起微调作用 */
@@ -229,6 +230,34 @@ export function getRegime() {
 /** 指定 regime 的组合参数集(未知值按 neutral 兜底) */
 export function getRegimeParams(regime) {
   return config.macroRegimeParams[regime] || config.macroRegimeParams.neutral;
+}
+
+let lastClampLogged = false;
+
+/**
+ * 生效 regime 与参数(016,买入参数的唯一咽喉点——分配器与锁内结算都从这里取):
+ * 新闻推导的 regime 与确定性市场核验(SPY 趋势 + VIX,marketCheck.js)取交集,
+ * 仅当新闻 risk_on 且核验不同向时按 neutral 参数执行(只钳制放大、从不放松;
+ * 核验不可用时完全透传)。regime 字段仍为新闻 regime——macro_shock 门、
+ * 成交快照、冲突消解的语义不变,只有资金参数被钳制。
+ */
+export function getEffectiveRegime() {
+  const regime = getRegime();
+  const check = config.enableMarketCheck ? getMarketCheck() : { available: false, trend: null };
+  const { regime: effective, clamped } = intersectRegime(regime.regime, check);
+  if (clamped && !lastClampLogged) {
+    console.log(
+      `[market] 确定性核验不同向(趋势=${check.trend || '未知'}),risk_on 仓位放大钳制为 neutral 参数`
+    );
+  }
+  lastClampLogged = clamped;
+  return {
+    ...regime,
+    effective_regime: effective,
+    clamped,
+    params: getRegimeParams(effective),
+    market_check: check,
+  };
 }
 
 /** 启动时从 macro_state 加载上次状态(重启延续);表缺失保持 neutral */
