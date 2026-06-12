@@ -38,7 +38,7 @@ const RANGES = [
   { key: '1d', label: '1天', hours: 24 },
   { key: '1w', label: '1周', hours: 24 * 7 },
   { key: '1m', label: '1月', hours: 24 * 30 },
-  { key: 'all', label: '全部', hours: 24 * 366 },
+  { key: 'all', label: '一年', hours: 24 * 366 },
 ];
 
 // 各序列的识别色(取自主题调色板;实盘用主色,基准用灰)
@@ -73,7 +73,8 @@ function pctClass(v) {
  * 影子组合从启用时刻开始与实盘并行记账,每套关闭一层防线——
  * 差值就是该层防线在这段行情里的净贡献。
  */
-export default function AblationPage() {
+// version:App 在 SSE macro 事件/兜底轮询/重置后递增,触发重拉(否则重置后停留在旧数据)
+export default function AblationPage({ version = 0 }) {
   const [rangeKey, setRangeKey] = useState('1w');
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
@@ -94,7 +95,7 @@ export default function AblationPage() {
 
   useEffect(() => {
     load();
-  }, [load]);
+  }, [load, version]);
 
   // 各序列重基:窗口内首点 = 0%,统一为相对收益曲线(各组合起始资金/时点不同,绝对值不可比)
   const chartSeries = useMemo(() => {

@@ -50,7 +50,13 @@ export default function Dashboard({ portfolio, snapshots, trades, stats, perform
       title: '今日涨跌',
       dataIndex: 'change_percent',
       width: 100,
-      render: (v) => <span className={`num ${v >= 0 ? 'up' : 'down'}`}>{fmtPercent(v)}</span>,
+      // 报价缺失(null)不着色:null >= 0 为 true,会把占位符误染涨色
+      render: (v) =>
+        v === null || v === undefined ? (
+          <span className="muted num">{fmtPercent(null)}</span>
+        ) : (
+          <span className={`num ${v >= 0 ? 'up' : 'down'}`}>{fmtPercent(v)}</span>
+        ),
     },
     {
       title: '止损 / 止盈',

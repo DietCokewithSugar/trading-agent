@@ -84,7 +84,9 @@ export default function TradesPage({ trades, macroVersion = 0, onSymbolClick }) 
   const loadMore = async () => {
     setLoadingMore(true);
     try {
-      const next = await api.trades(PAGE_SIZE, merged.length);
+      // 游标分页:以已加载最旧一条的时间为界,SSE 推送的新成交不会让翻页漏行
+      const oldest = merged[merged.length - 1]?.created_at;
+      const next = await api.trades(PAGE_SIZE, oldest ? { before: oldest } : { offset: merged.length });
       if (next.length < PAGE_SIZE) setNoMore(true);
       setExtra((prev) => [...prev, ...next]);
     } catch { /* 下次再试 */ }

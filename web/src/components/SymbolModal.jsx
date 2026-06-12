@@ -59,9 +59,16 @@ export default function SymbolModal({ symbol, open, onClose }) {
               {quote.session && quote.session !== 'regular' && (
                 <Tag color="orange">{SESSION_LABELS[quote.session]}</Tag>
               )}
-              <span className={`num ${quote.changesPercentage >= 0 ? 'up' : 'down'}`}>
-                今日 {fmtPercent(quote.changesPercentage)}
-              </span>
+              {(() => {
+                // 上游字段名不稳定(changesPercentage/changePercentage),与服务端同样双字段兜底;
+                // 缺失时不着色(undefined 比较会把占位符误染跌色)
+                const chg = Number(quote.changesPercentage ?? quote.changePercentage);
+                return (
+                  <span className={`num ${Number.isFinite(chg) ? (chg >= 0 ? 'up' : 'down') : 'muted'}`}>
+                    今日 {fmtPercent(Number.isFinite(chg) ? chg : null)}
+                  </span>
+                );
+              })()}
               {quote.extended_price !== null && quote.extended_change_percent !== null && (
                 <span className={`num ${quote.extended_change_percent >= 0 ? 'up' : 'down'}`}>
                   {SESSION_LABELS[quote.session] || '盘后'} {fmtPercent(quote.extended_change_percent)}

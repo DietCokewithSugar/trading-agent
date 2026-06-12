@@ -109,7 +109,15 @@ export default function NewsFeed({ version, onSymbolClick }) {
   const loadMore = async () => {
     setLoadingMore(true);
     try {
-      const next = await api.news({ limit: PAGE_SIZE, offset: items.length, filter, q: query });
+      // 游标分页:以已加载最旧一条的发布时间为界,SSE 推送的新文章不会让翻页漏行
+      //(最旧一条缺发布时间的极少数情况退回 offset)
+      const oldest = items[items.length - 1]?.published_at;
+      const next = await api.news({
+        limit: PAGE_SIZE,
+        ...(oldest ? { before: oldest } : { offset: items.length }),
+        filter,
+        q: query,
+      });
       if (next.length < PAGE_SIZE) setNoMore(true);
       setItems((prev) => {
         const seen = new Set(prev.map((p) => p.id));

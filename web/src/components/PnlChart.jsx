@@ -51,7 +51,9 @@ export default function PnlChart({ snapshots, trades, initialCapital, benchmarks
 
   const range = RANGES.find((r) => r.key === rangeKey);
 
-  // 非"全部"范围时单独拉取对应时间段的采样数据;有新快照(snapshots 增长)时跟着刷新
+  // 非"全部"范围时单独拉取对应时间段的采样数据;有新快照时跟着刷新。
+  // 依赖末点时间戳而非长度:快照数组达到上限后是滑动窗口,长度恒定不再变化
+  const lastSnapshotAt = snapshots.length ? snapshots[snapshots.length - 1].created_at : null;
   useEffect(() => {
     if (!range.hours) {
       setRangeData(null);
@@ -65,7 +67,7 @@ export default function PnlChart({ snapshots, trades, initialCapital, benchmarks
     return () => {
       cancelled = true;
     };
-  }, [rangeKey, snapshots.length]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [rangeKey, lastSnapshotAt]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const rows = range.hours ? rangeData || [] : snapshots;
 

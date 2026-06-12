@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { Alert, Button, Card, Col, Empty, Row, Segmented, Space, Spin, Statistic, Table, Typography } from 'antd';
 
 import { api, fmtTime } from '../api.js';
+import { CHART } from '../theme.js';
 
 const HORIZONS = [
   { key: '1h', label: '1 小时' },
@@ -33,7 +34,7 @@ function HitCell({ value, lo, hi }) {
     <span className="num">
       <span className={tone}>{value.toFixed(0)}%</span>
       {lo !== null && lo !== undefined && (
-        <div style={{ fontSize: 11, color: '#8c8c8c', lineHeight: 1.2 }}>
+        <div style={{ fontSize: 11, color: CHART.axis, lineHeight: 1.2 }}>
           {lo.toFixed(0)}~{hi.toFixed(0)}
         </div>
       )}
@@ -164,7 +165,10 @@ export default function SignalStatsPage() {
         data.ic?.[h.key] === null || data.ic?.[h.key] === undefined ? (
           '—'
         ) : (
-          <span className={`num ${data.ic[h.key] > 0 ? 'up' : 'down'}`}>{data.ic[h.key].toFixed(3)}</span>
+          // 恰为 0 不着色:0 既非正相关也非负相关
+          <span className={`num ${data.ic[h.key] > 0 ? 'up' : data.ic[h.key] < 0 ? 'down' : ''}`}>
+            {data.ic[h.key].toFixed(3)}
+          </span>
         ),
     })),
   ];

@@ -24,6 +24,7 @@ import {
   REJECT_LABELS,
   RUN_TRIGGER_LABELS,
 } from '../api.js';
+import { COLOR_DOWN } from '../theme.js';
 
 /**
  * 隐藏管理页(#/admin):
@@ -278,7 +279,7 @@ export default function AdminPage() {
                     title="行情源错误"
                     value={metrics?.today?.providerErrors?.fmp?.count ?? '—'}
                     valueStyle={
-                      metrics?.today?.providerErrors?.fmp?.count > 0 ? { color: '#cf1322' } : undefined
+                      metrics?.today?.providerErrors?.fmp?.count > 0 ? { color: COLOR_DOWN } : undefined
                     }
                   />
                 </Col>
@@ -288,7 +289,7 @@ export default function AdminPage() {
                     value={metrics?.today?.providerErrors?.deepseek?.count ?? '—'}
                     valueStyle={
                       metrics?.today?.providerErrors?.deepseek?.count > 0
-                        ? { color: '#cf1322' }
+                        ? { color: COLOR_DOWN }
                         : undefined
                     }
                   />

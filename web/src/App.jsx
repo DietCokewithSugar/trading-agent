@@ -70,6 +70,9 @@ function MainApp() {
       setSnapshots(s);
       setTrades(t);
       setNewsVersion((v) => v + 1);
+      // 宏观页/候选池/消融页自行拉取数据,这里同样递增版本号:
+      // SSE 断线的兜底轮询期间与重置/重连补拉时,这些页面不能停在旧数据
+      setMacroVersion((v) => v + 1);
       setStatus(st);
       setStats(stt);
       if (perf) setPerformance(perf);
@@ -244,7 +247,7 @@ function MainApp() {
         )}
         {tab === 'macro' && <MacroPage version={macroVersion} />}
         {tab === 'signals' && <SignalStatsPage />}
-        {tab === 'ablation' && <AblationPage />}
+        {tab === 'ablation' && <AblationPage version={macroVersion} />}
       </main>
 
       <footer className="footer">模拟交易,不构成投资建议</footer>
