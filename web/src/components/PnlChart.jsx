@@ -12,7 +12,8 @@ import {
   CartesianGrid,
 } from 'recharts';
 import { api, fmtMoney, fmtNum, fmtPercent } from '../api.js';
-import { CHART, COLOR_UP, COLOR_DOWN } from '../theme.js';
+import { getChart, getPnl } from '../theme.js';
+import { useThemeMode } from '../theme-context.jsx';
 
 const RANGES = [
   { key: '1d', label: '1天', hours: 24 },
@@ -21,9 +22,10 @@ const RANGES = [
   { key: 'all', label: '全部', hours: null },
 ];
 
-/** 买卖点标记:买入绿色▲,卖出红色▼(美股惯例),悬停显示交易详情(SVG 原生 title) */
+/** 买卖点标记:买入绿色▲,卖出红色▼(美股惯例),悬停显示交易详情(SVG 原生 title)。
+ *  配色由 Scatter 通过 props 传入(up/down/markerStroke),以支持明暗主题。 */
 function TradeMarker(props) {
-  const { cx, cy, payload } = props;
+  const { cx, cy, payload, up, down, markerStroke } = props;
   if (cx === undefined || cy === undefined || !payload?.trade) return null;
   const t = payload.trade;
   const buy = t.side === 'buy';
@@ -34,18 +36,21 @@ function TradeMarker(props) {
       <path
         d={buy ? `M ${cx} ${cy - 6} L ${cx - 5} ${cy + 4} L ${cx + 5} ${cy + 4} Z`
                : `M ${cx} ${cy + 6} L ${cx - 5} ${cy - 4} L ${cx + 5} ${cy - 4} Z`}
-        fill={buy ? COLOR_UP : COLOR_DOWN}
-        stroke={CHART.markerStroke}
+        fill={buy ? up : down}
+        stroke={markerStroke}
         strokeWidth={1}
       />
     </g>
   );
 }
 
-// 参考基线线色按 symbol 取色,未知基准回退灰色
-const BENCHMARK_COLORS = { SPY: CHART.benchmark, GLD: CHART.benchmarkGold };
-
 export default function PnlChart({ snapshots, trades, initialCapital, benchmarks }) {
+  const { mode } = useThemeMode();
+  const CHART = getChart(mode);
+  const PNL = getPnl(mode);
+  // 参考基线线色按 symbol 取色,未知基准回退灰色
+  const BENCHMARK_COLORS = { SPY: CHART.benchmark, GLD: CHART.benchmarkGold };
+
   const [rangeKey, setRangeKey] = useState('all');
   const [rangeData, setRangeData] = useState(null);
 
@@ -223,7 +228,7 @@ export default function PnlChart({ snapshots, trades, initialCapital, benchmarks
             <Line
               type="monotone"
               dataKey="total"
-              stroke={data[data.length - 1].pnl >= 0 ? COLOR_UP : COLOR_DOWN}
+              stroke={data[data.length - 1].pnl >= 0 ? PNL.up : PNL.down}
               strokeWidth={2}
               dot={false}
             />
@@ -240,7 +245,12 @@ export default function PnlChart({ snapshots, trades, initialCapital, benchmarks
                 dot={false}
               />
             ))}
-            <Scatter data={markers} dataKey="total" shape={<TradeMarker />} isAnimationActive={false} />
+            <Scatter
+              data={markers}
+              dataKey="total"
+              shape={<TradeMarker up={PNL.up} down={PNL.down} markerStroke={CHART.markerStroke} />}
+              isAnimationActive={false}
+            />
           </ComposedChart>
         </ResponsiveContainer>
       )}
