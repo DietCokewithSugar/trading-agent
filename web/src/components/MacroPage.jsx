@@ -21,6 +21,7 @@ import {
   REGIME_TAG_COLORS,
   MACRO_EVENT_TYPE_LABELS,
 } from '../api.js';
+import SegmentedBar from './SegmentedBar.jsx';
 
 const DIRECTION_LABELS = { risk_on: '利好风险资产', risk_off: '避险', neutral: '中性' };
 const RATES_LABELS = { hawkish: '鹰派', dovish: '鸽派', neutral: '中性' };
@@ -30,15 +31,16 @@ const SECTOR_DIR_COLORS = { bullish: 'green', bearish: 'red' };
 /** 当前宏观环境卡片:状态 + 风险分 + 利率/通胀/增长子标签 + 确定性核验 + 生效的组合参数 */
 function RegimeCard({ regime, marketCheck }) {
   const params = regime?.params || {};
+  const riskScore = Number(regime.risk_score ?? 0);
+  // 风险分 ∈ [-1,1] → 映射到 [0,100] 填充;方向决定填充色
+  const riskTone =
+    regime.regime === 'risk_on' ? 'up' : regime.regime === 'neutral' ? 'neutral' : 'down';
   return (
     <Card size="small" title="当前宏观环境">
       <Space size={8} wrap style={{ marginBottom: 12 }}>
         <Tag color={REGIME_TAG_COLORS[regime.regime] || 'default'} style={{ fontSize: 16, padding: '4px 12px' }}>
           {REGIME_LABELS[regime.regime] || regime.regime}
         </Tag>
-        <span className="num" style={{ whiteSpace: 'nowrap' }}>
-          风险评分 {Number(regime.risk_score ?? 0).toFixed(2)}
-        </span>
         {regime.shock_until && (
           <Tag color="red">冲击锁定至 {fmtTime(regime.shock_until)}</Tag>
         )}
@@ -46,6 +48,16 @@ function RegimeCard({ regime, marketCheck }) {
           <Tag color="orange">市场核验不同向,仓位放大已钳制为中性参数</Tag>
         )}
       </Space>
+      <div style={{ marginBottom: 12, maxWidth: 320 }}>
+        <SegmentedBar
+          label="风险评分 / RISK SCORE"
+          value={(riskScore + 1) / 2}
+          max={1}
+          segments={12}
+          tone={riskTone}
+          valueText={riskScore.toFixed(2)}
+        />
+      </div>
       <Space size={8} wrap style={{ marginBottom: 12 }}>
         <Tag>利率 {RATES_LABELS[regime.rates_signal] || '中性'}</Tag>
         <Tag>通胀 {UPDOWN_LABELS[regime.inflation_signal] || '中性'}</Tag>

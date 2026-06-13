@@ -2,12 +2,23 @@ import React, { useMemo } from 'react';
 import { Card, Col, Row, Statistic, Typography } from 'antd';
 import { ResponsiveContainer, PieChart, Pie, Cell, Tooltip, Legend } from 'recharts';
 import { fmtMoney, fmtPercent } from '../api.js';
-import { CHART, PIE_COLORS } from '../theme.js';
+import { getChart, getPieColors, DARK, LIGHT } from '../theme.js';
+import { useThemeMode } from '../theme-context.jsx';
+import SegmentedBar from './SegmentedBar.jsx';
 
 // 饼图最多展示的切片数,其余持仓合并为「其他」,防止图例溢出卡片
 const MAX_SLICES = 8;
 
 export default function StatsCards({ stats, performance, portfolio }) {
+  const { mode } = useThemeMode();
+  const CHART = getChart(mode);
+  const pieColors = getPieColors(mode);
+  const surface = (mode === 'light' ? LIGHT : DARK).surface;
+
+  const winRate =
+    stats?.win_rate !== null && stats?.win_rate !== undefined ? stats.win_rate : null;
+  const drawdown = stats?.max_drawdown_percent ?? null;
+
   const cards = [
     {
       label: '累计收益率',
@@ -56,14 +67,12 @@ export default function StatsCards({ stats, performance, portfolio }) {
     },
     {
       label: '交易胜率',
-      value:
-        stats?.win_rate !== null && stats?.win_rate !== undefined
-          ? `${stats.win_rate.toFixed(0)}%`
-          : '—',
+      value: winRate !== null ? `${winRate.toFixed(0)}%` : '—',
       sub: stats?.sell_count
         ? `${stats.win_count} 胜 / ${stats.sell_count - stats.win_count} 负`
         : '暂无平仓记录',
       tone: '',
+      bar: winRate !== null ? { value: winRate, max: 100, tone: 'neutral' } : null,
     },
     {
       label: '最大回撤',
@@ -73,6 +82,7 @@ export default function StatsCards({ stats, performance, portfolio }) {
           : '—',
       sub: `累计 ${stats?.total_trades ?? 0} 笔交易`,
       tone: (stats?.max_drawdown_percent ?? 0) > 5 ? 'down' : '',
+      bar: drawdown !== null ? { value: drawdown, max: 50, tone: 'down' } : null,
     },
   ];
 
@@ -105,14 +115,31 @@ export default function StatsCards({ stats, performance, portfolio }) {
           <Row gutter={[12, 20]}>
             {cards.map((c) => (
               <Col xs={12} sm={8} key={c.label}>
-                <Statistic
-                  title={c.label}
-                  valueRender={() => <span className={`num ${c.tone}`}>{c.value}</span>}
-                  valueStyle={{ fontSize: 20 }}
-                />
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  {c.sub}
-                </Typography.Text>
+                {c.bar ? (
+                  <div>
+                    <SegmentedBar
+                      label={c.label}
+                      value={c.bar.value}
+                      max={c.bar.max}
+                      tone={c.bar.tone}
+                      valueText={c.value}
+                    />
+                    <Typography.Text type="secondary" style={{ fontSize: 12, marginTop: 4, display: 'block' }}>
+                      {c.sub}
+                    </Typography.Text>
+                  </div>
+                ) : (
+                  <>
+                    <Statistic
+                      title={<span className="label-caps">{c.label}</span>}
+                      valueRender={() => <span className={`num ${c.tone}`}>{c.value}</span>}
+                      valueStyle={{ fontSize: 20 }}
+                    />
+                    <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                      {c.sub}
+                    </Typography.Text>
+                  </>
+                )}
               </Col>
             ))}
           </Row>
@@ -129,11 +156,11 @@ export default function StatsCards({ stats, performance, portfolio }) {
                   innerRadius={42}
                   outerRadius={68}
                   paddingAngle={2}
-                  stroke="#fff"
+                  stroke={surface}
                   strokeWidth={1}
                 >
                   {pieData.map((entry, i) => (
-                    <Cell key={entry.name} fill={PIE_COLORS[i % PIE_COLORS.length]} />
+                    <Cell key={entry.name} fill={pieColors[i % pieColors.length]} />
                   ))}
                 </Pie>
                 <Tooltip
