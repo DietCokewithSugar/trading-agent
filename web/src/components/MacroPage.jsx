@@ -47,6 +47,12 @@ function RegimeCard({ regime, marketCheck }) {
         {regime.clamped && (
           <Tag color="orange">市场核验不同向,仓位放大已钳制为中性参数</Tag>
         )}
+        {regime.market_stress && (
+          <Tag color="orange">市场避险,执行参数已收紧至避险</Tag>
+        )}
+        {regime.confirmed && (
+          <Tag color="red">避险方向获市场印证</Tag>
+        )}
       </Space>
       <div style={{ marginBottom: 12, maxWidth: 320 }}>
         <SegmentedBar

@@ -285,28 +285,41 @@ export function getRegimeParams(regime) {
 }
 
 let lastClampLogged = false;
+let lastStressLogged = false;
 
 /**
  * 生效 regime 与参数(016,买入参数的唯一咽喉点——分配器与锁内结算都从这里取):
- * 新闻推导的 regime 与确定性市场核验(SPY 趋势 + VIX,marketCheck.js)取交集,
- * 仅当新闻 risk_on 且核验不同向时按 neutral 参数执行(只钳制放大、从不放松;
- * 核验不可用时完全透传)。regime 字段仍为新闻 regime——macro_shock 门、
- * 成交快照、冲突消解的语义不变,只有资金参数被钳制。
+ * 新闻推导的 regime 与确定性市场核验(SPY 趋势 + VIX,marketCheck.js)取交集。
+ * 市场确认层(只收紧、绝不放松):
+ *  - clamped:新闻 risk_on 但核验不同向 → 按 neutral 参数执行(不放大);
+ *  - market_stress:核验避险但新闻只是 neutral/risk_on → 执行参数下限抬到 risk_off
+ *    (情况 D:SPY 大跌但无明确宏观新闻,作为独立风控输入收紧);
+ *  - confirmed:新闻已 risk_off/macro_shock 且核验同向避险 → 市场印证。
+ * regime 字段仍为新闻 regime——macro_shock 门、成交快照、冲突消解的语义不变,
+ * 市场只影响生效的资金参数(effective_regime/params),核验不可用时完全透传。
  */
 export function getEffectiveRegime() {
   const regime = getRegime();
   const check = config.enableMarketCheck ? getMarketCheck() : { available: false, trend: null };
-  const { regime: effective, clamped } = intersectRegime(regime.regime, check);
+  const { regime: effective, clamped, marketStress, confirmed } = intersectRegime(regime.regime, check);
   if (clamped && !lastClampLogged) {
     console.log(
       `[market] 确定性核验不同向(趋势=${check.trend || '未知'}),risk_on 仓位放大钳制为 neutral 参数`
     );
   }
+  if (marketStress && !lastStressLogged) {
+    console.log(
+      `[market] 市场避险(趋势=${check.trend || '未知'}),新闻 ${regime.regime} 的执行参数收紧至 risk_off`
+    );
+  }
   lastClampLogged = clamped;
+  lastStressLogged = marketStress;
   return {
     ...regime,
     effective_regime: effective,
     clamped,
+    market_stress: marketStress,
+    confirmed,
     params: getRegimeParams(effective),
     market_check: check,
   };
