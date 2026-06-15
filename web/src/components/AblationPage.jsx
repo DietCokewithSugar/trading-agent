@@ -3,6 +3,7 @@ import {
   Alert,
   Button,
   Card,
+  Descriptions,
   Empty,
   Segmented,
   Space,
@@ -78,7 +79,7 @@ function pctClass(v) {
  * 差值就是该层防线在这段行情里的净贡献。
  */
 // version:App 在 SSE macro 事件/兜底轮询/重置后递增,触发重拉(否则重置后停留在旧数据)
-export default function AblationPage({ version = 0 }) {
+export default function AblationPage({ version = 0, onSymbolClick }) {
   const { mode } = useThemeMode();
   const CHART = getChart(mode);
   const PNL = getPnl(mode);
@@ -87,6 +88,26 @@ export default function AblationPage({ version = 0 }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
+  // 展开行的成交流水懒加载缓存:variant -> { loading, trades, error }
+  const [tradeCache, setTradeCache] = useState({});
+
+  const loadVariantTrades = useCallback((variant) => {
+    setTradeCache((prev) => {
+      if (prev[variant]) return prev; // 已加载/加载中,不重复请求
+      const fetcher =
+        variant === 'actual'
+          ? api.trades(100).then((r) => r.trades || r || [])
+          : api.shadowTrades(variant).then((r) => r.trades || []);
+      fetcher
+        .then((trades) =>
+          setTradeCache((p) => ({ ...p, [variant]: { loading: false, trades } }))
+        )
+        .catch((err) =>
+          setTradeCache((p) => ({ ...p, [variant]: { loading: false, trades: [], error: err.message } }))
+        );
+      return { ...prev, [variant]: { loading: true, trades: [] } };
+    });
+  }, []);
 
   const range = RANGES.find((r) => r.key === rangeKey);
 
@@ -95,6 +116,7 @@ export default function AblationPage({ version = 0 }) {
     try {
       setData(await api.shadow(range.hours));
       setError(null);
+      setTradeCache({}); // 重新拉取后清空展开缓存,避免展示过期成交
     } catch (err) {
       setError(err.message);
     }
@@ -136,6 +158,8 @@ export default function AblationPage({ version = 0 }) {
         positions_count: data.actual.positions_count,
         trades_count: null,
         started_at: null,
+        positions: null, // 实盘持仓明细见主页,这里不重复
+        win_rate: null,
       });
     }
     const byVariant = new Map((data.variants || []).map((v) => [v.variant, v]));
@@ -150,6 +174,10 @@ export default function AblationPage({ version = 0 }) {
         positions_count: v.positions?.length ?? 0,
         trades_count: v.trades_count,
         started_at: v.started_at,
+        positions: v.positions || [],
+        win_rate: v.win_rate ?? null,
+        wins: v.wins ?? null,
+        closed_trades: v.closed_trades ?? null,
       });
     }
     return rows;
@@ -280,6 +308,158 @@ export default function AblationPage({ version = 0 }) {
     { title: '理由', dataIndex: 'reason', ellipsis: true },
   ];
 
+  // 展开详情用:持仓列(代码可点击,复用主页持仓样式)
+  const positionColumns = [
+    {
+      title: '代码',
+      dataIndex: 'symbol',
+      width: 90,
+      render: (symbol) =>
+        onSymbolClick ? (
+          <Button type="link" size="small" style={{ padding: 0 }} onClick={() => onSymbolClick(symbol)}>
+            {symbol}
+          </Button>
+        ) : (
+          symbol
+        ),
+    },
+    {
+      title: '数量',
+      dataIndex: 'quantity',
+      width: 90,
+      align: 'right',
+      render: (v) => <span className="num">{fmtNum(v, 4)}</span>,
+    },
+    {
+      title: '平均成本',
+      dataIndex: 'avg_cost',
+      width: 100,
+      align: 'right',
+      render: (v) => <span className="num">{fmtMoney(v)}</span>,
+    },
+    {
+      title: '现价',
+      dataIndex: 'current_price',
+      width: 100,
+      align: 'right',
+      render: (v) => <span className="num">{fmtMoney(v)}</span>,
+    },
+    {
+      title: '市值',
+      dataIndex: 'market_value',
+      width: 110,
+      align: 'right',
+      render: (v) => <span className="num">{fmtMoney(v)}</span>,
+    },
+    {
+      title: '浮动盈亏',
+      dataIndex: 'unrealized_pnl_percent',
+      width: 100,
+      align: 'right',
+      render: (v) => <span className={`num ${pctClass(Number(v))}`}>{fmtPercent(v)}</span>,
+    },
+  ];
+
+  // 展开详情用:该变体成交列(去掉「组合」列,上下文已确定)
+  const variantTradeColumns = tradeColumns.filter((c) => c.key !== 'desc' && c.dataIndex !== 'variant');
+
+  const renderExpanded = (record) => {
+    const cache = tradeCache[record.variant];
+    return (
+      <Space direction="vertical" size={12} style={{ width: '100%' }}>
+        <Typography.Paragraph type="secondary" style={{ margin: 0, fontSize: 13 }}>
+          {SHADOW_VARIANT_DESCRIPTIONS[record.variant] || ''}
+        </Typography.Paragraph>
+
+        <Descriptions size="small" column={{ xs: 2, sm: 3 }} bordered>
+          <Descriptions.Item label="总资产">
+            <span className="num">{fmtMoney(record.total_value)}</span>
+          </Descriptions.Item>
+          <Descriptions.Item label="自启用收益">
+            {record.pnl_percent === null || record.pnl_percent === undefined ? (
+              '—'
+            ) : (
+              <span className={`num ${pctClass(Number(record.pnl_percent))}`}>{fmtPercent(record.pnl_percent)}</span>
+            )}
+          </Descriptions.Item>
+          <Descriptions.Item label="现金">
+            <span className="num">{fmtMoney(record.cash)}</span>
+          </Descriptions.Item>
+          <Descriptions.Item label="持仓数">
+            <span className="num">{record.positions_count ?? '—'}</span>
+          </Descriptions.Item>
+          <Descriptions.Item label="交易笔数">
+            <span className="num">{record.trades_count ?? '—'}</span>
+          </Descriptions.Item>
+          <Descriptions.Item label="交易胜率">
+            {record.win_rate === null || record.win_rate === undefined ? (
+              <Typography.Text type="secondary">暂无平仓</Typography.Text>
+            ) : (
+              <span className="num">
+                {fmtNum(record.win_rate, 1)}%
+                <Typography.Text type="secondary" style={{ fontSize: 11, marginLeft: 4 }}>
+                  ({record.wins}/{record.closed_trades})
+                </Typography.Text>
+              </span>
+            )}
+          </Descriptions.Item>
+        </Descriptions>
+
+        <div>
+          <Typography.Text type="secondary" className="label-caps">
+            持仓
+          </Typography.Text>
+          {record.positions === null ? (
+            <Typography.Paragraph type="secondary" style={{ margin: '6px 0 0', fontSize: 12.5 }}>
+              实盘持仓明细见「实时仪表盘」。
+            </Typography.Paragraph>
+          ) : !record.positions.length ? (
+            <Typography.Paragraph type="secondary" style={{ margin: '6px 0 0', fontSize: 12.5 }}>
+              当前无持仓。
+            </Typography.Paragraph>
+          ) : (
+            <Table
+              rowKey="symbol"
+              size="small"
+              columns={positionColumns}
+              dataSource={record.positions}
+              pagination={false}
+              scroll={{ x: 600 }}
+              style={{ marginTop: 6 }}
+            />
+          )}
+        </div>
+
+        <div>
+          <Typography.Text type="secondary" className="label-caps">
+            交易记录
+          </Typography.Text>
+          {!cache || cache.loading ? (
+            <div style={{ textAlign: 'center', padding: 16 }}>
+              <Spin size="small" />
+            </div>
+          ) : cache?.error ? (
+            <Alert type="error" message={cache.error} style={{ marginTop: 6 }} />
+          ) : !cache?.trades?.length ? (
+            <Typography.Paragraph type="secondary" style={{ margin: '6px 0 0', fontSize: 12.5 }}>
+              暂无成交记录。
+            </Typography.Paragraph>
+          ) : (
+            <Table
+              rowKey="id"
+              size="small"
+              columns={variantTradeColumns}
+              dataSource={cache.trades}
+              pagination={{ pageSize: 10, hideOnSinglePage: true, size: 'small' }}
+              scroll={{ x: 620 }}
+              style={{ marginTop: 6 }}
+            />
+          )}
+        </div>
+      </Space>
+    );
+  };
+
   return (
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
       <Card
@@ -367,7 +547,7 @@ export default function AblationPage({ version = 0 }) {
         )}
       </Card>
 
-      <Card size="small" title="组合对比">
+      <Card size="small" title="组合对比(点击行展开:说明 / 胜率 / 持仓 / 成交)">
         <Table
           rowKey="variant"
           size="small"
@@ -375,6 +555,12 @@ export default function AblationPage({ version = 0 }) {
           dataSource={tableRows}
           pagination={false}
           scroll={{ x: 860 }}
+          expandable={{
+            expandedRowRender: renderExpanded,
+            onExpand: (expanded, record) => {
+              if (expanded) loadVariantTrades(record.variant);
+            },
+          }}
         />
         <Typography.Paragraph type="secondary" style={{ fontSize: 13, margin: '12px 0 0' }}>
           每套影子组合与实盘并行记账、各自从初始资金起步,只关闭一层防线:若「无风控官」长期跑输实盘,

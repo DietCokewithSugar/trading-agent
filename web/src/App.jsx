@@ -267,7 +267,7 @@ function MainApp() {
         )}
         {tab === 'macro' && <MacroPage version={macroVersion} />}
         {tab === 'signals' && <SignalStatsPage />}
-        {tab === 'ablation' && <AblationPage version={macroVersion} />}
+        {tab === 'ablation' && <AblationPage version={macroVersion} onSymbolClick={setActiveSymbol} />}
       </main>
 
       <footer className="footer">模拟交易,不构成投资建议</footer>

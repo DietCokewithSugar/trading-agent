@@ -12,7 +12,7 @@ import { getEffectiveRegime } from '../services/macroRegime.js';
 import { listRecentMacroEvents } from '../services/macroService.js';
 import { getBlackoutState, getUpcomingEvents } from '../services/macroCalendar.js';
 import { countByStatus, listPoolPreview } from '../services/candidateStore.js';
-import { getShadowOverview } from '../services/shadowPortfolio.js';
+import { getShadowOverview, getShadowTrades } from '../services/shadowPortfolio.js';
 import { safeTokenEqual, createAuthRateLimiter } from '../services/authGuard.js';
 import { clusterAnalyses } from '../services/newsDedup.js';
 
@@ -248,6 +248,19 @@ router.get(
   })
 );
 
+/** 单个影子变体的成交流水(消融实验组合展开详情懒加载);未启用返回 available:false */
+router.get(
+  '/shadow/:variant/trades',
+  asyncHandler(async (req, res) => {
+    if (!config.enableShadow) return res.json({ available: false });
+    const variant = String(req.params.variant || '');
+    const limit = Number(req.query.limit);
+    const trades = await getShadowTrades({ variant, limit });
+    if (trades === null) return res.json({ available: false });
+    res.json({ available: true, variant, trades });
+  })
+);
+
 /** 单只股票详情:报价(含盘前盘后)、持仓、相关分析、交易历史 */
 router.get(
   '/symbol/:symbol',
@@ -265,7 +278,8 @@ router.get(
         .select('*, news_articles(title, url, published_at, publisher, source)')
         .eq('symbol', symbol)
         .order('created_at', { ascending: false })
-        .limit(50),
+        // 热力图按天展示分析分布,50 条只够 ~3 天;放宽到 300 条仍是一次性轻量查询
+        .limit(300),
       db
         .from('trades')
         .select('*')
