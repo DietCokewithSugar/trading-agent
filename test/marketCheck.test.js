@@ -30,58 +30,20 @@ test('classifyMarketTrend:SPY 趋势 × VIX 四象分类', () => {
   assert.equal(classifyMarketTrend({ spyPrice: 100, sma20: 0, cfg }), null);
 });
 
-test('intersectRegime:钳制 risk_on 放大;市场看多绝不放松避险', () => {
+test('intersectRegime:只钳制 risk_on 放大,避险方向永不放松', () => {
   const onCheck = { available: true, trend: 'risk_on' };
+  const offCheck = { available: true, trend: 'risk_off' };
   const neutralCheck = { available: true, trend: 'neutral' };
   const unavailable = { available: false, trend: null };
-  const F = { clamped: false, marketStress: false, confirmed: false };
   // 新闻 risk_on:核验同向才放行
-  assert.deepEqual(intersectRegime('risk_on', onCheck), { regime: 'risk_on', ...F });
-  assert.deepEqual(intersectRegime('risk_on', neutralCheck), { regime: 'neutral', ...F, clamped: true });
+  assert.deepEqual(intersectRegime('risk_on', onCheck), { regime: 'risk_on', clamped: false });
+  assert.deepEqual(intersectRegime('risk_on', neutralCheck), { regime: 'neutral', clamped: true });
+  assert.deepEqual(intersectRegime('risk_on', offCheck), { regime: 'neutral', clamped: true });
   // 核验不可用:完全透传(fail-open)
-  assert.deepEqual(intersectRegime('risk_on', unavailable), { regime: 'risk_on', ...F });
-  assert.deepEqual(intersectRegime('risk_on', null), { regime: 'risk_on', ...F });
-  // 市场看多:既有的 neutral/risk_off 原样通过,绝不放松
-  assert.deepEqual(intersectRegime('risk_off', onCheck), { regime: 'risk_off', ...F });
-  assert.deepEqual(intersectRegime('macro_shock', onCheck), { regime: 'macro_shock', ...F });
-  assert.deepEqual(intersectRegime('neutral', onCheck), { regime: 'neutral', ...F });
-});
-
-test('intersectRegime:市场避险只收紧——抬到 risk_off 参数(market_stress),且对 risk_on 同时钳制', () => {
-  const offCheck = { available: true, trend: 'risk_off' };
-  const F = { clamped: false, marketStress: false, confirmed: false };
-  // 情况 D:新闻只是 neutral,但 SPY 跌破/VIX 恐慌 → 执行参数收紧至 risk_off
-  assert.deepEqual(intersectRegime('neutral', offCheck), { regime: 'risk_off', ...F, marketStress: true });
-  // 新闻 risk_on + 市场避险:先钳制放大,再因市场压力收紧到 risk_off
-  assert.deepEqual(intersectRegime('risk_on', offCheck), {
-    regime: 'risk_off',
-    clamped: true,
-    marketStress: true,
-    confirmed: false,
-  });
-});
-
-test('intersectRegime:新闻避险 + 市场同向 → confirmed(印证),不重复收紧也不算 stress', () => {
-  const offCheck = { available: true, trend: 'risk_off' };
-  // 新闻已 risk_off,市场同向:印证,参数仍 risk_off(未被抬高,不算 market_stress)
-  assert.deepEqual(intersectRegime('risk_off', offCheck), {
-    regime: 'risk_off',
-    clamped: false,
-    marketStress: false,
-    confirmed: true,
-  });
-  // macro_shock + 市场避险:已最紧,仅标记印证
-  assert.deepEqual(intersectRegime('macro_shock', offCheck), {
-    regime: 'macro_shock',
-    clamped: false,
-    marketStress: false,
-    confirmed: true,
-  });
-  // macro_shock + 市场不可用:不印证(无核验)
-  assert.deepEqual(intersectRegime('macro_shock', { available: false, trend: null }), {
-    regime: 'macro_shock',
-    clamped: false,
-    marketStress: false,
-    confirmed: false,
-  });
+  assert.deepEqual(intersectRegime('risk_on', unavailable), { regime: 'risk_on', clamped: false });
+  assert.deepEqual(intersectRegime('risk_on', null), { regime: 'risk_on', clamped: false });
+  // 避险/冲击/中性原样通过——即使核验看多也不放松
+  assert.deepEqual(intersectRegime('risk_off', onCheck), { regime: 'risk_off', clamped: false });
+  assert.deepEqual(intersectRegime('macro_shock', onCheck), { regime: 'macro_shock', clamped: false });
+  assert.deepEqual(intersectRegime('neutral', onCheck), { regime: 'neutral', clamped: false });
 });

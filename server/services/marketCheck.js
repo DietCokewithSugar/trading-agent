@@ -1,8 +1,7 @@
 // 确定性市场环境核验:SPY 相对 20 日均线的趋势 + VIX 水平,推出一个与新闻无关的
 // regime,与新闻推导的 regime 取交集——只有两者同向 risk_on 时才放行仓位放大,
 // 减少对 LLM 读标题的单一依赖,成本几乎为零(每轮两个报价 + 一次缓存日线)。
-// 方向性约定:核验只收紧、从不放松——市场避险可把执行参数下限抬到 risk_off(市场压力),
-// 但市场看多绝不放松新闻的 risk_off/macro_shock。
+// 方向性约定:核验只钳制放大、从不放松——risk_off/macro_shock 原样通过。
 // fail-open:VIX 不可用(套餐不含指数)退化为仅 SPY 趋势;SPY 数据不可用则核验
 // 整体停用(available=false,交集透传),绝不影响交易主链路。
 // 纯函数(sma / classifyMarketTrend / intersectRegime)与抓取薄层分离,前者可单测。
@@ -44,42 +43,16 @@ export function classifyMarketTrend({ spyPrice, sma20, vix = null, cfg = {} } = 
 }
 
 /**
- * 新闻 regime 与确定性核验取交集(纯函数)。方向性约定:只收紧、绝不放松。
- *  - 钳制(clamped):新闻 risk_on 但核验可用且不同向 → 砍到 neutral,不放大;
- *  - 市场压力(marketStress):核验避险(SPY 跌破/VIX 恐慌)→ 把执行参数下限抬到 risk_off,
- *    即使新闻只是 neutral/risk_on(情况 D:SPY 大跌但无明确宏观新闻,作为独立风控输入收紧);
- *  - 印证(confirmed):新闻已 risk_off/macro_shock 且核验同向避险 → 数据/新闻得到市场印证;
- *    印证不改参数(已最紧),但让 getEffectiveRegime 在新闻事件衰减后仍维持收紧(延长持续)。
- * 市场看多绝不放松新闻的 neutral/risk_off(避免市场 melt-up 误放行避险)。
- * 核验不可用时完全透传(fail-open)。返回 { regime, clamped, marketStress, confirmed }。
+ * 新闻 regime 与确定性核验取交集(纯函数):
+ * 仅当新闻 regime 为 risk_on 且核验可用但不同向时,降级按 neutral 参数执行;
+ * 其余(neutral/risk_off/macro_shock、核验不可用)原样透传——避险方向永不放松。
+ * 返回 { regime, clamped }。
  */
-const REGIME_ORDER = { risk_on: 0, neutral: 1, risk_off: 2, macro_shock: 3 };
-
 export function intersectRegime(newsRegime, marketCheck) {
-  const result = { regime: newsRegime, clamped: false, marketStress: false, confirmed: false };
-  const available = Boolean(marketCheck?.available && marketCheck.trend);
-  const trend = available ? marketCheck.trend : null;
-  // macro_shock 已是最紧(0 预算),市场无法更紧;同向避险仅标记印证(展示用)
-  if (newsRegime === 'macro_shock') {
-    result.confirmed = trend === 'risk_off';
-    return result;
-  }
-  if (!available) return result;
-  let effective = newsRegime;
-  // 规则一(既有):新闻 risk_on 但核验不同向 → 砍到 neutral,不放大
-  if (newsRegime === 'risk_on' && trend !== 'risk_on') {
-    effective = 'neutral';
-    result.clamped = true;
-  }
-  // 规则二(新):核验避险 → 执行参数下限抬到 risk_off(只收紧、绝不放松)
-  if (trend === 'risk_off' && REGIME_ORDER[effective] < REGIME_ORDER.risk_off) {
-    effective = 'risk_off';
-    if (REGIME_ORDER[newsRegime] < REGIME_ORDER.risk_off) result.marketStress = true;
-  }
-  // 印证:新闻已 risk_off 且核验同向避险
-  if (newsRegime === 'risk_off' && trend === 'risk_off') result.confirmed = true;
-  result.regime = effective;
-  return result;
+  if (newsRegime !== 'risk_on') return { regime: newsRegime, clamped: false };
+  if (!marketCheck?.available || !marketCheck.trend) return { regime: newsRegime, clamped: false };
+  if (marketCheck.trend === 'risk_on') return { regime: newsRegime, clamped: false };
+  return { regime: 'neutral', clamped: true };
 }
 
 // ── 抓取薄层(进程内缓存,调度器周期刷新)──

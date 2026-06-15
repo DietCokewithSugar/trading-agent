@@ -11,7 +11,6 @@ import { isHalted, setHalted } from './halt.js';
 import { resetMetrics } from './metrics.js';
 import { resetRiskControlState } from './riskControls.js';
 import { resetRegimeState } from './macroRegime.js';
-import { resetFactsState } from './macroFacts.js';
 import { resetShadowState, initShadowPortfolios, drainShadowQueue } from './shadowPortfolio.js';
 
 /** admin_reset_data RPC 尚未部署(未执行 005 迁移)时的判定 */
@@ -50,7 +49,6 @@ async function legacyReset(db) {
     // 候选池 / 宏观事件(014 迁移新增,缺表时容忍);candidate_signals 引用 trades,先删
     { table: 'candidate_signals', filter: (q) => q.neq('id', 0), optional: true },
     { table: 'macro_events', filter: (q) => q.neq('id', 0), optional: true },
-    { table: 'macro_facts', filter: (q) => q.neq('id', 0), optional: true },
     // 决策回放(018 迁移新增,缺表时容忍);引用 trades/news,先删
     { table: 'trade_decisions', filter: (q) => q.neq('id', 0), optional: true },
     // 影子组合(017 迁移新增,缺表时容忍);positions 引用 portfolios,先删
@@ -139,7 +137,6 @@ export async function resetAllData() {
           ['cycle_runs', (q) => q.not('run_id', 'is', null)],
           ['candidate_signals', (q) => q.neq('id', 0)],
           ['macro_events', (q) => q.neq('id', 0)],
-          ['macro_facts', (q) => q.neq('id', 0)],
           ['trade_decisions', (q) => q.neq('id', 0)],
           ['shadow_trades', (q) => q.neq('id', 0)],
           ['shadow_snapshots', (q) => q.neq('id', 0)],
@@ -167,7 +164,6 @@ export async function resetAllData() {
     resetMetrics();
     resetRiskControlState();
     resetRegimeState();
-    resetFactsState();
     cycleStatus.lastResult = null;
     cycleStatus.lastError = null;
     cycleStatus.lastRunAt = null;

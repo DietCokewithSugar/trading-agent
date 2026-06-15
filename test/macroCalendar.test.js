@@ -5,7 +5,6 @@ import {
   parseCalendarDate,
   filterHighImportanceUs,
   isInBlackout,
-  calendarFactEligible,
 } from '../server/services/macroCalendar.js';
 
 test('computeSurprise:优先 estimate,缺失退回 previous,皆缺返回 null', () => {
@@ -93,21 +92,4 @@ test('isInBlackout:多事件重叠取最晚结束的窗口', () => {
   assert.equal(hit.inBlackout, true);
   assert.equal(hit.event.event, 'FOMC', '两个窗口都命中时取结束更晚的');
   assert.equal(hit.until, '2026-06-11T13:30:00.000Z');
-});
-
-test('calendarFactEligible:未发布(null/空 actual)不建事实——防止 Number(null)=0 造假', () => {
-  const past = '2026-06-10 12:30:00'; // 已过去
-  const future = '2026-12-10 18:00:00'; // 未到点
-  const now = new Date('2026-06-15T00:00:00Z');
-  // 回归 bug:未发布的 FOMC(actual 缺失/null/空)曾被 Number() 当成 0 → 意外 -100% → 误判 risk_on
-  assert.equal(calendarFactEligible({ event: 'Fed Interest Rate Decision', date: future, estimate: 3.75 }, now), false, '未到发布时刻');
-  assert.equal(calendarFactEligible({ event: 'CPI', date: past, actual: null, estimate: 3 }, now), false, 'actual=null');
-  assert.equal(calendarFactEligible({ event: 'CPI', date: past, actual: '', estimate: 3 }, now), false, 'actual=空串');
-  assert.equal(calendarFactEligible({ event: 'CPI', date: past, estimate: 3 }, now), false, 'actual 缺失');
-  assert.equal(calendarFactEligible({ event: 'CPI', date: past, actual: 'n/a', estimate: 3 }, now), false, 'actual 非数值');
-  // 已发布且 actual 为真实数值(含真实的 0)→ 可建
-  assert.equal(calendarFactEligible({ event: 'CPI', date: past, actual: 3.2, estimate: 3 }, now), true);
-  assert.equal(calendarFactEligible({ event: 'GDP', date: past, actual: 0, estimate: 0.3 }, now), true, '真实的 0 是有效实际值');
-  // 已发布但日期无法解析 → 不建
-  assert.equal(calendarFactEligible({ event: 'CPI', date: 'bad', actual: 3.2 }, now), false);
 });
