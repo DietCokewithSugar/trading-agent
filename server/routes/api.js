@@ -147,6 +147,9 @@ router.get(
         updated_at: regime.updated_at,
         effective_regime: regime.effective_regime,
         clamped: regime.clamped,
+        // 市场确认层(SPY/VIX):market_stress=市场避险收紧执行参数;confirmed=新闻避险获市场印证
+        market_stress: regime.market_stress || false,
+        confirmed: regime.confirmed || false,
         params: {
           daily_buy_budget: params.dailyBuyBudget,
           min_cash_reserve: params.minCashReserve,
