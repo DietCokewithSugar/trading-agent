@@ -6,6 +6,7 @@ import {
   mergeMacroConfidence,
   eventWeight,
   shockCorroborated,
+  factContributions,
 } from '../server/services/macroRegime.js';
 
 const NOW = new Date('2026-06-11T15:00:00Z');
@@ -198,6 +199,52 @@ test('mergeMacroConfidence:较大值小幅增信,封顶 0.95,非法值兜底', (
   assert.equal(mergeMacroConfidence(0.8, 0.8), 0.84);
   assert.equal(mergeMacroConfidence(0.95, 0.95), 0.95, '绝对封顶 0.95');
   assert.equal(mergeMacroConfidence(null, NaN), Number((0.5 * 1.05).toFixed(3)), '非法值兜底 0.5');
+});
+
+test('eventWeight:意外幅度乘数(surprise_score)放大/压缩权重,缺失为 1,clamp [0.5,1.5]', () => {
+  const nowTs = NOW.getTime();
+  const base = ev();
+  const big = ev({ surprise_score: 1.5 });
+  const small = ev({ surprise_score: 0.5 });
+  const wild = ev({ surprise_score: 9 }); // 异常值被钳到 1.5
+  const wBase = eventWeight(base, nowTs, 24);
+  assert.ok(Math.abs(eventWeight(big, nowTs, 24) - wBase * 1.5) < 1e-9, '显著超预期权重 ×1.5');
+  assert.ok(Math.abs(eventWeight(small, nowTs, 24) - wBase * 0.5) < 1e-9, '符合预期权重 ×0.5');
+  assert.ok(Math.abs(eventWeight(wild, nowTs, 24) - wBase * 1.5) < 1e-9, '上限 1.5');
+});
+
+test('shockCorroborated:经济日历实际值(has_actual)自身即硬证据,直接放行', () => {
+  // 日历独建事实:无新闻报道(source_count 0)也算佐证
+  const calendarFact = { has_actual: true, source_count: 0, source_domains: [] };
+  assert.equal(shockCorroborated(calendarFact, 2), true);
+  // source_count 与 article_count 同义
+  assert.equal(shockCorroborated({ source_count: 2, source_domains: [] }, 2), true);
+  assert.equal(shockCorroborated({ source_count: 1, source_domains: [] }, 2), false);
+});
+
+test('aggregateRegime:日历独建的一档高置信 risk_off 事实(has_actual)触发 macro_shock', () => {
+  const calendarFact = ev({ has_actual: true, source_count: 0, source_domains: [] });
+  delete calendarFact.article_count;
+  assert.equal(aggregateRegime({ events: [calendarFact], now: NOW }).regime, 'macro_shock');
+});
+
+test('factContributions:各项之和≈riskScore,方向符号正确,按绝对值降序', () => {
+  const events = [
+    ev({ event_type: 'CPI', macro_direction: 'risk_off', market_impact_tier: 1, confidence: 0.9, id: 1, event_key: 'CPI_2026-06' }),
+    ev({ event_type: 'energy', macro_direction: 'risk_on', market_impact_tier: 3, confidence: 0.6, id: 2, event_key: 'energy_x' }),
+  ];
+  const score = aggregateRegime({ events, now: NOW }).riskScore;
+  const contribs = factContributions(events, NOW);
+  const sum = contribs.reduce((a, c) => a + c.contribution, 0);
+  assert.ok(Math.abs(sum - score) < 0.01, `贡献之和 ${sum} ≈ riskScore ${score}`);
+  // risk_off 贡献为负、risk_on 为正
+  const cpi = contribs.find((c) => c.id === 1);
+  const energy = contribs.find((c) => c.id === 2);
+  assert.ok(cpi.contribution < 0, 'risk_off 贡献为负');
+  assert.ok(energy.contribution > 0, 'risk_on 贡献为正');
+  assert.equal(cpi.event_key, 'CPI_2026-06');
+  // 按绝对贡献降序:一档 CPI 应排在三档 energy 之前
+  assert.ok(Math.abs(contribs[0].contribution) >= Math.abs(contribs[1].contribution));
 });
 
 test('sectorMultiplier:利好放大/利空压缩,clamp 区间,无命中为 1', () => {
