@@ -2,7 +2,6 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { Alert, Button, Card, Col, Empty, Row, Segmented, Space, Spin, Statistic, Table, Typography } from 'antd';
 
 import { api, fmtTime } from '../api.js';
-import { CHART } from '../theme.js';
 
 const HORIZONS = [
   { key: '1h', label: '1 小时' },
@@ -34,7 +33,7 @@ function HitCell({ value, lo, hi }) {
     <span className="num">
       <span className={tone}>{value.toFixed(0)}%</span>
       {lo !== null && lo !== undefined && (
-        <div style={{ fontSize: 11, color: CHART.axis, lineHeight: 1.2 }}>
+        <div style={{ fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.2 }}>
           {lo.toFixed(0)}~{hi.toFixed(0)}
         </div>
       )}

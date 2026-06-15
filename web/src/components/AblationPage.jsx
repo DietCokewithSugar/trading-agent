@@ -32,7 +32,8 @@ import {
   SHADOW_VARIANT_DESCRIPTIONS,
   TRIGGER_LABELS,
 } from '../api.js';
-import { CHART, PIE_COLORS, COLOR_UP, COLOR_DOWN } from '../theme.js';
+import { getChart, getPnl, ACCENT_PRIMARY } from '../theme.js';
+import { useThemeMode } from '../theme-context.jsx';
 
 const RANGES = [
   { key: '1d', label: '1天', hours: 24 },
@@ -41,16 +42,19 @@ const RANGES = [
   { key: 'all', label: '一年', hours: 24 * 366 },
 ];
 
-// 各序列的识别色(取自主题调色板;实盘用主色,基准用灰)
-const VARIANT_COLORS = {
-  actual: PIE_COLORS[0], // 蓝
-  no_risk_officer: PIE_COLORS[4], // 紫
-  no_macro_filter: PIE_COLORS[3], // 金
-  immediate_trade: PIE_COLORS[5], // 青
-  equal_weight: PIE_COLORS[6], // 品红
-  spy_benchmark: CHART.benchmark,
-  cash: CHART.reference,
-};
+// 各变体的识别色:实盘用单色主色,基准/现金用灰;4 个消融变体用克制的分类色
+// (变体身份属"颜色编码数据"的正当用法,避免与盈亏绿/红撞色)。
+function buildVariantColors(mode, CHART) {
+  return {
+    actual: mode === 'light' ? ACCENT_PRIMARY.light : ACCENT_PRIMARY.dark,
+    no_risk_officer: '#7C6FF0', // 紫
+    no_macro_filter: '#D4A843', // 琥珀
+    immediate_trade: '#3FB7C4', // 青
+    equal_weight: '#E0719B', // 玫红
+    spy_benchmark: CHART.benchmark,
+    cash: CHART.reference,
+  };
+}
 
 const VARIANT_ORDER = [
   'actual',
@@ -75,6 +79,10 @@ function pctClass(v) {
  */
 // version:App 在 SSE macro 事件/兜底轮询/重置后递增,触发重拉(否则重置后停留在旧数据)
 export default function AblationPage({ version = 0 }) {
+  const { mode } = useThemeMode();
+  const CHART = getChart(mode);
+  const PNL = getPnl(mode);
+  const VARIANT_COLORS = useMemo(() => buildVariantColors(mode, CHART), [mode]); // eslint-disable-line react-hooks/exhaustive-deps
   const [rangeKey, setRangeKey] = useState('1w');
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
@@ -114,7 +122,7 @@ export default function AblationPage({ version = 0 }) {
         })),
       };
     });
-  }, [data]);
+  }, [data, VARIANT_COLORS]);
 
   const tableRows = useMemo(() => {
     if (!data?.available) return [];
@@ -330,7 +338,7 @@ export default function AblationPage({ version = 0 }) {
                 }}
                 labelFormatter={(t) => new Date(t).toLocaleString('zh-CN')}
                 formatter={(value, name) => [
-                  <span key="v" style={{ color: value >= 0 ? COLOR_UP : COLOR_DOWN }}>
+                  <span key="v" style={{ color: value >= 0 ? PNL.up : PNL.down }}>
                     {fmtPercent(value)}
                   </span>,
                   name,

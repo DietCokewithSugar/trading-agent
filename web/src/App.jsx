@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { Alert, App as AntApp, Badge, Card, Col, Row, Statistic, Tabs, Tag, Typography } from 'antd';
+import { Alert, App as AntApp, Badge, Segmented, Tabs, Tag, Typography } from 'antd';
 import { api, fmtMoney, fmtNum, fmtPercent, SESSION_LABELS, REGIME_LABELS } from './api.js';
+import { useThemeMode } from './theme-context.jsx';
 import Dashboard from './components/Dashboard.jsx';
 import NewsFeed from './components/NewsFeed.jsx';
 import TradesPage from './components/TradesPage.jsx';
@@ -20,7 +21,21 @@ const TABS = [
   { key: 'ablation', label: '消融实验' },
 ];
 
-const SESSION_TAG_COLORS = { pre: 'orange', regular: 'blue', post: 'orange', closed: 'default' };
+// 深浅主题切换控件(ALL-CAPS 等宽,无 emoji)
+function ThemeToggle() {
+  const { mode, setMode } = useThemeMode();
+  return (
+    <Segmented
+      size="small"
+      value={mode}
+      onChange={setMode}
+      options={[
+        { label: 'DARK', value: 'dark' },
+        { label: 'LIGHT', value: 'light' },
+      ]}
+    />
+  );
+}
 
 // SSE 断线时的兜底轮询间隔
 const FALLBACK_REFRESH_MS = 60_000;
@@ -173,17 +188,14 @@ function MainApp() {
   const pnl = portfolio?.pnl ?? 0;
   const session = portfolio?.market_session;
 
-  const headerStats = portfolio
+  // 次要指标(英雄区右侧):现金 / 持仓 / 盈亏
+  const heroMetrics = portfolio
     ? [
-        { title: '总资产', render: <span className="num">{fmtMoney(portfolio.total_value)}</span> },
-        { title: '可用现金', render: <span className="num">{fmtMoney(portfolio.cash)}</span> },
+        { label: '可用现金 / CASH', value: <span className="num">{fmtMoney(portfolio.cash)}</span> },
+        { label: '持仓市值 / HOLDINGS', value: <span className="num">{fmtMoney(portfolio.positions_value)}</span> },
         {
-          title: '持仓市值',
-          render: <span className="num">{fmtMoney(portfolio.positions_value)}</span>,
-        },
-        {
-          title: '总盈亏',
-          render: (
+          label: '总盈亏 / P&L',
+          value: (
             <span className={`num ${pnl >= 0 ? 'up' : 'down'}`}>
               {fmtMoney(pnl)} ({fmtPercent(portfolio.pnl_percent)})
             </span>
@@ -202,7 +214,7 @@ function MainApp() {
               投资策略说明
             </Typography.Link>
             {session && (
-              <Tag color={SESSION_TAG_COLORS[session] || 'default'} style={{ marginRight: 0 }}>
+              <Tag bordered style={{ marginRight: 0 }} className="label-caps">
                 {SESSION_LABELS[session]}
               </Tag>
             )}
@@ -211,18 +223,26 @@ function MainApp() {
               text={live ? '实时' : '轮询'}
               title={live ? '已建立 SSE 实时连接' : '实时连接断开,使用兜底轮询'}
             />
+            <ThemeToggle />
           </div>
         </div>
         {portfolio && (
-          <Row gutter={[12, 12]}>
-            {headerStats.map((s) => (
-              <Col xs={12} md={6} key={s.title}>
-                <Card size="small">
-                  <Statistic title={s.title} valueRender={() => s.render} />
-                </Card>
-              </Col>
-            ))}
-          </Row>
+          <div className="hero dot-grid">
+            <div className="hero__primary">
+              <div className="label-caps" style={{ marginBottom: 8 }}>
+                总资产 / TOTAL ASSETS
+              </div>
+              <div className="display-num">{fmtMoney(portfolio.total_value)}</div>
+            </div>
+            <div className="hero__secondary">
+              {heroMetrics.map((m) => (
+                <div className="hero__metric" key={m.label}>
+                  <span className="label-caps">{m.label}</span>
+                  <span style={{ fontSize: 16 }}>{m.value}</span>
+                </div>
+              ))}
+            </div>
+          </div>
         )}
         {error && <Alert type="error" banner message={error} style={{ marginTop: 12 }} />}
       </header>
