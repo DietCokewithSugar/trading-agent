@@ -2,6 +2,7 @@ import { supabase } from '../db.js';
 import { config } from '../config.js';
 import { matchEvent } from './deepseek.js';
 import { extractDomain } from './credibility.js';
+import { findDuplicateEvent } from './newsDedup.js';
 
 /**
  * 新闻事件溯源与去重。
@@ -40,12 +41,21 @@ export async function resolveEvent(article, analysisRow) {
     if (error) throw new Error(error.message);
 
     if (events?.length) {
-      const match = await matchEvent({
-        symbol,
-        eventSummary: summary,
-        articleTitle: article.title,
-        recentEvents: events,
-      });
+      // 确定性近似重复兜底:同源新闻稿常被一字不差地反复推送,LLM 归并偶尔漏判。
+      // 标题/事件归纳的相似度达标且同方向时,直接判为该事件的重复,跳过 LLM(省一次调用且不会漏判)。
+      const det = findDuplicateEvent(
+        { title: article.title, summary, sentiment: analysisRow.sentiment },
+        events,
+        config.eventNearDupSimilarity
+      );
+      const match = det
+        ? { duplicateOf: det.event.id, reason: `近似重复(相似度 ${det.similarity.toFixed(2)})` }
+        : await matchEvent({
+            symbol,
+            eventSummary: summary,
+            articleTitle: article.title,
+            recentEvents: events,
+          });
       const event = match.duplicateOf ? events.find((e) => e.id === match.duplicateOf) : null;
       if (event) {
         // 独立信源判定:仅在事件已记录过信源域名时才可能成立(009 迁移未执行时

@@ -71,6 +71,9 @@ export const config = {
   minOrderAmount: 50,
   // 事件去重窗口(小时):同一事件的多渠道报道在该窗口内归并,只触发一次交易
   eventDedupHours: num(process.env.EVENT_DEDUP_HOURS, 72),
+  // 近似重复判定的相似度阈值(0~1):标题/事件归纳的 Jaccard 相似度 ≥ 该值即判为同一事件,
+  // 作为 LLM 事件归并的确定性兜底(同源新闻稿易绕过 LLM 去重)。取高更稳,过度合并只会少交易
+  eventNearDupSimilarity: Math.min(num0(process.env.EVENT_NEAR_DUP_SIMILARITY, 0.8), 1),
   // 综合置信度门槛(0~1):来源可信度 × 分析置信度 × 时效 × 事件档位 低于该值的信号
   // 不立即交易,挂起等待独立信源的交叉确认;设为 0 可关闭该门槛
   minFinalConfidence: Math.min(num0(process.env.MIN_FINAL_CONFIDENCE, 0.35), 1),

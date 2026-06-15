@@ -14,6 +14,7 @@ import { getBlackoutState, getUpcomingEvents } from '../services/macroCalendar.j
 import { countByStatus, listPoolPreview } from '../services/candidateStore.js';
 import { getShadowOverview } from '../services/shadowPortfolio.js';
 import { safeTokenEqual, createAuthRateLimiter } from '../services/authGuard.js';
+import { clusterAnalyses } from '../services/newsDedup.js';
 
 const router = Router();
 
@@ -261,7 +262,7 @@ router.get(
       db.from('positions').select('*').eq('symbol', symbol).maybeSingle(),
       db
         .from('news_analyses')
-        .select('*, news_articles(title, url, published_at)')
+        .select('*, news_articles(title, url, published_at, publisher, source)')
         .eq('symbol', symbol)
         .order('created_at', { ascending: false })
         .limit(50),
@@ -272,11 +273,22 @@ router.get(
         .order('created_at', { ascending: false })
         .limit(50),
     ]);
+    // 同一底层事件的近似重复报道聚成一条(先按 event_id,再按标题/事件归纳相似度兜底),
+    // 每条带报道数与来源列表,展开见 members
+    const analyses = clusterAnalyses(
+      analysesRes.data || [],
+      config.eventNearDupSimilarity
+    ).map(({ representative, members, article_count, sources }) => ({
+      ...representative,
+      article_count,
+      sources,
+      members,
+    }));
     res.json({
       symbol,
       quote,
       position: posRes.data || null,
-      analyses: analysesRes.data || [],
+      analyses,
       trades: tradesRes.data || [],
     });
   })
