@@ -122,19 +122,36 @@ function calendarTierFromSurprise(surpriseScore) {
 }
 
 /**
+ * 该日历行是否已发布、可建事实(纯函数)。两道关键关卡:
+ *  1) actual 必须是真实数值——FMP 对未发布事件返回 null/""/缺失,而 Number(null)/Number("")
+ *     都等于 0(finite),若用 Number().isFinite 判定会把"未发布"误当成"实际值 0",
+ *     从而给未来的 FOMC/CPI 凭空造出 actual=0、意外 -100% 的错误事实;故必须先排除 null/""。
+ *  2) 发布时刻必须已过去——未到点的事件没有 actual,即便字段被填 0 也不该建事实。
+ */
+export function calendarFactEligible(ev, now = Date.now()) {
+  const nowTs = now instanceof Date ? now.getTime() : Number(now);
+  const rawActual = ev?.actual;
+  if (rawActual == null || rawActual === '') return false; // 未发布:无实际值
+  if (!Number.isFinite(Number(rawActual))) return false;
+  const releaseTs = parseCalendarDate(ev?.date);
+  if (releaseTs == null || releaseTs > nowTs) return false; // 未到发布时刻
+  return true;
+}
+
+/**
  * 把已出实际值的周期性数据同步成宏观事实(020):按 event_key upsert,数值意外幅度
  * 确定性推出方向(CPI/PPI/PCE/FOMC),作为不依赖新闻的"数据事实层"。
  * macro_facts 表缺失则整体跳过(回退纯新闻事实/事件流)。
  */
 async function syncCalendarFacts(events) {
   if (isFactsTableMissing()) return;
+  const nowTs = Date.now();
   for (const ev of Array.isArray(events) ? events : []) {
-    const actual = Number(ev?.actual);
-    if (!Number.isFinite(actual)) continue; // 未发布/无实际值,不建事实
+    if (!calendarFactEligible(ev, nowTs)) continue; // 未发布 / 未到点 / actual 非数值
+    const actual = Number(ev.actual);
     const eventType = classifyCalendarEventType(ev.event);
     if (!eventType) continue; // 只为可确定性去重的周期性数据建事实
     const releaseTs = parseCalendarDate(ev.date);
-    if (releaseTs == null) continue;
     const eventKey = deriveEventKey(eventType, new Date(releaseTs));
     if (!eventKey) continue;
 
@@ -159,9 +176,10 @@ async function syncCalendarFacts(events) {
       // 数值已一致则跳过(每小时刷新避免无谓写入);否则回填数值
       if (existing.has_actual && Number(existing.actual) === actual) continue;
       const patch = { ...numeric };
-      // 仅在事实尚无方向(中性,无论日历独建还是新闻待解释)时,由数据意外确定方向;
-      // 新闻已委定方向时不覆盖,只更新数值与意外权重(数据 > 新闻仅限于"补位",不"夺权")
-      if (existing.macro_direction === 'neutral') {
+      // 日历独建的事实(source_count 0,新闻尚未参与)始终按最新意外重判方向——
+      // 这样修订值/早前误判能自愈;一旦有新闻 link 进来(source_count>0),
+      // 则不再覆盖新闻委定的方向,只补数值与意外权重(数据 > 新闻仅"补位"不"夺权")
+      if (existing.macro_direction === 'neutral' || (existing.source_count || 0) === 0) {
         patch.macro_direction = dir.macro_direction;
         patch.rates_signal = dir.rates_signal;
         patch.inflation_signal = dir.inflation_signal;
