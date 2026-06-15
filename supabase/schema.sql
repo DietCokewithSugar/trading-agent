@@ -188,41 +188,7 @@ create table if not exists macro_events (
 );
 create index if not exists idx_macro_events_created on macro_events (created_at desc);
 
--- 宏观事实层(020):把「宏观事件」而非「新闻文章」作为风险计量的唯一单位。
--- 一次数据发布(CPI_2026-05)无论被几篇新闻报道只贡献一次风险分;经济日历写数值事实,
--- 宏观新闻 link 到同一事实补充方向/解释。风险分自 macro_facts 聚合(020 未应用则回退 macro_events)。
-create table if not exists macro_facts (
-  id bigint generated always as identity primary key,
-  event_key text not null unique,                -- CPI_2026-05 / FOMC_2026-06 / geopolitics_2026-06-15_123
-  event_type text not null,
-  macro_direction text not null default 'neutral'
-    check (macro_direction in ('risk_on', 'risk_off', 'neutral')),
-  actual numeric,
-  estimate numeric,
-  previous numeric,
-  surprise numeric,                              -- 相对/绝对意外幅度
-  surprise_score numeric,                        -- 归一化意外强度 → eventWeight 乘数(缺省 1)
-  surprise_direction text check (surprise_direction in ('positive', 'negative', 'inline', 'unknown')),
-  rates_signal text check (rates_signal in ('hawkish', 'dovish', 'neutral')),
-  inflation_signal text check (inflation_signal in ('up', 'down', 'neutral')),
-  growth_signal text check (growth_signal in ('up', 'down', 'neutral')),
-  affected_sectors jsonb not null default '[]'::jsonb,
-  market_impact_tier smallint not null default 3 check (market_impact_tier between 1 and 3),
-  confidence numeric,
-  summary text,
-  has_actual boolean not null default false,     -- 经济日历实际值已出(硬证据,自带 shock 佐证)
-  release_time timestamptz,                       -- 日历计划/实际发布时刻
-  source_count integer not null default 0,       -- 关联新闻报道篇数(日历独建为 0)
-  source_domain text,
-  source_score numeric,
-  source_domains jsonb not null default '[]'::jsonb,
-  first_news_id bigint references news_articles(id) on delete set null,
-  created_at timestamptz not null default now(), -- 首次出现(时间衰减与有效期基准)
-  updated_at timestamptz not null default now()
-);
-create index if not exists idx_macro_facts_created on macro_facts (created_at desc);
-
--- 当前宏观状态(单行,id=1):由近 72 小时 macro_facts(回退 macro_events)时间衰减加权聚合得出
+-- 当前宏观状态(单行,id=1):由近 72 小时 macro_events 时间衰减加权聚合得出
 create table if not exists macro_state (
   id smallint primary key default 1 check (id = 1),
   regime text not null default 'neutral'
@@ -457,7 +423,6 @@ begin
     positions,
     cycle_runs,
     macro_events,
-    macro_facts,
     candidate_signals,
     shadow_portfolios,
     shadow_trades,
@@ -666,7 +631,6 @@ alter table cycle_runs enable row level security;
 -- trade_decisions 同理:完整 prompt 含组合明细等内部信息,启用 RLS 但不开放匿名读
 alter table trade_decisions enable row level security;
 alter table macro_events enable row level security;
-alter table macro_facts enable row level security;
 alter table macro_state enable row level security;
 alter table candidate_signals enable row level security;
 alter table shadow_portfolios enable row level security;
@@ -683,7 +647,6 @@ create policy "public read portfolio_snapshots" on portfolio_snapshots for selec
 create policy "public read news_events" on news_events for select using (true);
 create policy "public read pending_orders" on pending_orders for select using (true);
 create policy "public read macro_events" on macro_events for select using (true);
-create policy "public read macro_facts" on macro_facts for select using (true);
 create policy "public read macro_state" on macro_state for select using (true);
 create policy "public read candidate_signals" on candidate_signals for select using (true);
 create policy "public read shadow_portfolios" on shadow_portfolios for select using (true);

@@ -47,12 +47,6 @@ function RegimeCard({ regime, marketCheck }) {
         {regime.clamped && (
           <Tag color="orange">市场核验不同向,仓位放大已钳制为中性参数</Tag>
         )}
-        {regime.market_stress && (
-          <Tag color="orange">市场避险,执行参数已收紧至避险</Tag>
-        )}
-        {regime.confirmed && (
-          <Tag color="red">避险方向获市场印证</Tag>
-        )}
       </Space>
       <div style={{ marginBottom: 12, maxWidth: 320 }}>
         <SegmentedBar
@@ -189,16 +183,7 @@ function MacroEventsList({ events }) {
                 <Tag color={ev.market_impact_tier === 1 ? 'red' : ev.market_impact_tier === 2 ? 'orange' : 'default'}>
                   第{ev.market_impact_tier}档
                 </Tag>
-                {ev.has_actual && <Tag>实际 {ev.actual}{ev.surprise != null ? ` · 意外 ${(ev.surprise * 100).toFixed(1)}%` : ''}</Tag>}
-                {(() => {
-                  const reports = ev.source_count ?? ev.article_count ?? 0;
-                  return reports > 1 ? <Tag color="blue">×{reports} 篇报道</Tag> : null;
-                })()}
-                {ev.risk_contribution != null && Math.abs(ev.risk_contribution) >= 0.005 && (
-                  <Tag className={ev.risk_contribution >= 0 ? 'up' : 'down'} bordered={false}>
-                    贡献 {ev.risk_contribution >= 0 ? '+' : ''}{ev.risk_contribution.toFixed(2)}
-                  </Tag>
-                )}
+                {ev.article_count > 1 && <Tag color="blue">×{ev.article_count} 篇报道</Tag>}
                 {(ev.affected_sectors || []).map((s) => (
                   <Tag key={s.sector} color={SECTOR_DIR_COLORS[s.direction]}>
                     {s.sector}
@@ -278,9 +263,7 @@ export default function MacroPage({ version = 0 }) {
       </Row>
       <MacroEventsList events={data.events} />
       <Typography.Paragraph type="secondary" style={{ fontSize: 13, margin: 0 }}>
-        宏观环境以「事件」而非「报道篇数」为风险单位:一次数据发布(如 CPI)无论被几篇新闻报道只计一次贡献;
-        经济日历负责数值事实与意外幅度,宏观新闻负责方向与解释,二者汇入同一事件。风险分由近 72 小时的事件按档位、
-        意外幅度、置信度、来源可信度与时间衰减加权聚合:避险/冲击状态下收紧当日预算、
+        宏观环境由近 72 小时的宏观事件按档位、置信度与时间衰减加权聚合:避险/冲击状态下收紧当日预算、
         提高现金保留并压缩买入金额;利好信号统一进入买入候选池(见「交易记录」页),
         由资金分配器在盘中按分数高低分配资金——资金不足的高分信号会留池等待,
         而不是先到先得地被低分信号抢走。

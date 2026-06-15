@@ -8,7 +8,7 @@ import { getQuote } from '../services/fmp.js';
 import { getStats, getPerformance } from '../services/statsService.js';
 import { getSignalStats } from '../services/signalStats.js';
 import { listPendingOrders } from '../services/openQueue.js';
-import { getEffectiveRegime, factContributions } from '../services/macroRegime.js';
+import { getEffectiveRegime } from '../services/macroRegime.js';
 import { listRecentMacroEvents } from '../services/macroService.js';
 import { getBlackoutState, getUpcomingEvents } from '../services/macroCalendar.js';
 import { countByStatus, listPoolPreview } from '../services/candidateStore.js';
@@ -126,14 +126,6 @@ router.get(
     const events = await listRecentMacroEvents(config.macroEventValidityHours, 20).catch(
       () => null
     );
-    // 每个事件对风险分的带符号贡献(后台展示"为什么现在是 risk_off")
-    const contributions = new Map(
-      events
-        ? factContributions(events, new Date(), {
-            validityHours: config.macroEventValidityHours,
-          }).map((c) => [c.id, c.contribution])
-        : []
-    );
     const blackout = getBlackoutState();
     res.json({
       available: events !== null,
@@ -147,9 +139,6 @@ router.get(
         updated_at: regime.updated_at,
         effective_regime: regime.effective_regime,
         clamped: regime.clamped,
-        // 市场确认层(SPY/VIX):market_stress=市场避险收紧执行参数;confirmed=新闻避险获市场印证
-        market_stress: regime.market_stress || false,
-        confirmed: regime.confirmed || false,
         params: {
           daily_buy_budget: params.dailyBuyBudget,
           min_cash_reserve: params.minCashReserve,
@@ -167,11 +156,7 @@ router.get(
         vix: regime.market_check?.vix ?? null,
         fetched_at: regime.market_check?.fetchedAt ?? null,
       },
-      events: (events || []).map((ev) => ({
-        ...ev,
-        // 事实层(020)字段;事件流回退时这些为 undefined,前端按存在性渲染
-        risk_contribution: contributions.has(ev.id) ? contributions.get(ev.id) : null,
-      })),
+      events: events || [],
       calendar: {
         available: blackout.available,
         blackout: {

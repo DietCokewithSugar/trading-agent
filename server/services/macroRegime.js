@@ -22,13 +22,7 @@ export function eventWeight(event, nowTs, halfLifeHours) {
   const src = Number.isFinite(Number(event.source_score))
     ? Math.min(Math.max(Number(event.source_score), 0.4), 1)
     : 0.7;
-  // 意外幅度乘数(020 事实层:macroFacts.surpriseWeight 在落库时算好存入 surprise_score)。
-  // 超预期的数据权重更大、符合预期略降;缺失(纯新闻事件 / 020 之前的行)按 1 中性。
-  // clamp [0.5, 1.5] 防止异常值放大;事件本身的方向/档位仍是主导。
-  const surpriseMult = Number.isFinite(Number(event.surprise_score))
-    ? Math.min(Math.max(Number(event.surprise_score), 0.5), 1.5)
-    : 1;
-  return tierWeight * conf * src * surpriseMult * Math.exp(-ageHours / halfLifeHours);
+  return tierWeight * conf * src * Math.exp(-ageHours / halfLifeHours);
 }
 
 /**
@@ -40,13 +34,10 @@ export function eventWeight(event, nowTs, halfLifeHours) {
  */
 export function shockCorroborated(event, minReports = 2) {
   if (!(minReports > 1)) return true;
-  // 经济日历实际值(020 事实层)是已发布的硬数据,自身即最强佐证,直接放行
-  if (event?.has_actual === true) return true;
-  // 事实层 source_count 与事件流 article_count 同义,两者都认
-  const hasCount = 'article_count' in (event || {}) || 'source_count' in (event || {});
+  const hasCount = 'article_count' in (event || {});
   const hasDomains = 'source_domains' in (event || {});
   if (!hasCount && !hasDomains) return true;
-  const reports = Number(event.article_count ?? event.source_count) || 1;
+  const reports = Number(event.article_count) || 1;
   const domains = Array.isArray(event.source_domains)
     ? new Set(event.source_domains.filter(Boolean)).size
     : 0;
@@ -100,49 +91,6 @@ function weightedScore(pairs, smoothing = 1) {
   }
   if (total === 0) return 0;
   return Math.min(Math.max(raw / (total + smoothing), -1), 1);
-}
-
-/**
- * 每个事件对 riskScore 的带符号贡献(纯函数,供后台展示"为什么现在是 risk_off")。
- * 与 aggregateRegime 同口径:同组几何衰减后 weight×direction/(总权重+平滑),
- * 各项之和≈riskScore(钳制前)。按绝对贡献降序返回 [{ id, event_key, contribution }]。
- */
-export function factContributions(events = [], now = new Date(), cfg = {}) {
-  const { validityHours = 72, halfLifeHours = 24, duplicateDampening = 0.6 } = cfg;
-  const nowTs = now instanceof Date ? now.getTime() : Number(now);
-  const valid = (Array.isArray(events) ? events : []).filter((e) => {
-    const ts = new Date(e?.created_at || 0).getTime();
-    return Number.isFinite(ts) && nowTs - ts <= validityHours * 3600_000 && ts <= nowTs;
-  });
-  const groups = new Map();
-  for (const e of valid) {
-    if (e.macro_direction !== 'risk_on' && e.macro_direction !== 'risk_off') continue;
-    const key = `${e.event_type}|${e.macro_direction}`;
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push({
-      event: e,
-      weight: eventWeight(e, nowTs, halfLifeHours),
-      direction: e.macro_direction === 'risk_on' ? 1 : -1,
-    });
-  }
-  const scored = [];
-  let total = 0;
-  for (const group of groups.values()) {
-    group.sort((a, b) => b.weight - a.weight);
-    group.forEach((p, i) => {
-      const w = p.weight * duplicateDampening ** i;
-      total += w;
-      scored.push({ event: p.event, weight: w, direction: p.direction });
-    });
-  }
-  const denom = total + 1; // 平滑常数 1,与 weightedScore 一致
-  return scored
-    .map((p) => ({
-      id: p.event.id ?? null,
-      event_key: p.event.event_key ?? null,
-      contribution: Number(((p.weight * p.direction) / denom).toFixed(4)),
-    }))
-    .sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution));
 }
 
 function aggregateSubSignal(events, nowTs, halfLifeHours, field, positive, negative) {
@@ -285,41 +233,28 @@ export function getRegimeParams(regime) {
 }
 
 let lastClampLogged = false;
-let lastStressLogged = false;
 
 /**
  * 生效 regime 与参数(016,买入参数的唯一咽喉点——分配器与锁内结算都从这里取):
- * 新闻推导的 regime 与确定性市场核验(SPY 趋势 + VIX,marketCheck.js)取交集。
- * 市场确认层(只收紧、绝不放松):
- *  - clamped:新闻 risk_on 但核验不同向 → 按 neutral 参数执行(不放大);
- *  - market_stress:核验避险但新闻只是 neutral/risk_on → 执行参数下限抬到 risk_off
- *    (情况 D:SPY 大跌但无明确宏观新闻,作为独立风控输入收紧);
- *  - confirmed:新闻已 risk_off/macro_shock 且核验同向避险 → 市场印证。
- * regime 字段仍为新闻 regime——macro_shock 门、成交快照、冲突消解的语义不变,
- * 市场只影响生效的资金参数(effective_regime/params),核验不可用时完全透传。
+ * 新闻推导的 regime 与确定性市场核验(SPY 趋势 + VIX,marketCheck.js)取交集,
+ * 仅当新闻 risk_on 且核验不同向时按 neutral 参数执行(只钳制放大、从不放松;
+ * 核验不可用时完全透传)。regime 字段仍为新闻 regime——macro_shock 门、
+ * 成交快照、冲突消解的语义不变,只有资金参数被钳制。
  */
 export function getEffectiveRegime() {
   const regime = getRegime();
   const check = config.enableMarketCheck ? getMarketCheck() : { available: false, trend: null };
-  const { regime: effective, clamped, marketStress, confirmed } = intersectRegime(regime.regime, check);
+  const { regime: effective, clamped } = intersectRegime(regime.regime, check);
   if (clamped && !lastClampLogged) {
     console.log(
       `[market] 确定性核验不同向(趋势=${check.trend || '未知'}),risk_on 仓位放大钳制为 neutral 参数`
     );
   }
-  if (marketStress && !lastStressLogged) {
-    console.log(
-      `[market] 市场避险(趋势=${check.trend || '未知'}),新闻 ${regime.regime} 的执行参数收紧至 risk_off`
-    );
-  }
   lastClampLogged = clamped;
-  lastStressLogged = marketStress;
   return {
     ...regime,
     effective_regime: effective,
     clamped,
-    market_stress: marketStress,
-    confirmed,
     params: getRegimeParams(effective),
     market_check: check,
   };
