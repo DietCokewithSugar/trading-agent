@@ -153,7 +153,12 @@ export default function NewsFeed({ version, onSymbolClick }) {
         <Empty description="暂无符合条件的新闻。系统会按设定间隔自动抓取并分析最新新闻。" />
       ) : (
         <Space direction="vertical" size={8} style={{ width: '100%' }}>
-          {items.map((n) => (
+          {items.map((n) => {
+            // 标签优先用分析判定的代码(准确),未分析的新闻才回退原始来源标签(FMP 接口常含无关股票)
+            const displaySymbols = n.news_analyses?.length
+              ? [...new Set(n.news_analyses.map((a) => a.symbol).filter(Boolean))]
+              : n.symbols || [];
+            return (
             <Card size="small" key={n.id}>
               <a href={n.url} target="_blank" rel="noreferrer" style={{ fontWeight: 500 }}>
                 {n.title}
@@ -174,7 +179,7 @@ export default function NewsFeed({ version, onSymbolClick }) {
                   <Typography.Text type="secondary" style={{ fontSize: 12.5 }}>
                     {fmtTime(n.published_at)}
                   </Typography.Text>
-                  {n.symbols?.map((s) => (
+                  {displaySymbols.map((s) => (
                     <Tag
                       key={s}
                       style={{ marginRight: 0, cursor: 'pointer' }}
@@ -209,7 +214,8 @@ export default function NewsFeed({ version, onSymbolClick }) {
                 </div>
               ))}
             </Card>
-          ))}
+            );
+          })}
         </Space>
       )}
 

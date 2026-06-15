@@ -113,7 +113,10 @@ export default function SymbolModal({ symbol, open, onClose }) {
             <Typography.Text type="secondary">暂无该股票的分析记录。</Typography.Text>
           ) : (
             <Space direction="vertical" size={12} style={{ width: '100%' }}>
-              {data.analyses.map((a) => (
+              {data.analyses.map((a) => {
+                // 后台已把同一底层事件的近似重复报道聚成一条;members[0] 为代表项,其余为重复报道
+                const dupes = (a.members || []).filter((m) => m.id !== a.id);
+                return (
                 <div key={a.id}>
                   <Space size={8} wrap>
                     <Tag
@@ -129,6 +132,12 @@ export default function SymbolModal({ symbol, open, onClose }) {
                         {TIER_LABELS[a.tier]}
                       </Typography.Text>
                     )}
+                    {a.article_count > 1 && (
+                      <Tag style={{ marginRight: 0 }}>
+                        共 {a.article_count} 篇报道
+                        {a.sources?.length ? ` · ${a.sources.join('、')}` : ''}
+                      </Tag>
+                    )}
                     <Typography.Text type="secondary" style={{ fontSize: 12.5 }}>
                       {fmtTime(a.created_at)}
                     </Typography.Text>
@@ -140,6 +149,13 @@ export default function SymbolModal({ symbol, open, onClose }) {
                       </a>
                     </p>
                   )}
+                  {dupes.map((m) => (
+                    <p key={m.id} className="small" style={{ margin: '2px 0 0', opacity: 0.65 }}>
+                      <a href={m.news_articles?.url} target="_blank" rel="noreferrer">
+                        {m.news_articles?.title}
+                      </a>
+                    </p>
+                  ))}
                   {a.reasoning && (
                     <p className="reason">
                       <span className="reason-label">分析理由</span>
@@ -147,7 +163,8 @@ export default function SymbolModal({ symbol, open, onClose }) {
                     </p>
                   )}
                 </div>
-              ))}
+                );
+              })}
             </Space>
           )}
 

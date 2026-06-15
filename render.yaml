@@ -45,6 +45,8 @@ services:
         value: "0.35"
       - key: EVENT_DEDUP_HOURS
         value: "72"
+      - key: EVENT_NEAR_DUP_SIMILARITY
+        value: "0.8"
       - key: TRADE_COOLDOWN_MINUTES
         value: "30"
       - key: ENABLE_REFLECTION
