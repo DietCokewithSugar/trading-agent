@@ -697,7 +697,7 @@ export async function getShadowOverview({ hours = 24 * 7 } = {}) {
   if (!isShadowAvailable()) return null;
   try {
     const since = new Date(Date.now() - hours * 3600_000).toISOString();
-    const [pfRes, posRes, recentRes] = await Promise.all([
+    const [pfRes, posRes, recentRes, closedRes] = await Promise.all([
       supabase().from('shadow_portfolios').select('*').order('variant'),
       supabase().from('shadow_positions').select('*'),
       supabase()
@@ -705,11 +705,28 @@ export async function getShadowOverview({ hours = 24 * 7 } = {}) {
         .select('*')
         .order('created_at', { ascending: false })
         .limit(30),
+      // 已平仓卖出(用于各变体胜率):一次拉全量再按变体汇总,避免逐变体查询
+      supabase()
+        .from('shadow_trades')
+        .select('variant, realized_pnl')
+        .eq('side', 'sell')
+        .not('realized_pnl', 'is', null),
     ]);
     const portfolios = unwrap(pfRes, '读取影子组合');
     if (!portfolios?.length) return { variants: [], series: {}, recent_trades: [] };
     const positions = unwrap(posRes, '读取影子持仓') || [];
     const recentTrades = unwrap(recentRes, '读取影子成交') || [];
+
+    // 各变体胜率:已平仓卖出里 realized_pnl > 0 的占比(无样本留 null,查询失败不阻断)
+    const winStats = new Map(); // variant -> { wins, closed }
+    if (!closedRes.error) {
+      for (const t of closedRes.data || []) {
+        const s = winStats.get(t.variant) || { wins: 0, closed: 0 };
+        s.closed += 1;
+        if (Number(t.realized_pnl) > 0) s.wins += 1;
+        winStats.set(t.variant, s);
+      }
+    }
 
     const symbols = [...new Set(positions.map((p) => p.symbol))];
     const quotes = symbols.length
@@ -748,6 +765,7 @@ export async function getShadowOverview({ hours = 24 * 7 } = {}) {
       const positionsValue = round2(held.reduce((sum, p) => sum + p.market_value, 0));
       const totalValue = round2(positionsValue + Number(pf.cash));
       const initial = Number(pf.initial_capital);
+      const win = winStats.get(pf.variant);
       return {
         variant: pf.variant,
         started_at: pf.started_at,
@@ -759,6 +777,9 @@ export async function getShadowOverview({ hours = 24 * 7 } = {}) {
         pnl_percent: initial > 0 ? round2(((totalValue - initial) / initial) * 100) : 0,
         positions: held,
         trades_count: counts[i],
+        wins: win ? win.wins : 0,
+        closed_trades: win ? win.closed : 0,
+        win_rate: win && win.closed > 0 ? round2((win.wins / win.closed) * 100) : null,
       };
     });
 
@@ -786,6 +807,28 @@ export async function getShadowOverview({ hours = 24 * 7 } = {}) {
     }
 
     return { variants, series, recent_trades: recentTrades };
+  } catch (err) {
+    if (isMissingTable(err)) {
+      warnMissingOnce();
+      return null;
+    }
+    throw err;
+  }
+}
+
+/** 单个影子变体的成交流水(展开详情懒加载用);不可用/表缺失返回 null */
+export async function getShadowTrades({ variant, limit = 100 } = {}) {
+  if (!isShadowAvailable()) return null;
+  if (!SHADOW_VARIANTS.includes(variant)) return null;
+  const cap = Number.isFinite(limit) && limit > 0 ? Math.min(limit, 500) : 100;
+  try {
+    const res = await supabase()
+      .from('shadow_trades')
+      .select('*')
+      .eq('variant', variant)
+      .order('created_at', { ascending: false })
+      .limit(cap);
+    return unwrap(res, '读取影子成交') || [];
   } catch (err) {
     if (isMissingTable(err)) {
       warnMissingOnce();

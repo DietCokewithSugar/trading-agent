@@ -1,5 +1,6 @@
-import React, { useEffect, useState } from 'react';
-import { Alert, Descriptions, Divider, Modal, Skeleton, Space, Tag, Typography } from 'antd';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Alert, Button, Descriptions, Divider, Modal, Skeleton, Space, Tag, Typography } from 'antd';
+import NewsHeatmap, { etDateOf } from './NewsHeatmap.jsx';
 import {
   api,
   fmtMoney,
@@ -15,18 +16,38 @@ import {
 export default function SymbolModal({ symbol, open, onClose }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
+  // 选中的热力图日期(null = 全部);拿到新数据后默认定位到最近有新闻的一天
+  const [selectedDate, setSelectedDate] = useState(null);
 
   useEffect(() => {
     // Modal 常挂载,仅在拿到 symbol 时拉取
     if (!symbol) return;
     setData(null);
     setError(null);
+    setSelectedDate(null);
     api.symbol(symbol).then(setData).catch((err) => setError(err.message));
   }, [symbol]);
+
+  // 数据到位后默认选中最近有新闻的一天(把超长列表收成单日视图)
+  useEffect(() => {
+    if (!data?.analyses?.length) return;
+    const latest = data.analyses.reduce((acc, a) => {
+      const d = etDateOf(a.created_at);
+      return d && (!acc || d > acc) ? d : acc;
+    }, null);
+    setSelectedDate(latest);
+  }, [data]);
 
   const quote = data?.quote;
   const position = data?.position;
   const price = quote?.effective_price ?? quote?.price;
+
+  // 按选中日过滤分析(null 时显示全部)
+  const visibleAnalyses = useMemo(() => {
+    const all = data?.analyses || [];
+    if (!selectedDate) return all;
+    return all.filter((a) => etDateOf(a.created_at) === selectedDate);
+  }, [data, selectedDate]);
 
   return (
     <Modal
@@ -112,8 +133,26 @@ export default function SymbolModal({ symbol, open, onClose }) {
           {!data.analyses.length ? (
             <Typography.Text type="secondary">暂无该股票的分析记录。</Typography.Text>
           ) : (
+            <>
+              <NewsHeatmap
+                analyses={data.analyses}
+                selectedDate={selectedDate}
+                onSelect={setSelectedDate}
+              />
+              <Space size={8} style={{ margin: '10px 0 12px' }}>
+                <Typography.Text type="secondary" style={{ fontSize: 12.5 }}>
+                  {selectedDate
+                    ? `${selectedDate} · 共 ${visibleAnalyses.length} 条`
+                    : `全部 ${data.analyses.length} 条`}
+                </Typography.Text>
+                {selectedDate && (
+                  <Button type="link" size="small" style={{ padding: 0 }} onClick={() => setSelectedDate(null)}>
+                    显示全部
+                  </Button>
+                )}
+              </Space>
             <Space direction="vertical" size={12} style={{ width: '100%' }}>
-              {data.analyses.map((a) => {
+              {visibleAnalyses.map((a) => {
                 // 后台已把同一底层事件的近似重复报道聚成一条;members[0] 为代表项,其余为重复报道
                 const dupes = (a.members || []).filter((m) => m.id !== a.id);
                 return (
@@ -166,6 +205,7 @@ export default function SymbolModal({ symbol, open, onClose }) {
                 );
               })}
             </Space>
+            </>
           )}
 
           <Divider plain style={{ margin: '16px 0 12px' }}>

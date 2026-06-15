@@ -31,6 +31,8 @@ export const api = {
   performance: () => get('/performance'),
   signalStats: (days) => get(`/signal-stats${days ? `?days=${days}` : ''}`),
   shadow: (hours) => get(`/shadow${hours ? `?hours=${hours}` : ''}`),
+  shadowTrades: (variant, limit = 100) =>
+    get(`/shadow/${encodeURIComponent(variant)}/trades?limit=${limit}`),
   macro: () => get('/macro'),
   pool: () => get('/pool'),
   pendingOrders: () => get('/pending-orders'),
