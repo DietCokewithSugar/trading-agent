@@ -6,6 +6,16 @@ import { analyzeMacroArticle, matchMacroEvent } from './deepseek.js';
 import { matchCalendarSurprise } from './macroCalendar.js';
 import { mergeMacroConfidence } from './macroRegime.js';
 import { sanitizeProviderText } from './metrics.js';
+import {
+  deriveEventKey,
+  mintEventKey,
+  surpriseWeight,
+  isFactsTableMissing,
+  listRecentMacroFacts,
+  findFactByKey,
+  insertFact,
+  updateFact,
+} from './macroFacts.js';
 
 const state = {
   tableMissing: false, // macro_events 表缺失(未执行 014 迁移),一次告警后停用
@@ -26,7 +36,9 @@ export function isMacroCandidate(article) {
 }
 
 /**
- * 宏观文章处理:LLM 分类 → 经济日历匹配回填数值 surprise → macro_events 落库。
+ * 宏观文章处理:LLM 分类 → 经济日历匹配回填数值 surprise → 落库。
+ * 优先走事实层(020,macro_facts):同一事件无论几篇报道只贡献一次风险分;
+ * 020 未应用时回退到 macro_events 事件流路径(行为同 015/016)。
  * 与宏观无关返回 null;表缺失一次告警后整体停用(候选走原有"不相关"路径)。
  */
 export async function processMacroArticle(article) {
@@ -39,6 +51,163 @@ export async function processMacroArticle(article) {
     article.published_at ? new Date(article.published_at) : new Date()
   );
 
+  // 事实层优先:event_key 去重,风险按事件计一次
+  if (!isFactsTableMissing()) {
+    try {
+      const fact = await processMacroFact(article, analysis, calendarMatch);
+      if (fact !== undefined) return fact; // undefined = macro_facts 表缺失,落到下方 events 回退
+    } catch (err) {
+      console.warn(`[macro] 事实层处理失败(跳过本篇): ${err.message}`);
+      return null;
+    }
+  }
+
+  // 回退:macro_events 事件流路径(仅 020 未应用时到达)
+  return insertMacroEventRow(article, analysis, calendarMatch);
+}
+
+/**
+ * 事实层处理(020):派生 event_key → link 到已有事实(只累计/增信)或新建。
+ * 返回事实行;macro_facts 表缺失返回 undefined(上层回退 events 路径)。
+ */
+async function processMacroFact(article, analysis, calendarMatch) {
+  const occurredAt = article.published_at ? new Date(article.published_at) : new Date();
+  const detKey = deriveEventKey(analysis.event_type, occurredAt); // 周期性数据 → 确定性键;否则 null
+
+  let matched = null;
+  if (detKey) {
+    const found = await findFactByKey(detKey); // null=无 / 行=命中 / undefined=表缺失
+    if (found === undefined) return undefined;
+    matched = found;
+  } else {
+    // 非周期事件(地缘/能源/关税/财政/收益率/其他):LLM 跨类型判重 link 到近期事实。
+    // 判重失败 fail-open 视为未命中、新建——宏观侧宁可留重复也不丢真实风险信号。
+    try {
+      matched = await llmMatchFact(article, analysis);
+      if (matched === undefined) return undefined;
+    } catch (err) {
+      console.warn(`[macro] 事实判重不可用(${err.message}),按新事件处理`);
+      matched = null;
+    }
+  }
+
+  if (matched) return linkArticleToFact(matched, article, analysis, calendarMatch);
+
+  const key = detKey || mintEventKey(analysis.event_type, occurredAt, article.id);
+  return createNewsFact(key, article, analysis, calendarMatch);
+}
+
+/** 把一篇新闻 link 到已有事实:累计篇数 / 增信 / 累加独立信源;事实尚无方向时采纳本篇解释 */
+async function linkArticleToFact(fact, article, analysis, calendarMatch) {
+  const knownDomains = new Set(
+    [...(Array.isArray(fact.source_domains) ? fact.source_domains : []), fact.source_domain].filter(Boolean)
+  );
+  const newDomain = article.source_domain || null;
+  const independent = Boolean(newDomain && !knownDomains.has(newDomain));
+  if (newDomain) knownDomains.add(newDomain);
+
+  const patch = {
+    source_count: (fact.source_count || 0) + 1,
+    confidence: mergeMacroConfidence(fact.confidence, analysis.confidence),
+    source_domains: [...knownDomains],
+    ...(Number(article.source_score) > Number(fact.source_score ?? 0)
+      ? { source_score: Number(article.source_score) }
+      : {}),
+    ...(fact.first_news_id ? {} : { first_news_id: article.id }),
+  };
+  // 日历尚未回填数值时,新闻侧匹配到的 surprise 补进来(事实层数值以日历为先,缺则用此)
+  if (calendarMatch && fact.surprise == null) {
+    patch.surprise = calendarMatch.surprise;
+    patch.surprise_score = surpriseWeight(fact.event_type, calendarMatch.surprise, calendarMatch.basis);
+  }
+  // 事实尚无方向(日历独建的中性事实或全新事件)→ 采纳本篇新闻的解释作为首个方向
+  if (fact.macro_direction === 'neutral') {
+    Object.assign(patch, {
+      macro_direction: analysis.macro_direction,
+      rates_signal: analysis.rates_signal,
+      inflation_signal: analysis.inflation_signal,
+      growth_signal: analysis.growth_signal,
+      affected_sectors: analysis.affected_sectors,
+      market_impact_tier: analysis.market_impact_tier,
+      surprise_direction: analysis.surprise_direction,
+      summary: sanitizeProviderText(analysis.summary),
+    });
+  }
+
+  const updated = await updateFact(fact.id, patch);
+  if (updated === undefined) return undefined;
+  if (independent && knownDomains.size >= 2) {
+    console.log(`[macro] 事实 #${fact.id} 获得独立信源交叉佐证(${[...knownDomains].join(', ')})`);
+  }
+  console.log(
+    `[macro] 报道归并 → 事实 ${fact.event_key}(第 ${patch.source_count} 篇 / 方向 ${updated.macro_direction})`
+  );
+  return updated;
+}
+
+/** 新建一条新闻来源的事实 */
+async function createNewsFact(eventKey, article, analysis, calendarMatch) {
+  const row = {
+    event_key: eventKey,
+    event_type: analysis.event_type,
+    macro_direction: analysis.macro_direction,
+    actual: null,
+    estimate: null,
+    previous: null,
+    surprise: calendarMatch?.surprise ?? null,
+    surprise_score: calendarMatch
+      ? surpriseWeight(analysis.event_type, calendarMatch.surprise, calendarMatch.basis)
+      : null,
+    surprise_direction: analysis.surprise_direction,
+    rates_signal: analysis.rates_signal,
+    inflation_signal: analysis.inflation_signal,
+    growth_signal: analysis.growth_signal,
+    affected_sectors: analysis.affected_sectors,
+    market_impact_tier: analysis.market_impact_tier,
+    confidence: analysis.confidence,
+    // summary 出现在公共读表里,脱敏供应商名(LLM 偶尔会复述新闻里的转发渠道)
+    summary: sanitizeProviderText(analysis.summary),
+    has_actual: Boolean(calendarMatch),
+    source_count: 1,
+    source_domain: article.source_domain ?? null,
+    source_score: article.source_score ?? null,
+    source_domains: article.source_domain ? [article.source_domain] : [],
+    first_news_id: article.id,
+  };
+  const inserted = await insertFact(row);
+  if (inserted === undefined) return undefined;
+  if (!inserted) return null;
+  // 唯一键并发冲突(日历/另一篇新闻已先建同键):insertFact 回读了已有行,改走 link 合并
+  const isFresh = inserted.first_news_id === article.id && (inserted.source_count || 0) <= 1;
+  if (!isFresh) return linkArticleToFact(inserted, article, analysis, calendarMatch);
+  console.log(
+    `[macro] 新宏观事实 ${eventKey} ${inserted.macro_direction} 第${inserted.market_impact_tier}档 conf=${inserted.confidence}: ${inserted.summary}`
+  );
+  return inserted;
+}
+
+/** LLM 判重:把本篇与近 72h 事实比对,命中返回事实行,未命中 null,表缺失 undefined */
+async function llmMatchFact(article, analysis) {
+  const candidates = await listRecentMacroFacts(config.macroEventValidityHours, 20);
+  if (candidates === undefined || candidates === null) return candidates === null ? null : undefined;
+  if (!candidates.length) return null;
+  const { duplicateOf } = await matchMacroEvent({
+    summary: sanitizeProviderText(analysis.summary),
+    eventType: analysis.event_type,
+    articleTitle: article.title,
+    recentEvents: candidates.map((e) => ({
+      id: e.id,
+      event_type: e.event_type,
+      summary: e.summary,
+      created_at: e.created_at,
+      article_count: e.source_count,
+    })),
+  });
+  return duplicateOf ? candidates.find((e) => e.id === duplicateOf) || null : null;
+}
+
+/** macro_events 事件流落库(020 未应用时的回退路径,行为同 015/016) */
+async function insertMacroEventRow(article, analysis, calendarMatch) {
   const row = {
     news_id: article.id,
     event_type: analysis.event_type,
@@ -103,7 +272,7 @@ export async function processMacroArticle(article) {
  * created_at 不动:重复报道不刷新时间衰减,实质性新进展会被 LLM 判为新事件。
  */
 async function mergeDuplicateMacroEvent(row, article) {
-  const candidates = await listRecentMacroEvents(config.macroEventValidityHours, 20);
+  const candidates = await listMacroEventRows(config.macroEventValidityHours, 20);
   if (!candidates?.length) return null;
 
   const { duplicateOf, reason } = await matchMacroEvent({
@@ -159,8 +328,22 @@ async function mergeDuplicateMacroEvent(row, article) {
   return { ...dup, ...update };
 }
 
-/** 近 N 小时的宏观事件(regime 聚合与 /api/macro 用);表缺失返回 null */
+/**
+ * 近 N 小时的宏观信号(regime 聚合 / sectorMultiplier / api 用)。
+ * 优先返回事实层(020,macro_facts);020 未应用时回退 macro_events 事件流。
+ * 两者均缺失返回 null。事实行字段与事件行兼容(aggregateRegime/shockCorroborated 同时认
+ * article_count 与 source_count),消费方无需区分。
+ */
 export async function listRecentMacroEvents(hours, limit = 100) {
+  if (!isFactsTableMissing()) {
+    const facts = await listRecentMacroFacts(hours, limit);
+    if (facts !== null) return facts; // 事实层可用(含空数组)
+  }
+  return listMacroEventRows(hours, limit);
+}
+
+/** 直接读 macro_events 事件流(判重候选 / 事实层不可用时的回退);表缺失返回 null */
+async function listMacroEventRows(hours, limit = 100) {
   if (state.tableMissing) return null;
   const since = new Date(Date.now() - hours * 3600_000).toISOString();
   const { data, error } = await supabase()
