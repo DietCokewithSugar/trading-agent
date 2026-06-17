@@ -127,23 +127,45 @@ export default function AblationPage({ version = 0, onSymbolClick }) {
     load();
   }, [load, version]);
 
-  // 各序列重基:窗口内首点 = 0%,统一为相对收益曲线(各组合起始资金/时点不同,绝对值不可比)
+  // 各序列以「初始资金」为基准 → 曲线即各组合的「自启用收益 %」,口径与下表一致
+  //(各组合初始资金相同、皆从启用时刻起步,可直接同图对比);并在末尾补一个实时估值点,
+  // 使曲线终点严格对齐下表的「自启用收益」(快照每 10 分钟一条,最长滞后 10 分钟)。
   const chartSeries = useMemo(() => {
     if (!data?.available) return [];
+    const initialByVariant = {};
+    const liveByVariant = {};
+    if (data.actual) {
+      initialByVariant.actual = Number(data.actual.initial_capital);
+      liveByVariant.actual = Number(data.actual.total_value);
+    }
+    for (const v of data.variants || []) {
+      initialByVariant[v.variant] = Number(v.initial_capital);
+      liveByVariant[v.variant] = Number(v.total_value);
+    }
     const all = { actual: data.actual?.series || [], ...(data.series || {}) };
-    return VARIANT_ORDER.filter((v) => (all[v] || []).length > 1).map((variant) => {
-      const rows = all[variant];
-      const base = Number(rows[0].total_value);
-      return {
-        variant,
-        name: SHADOW_VARIANT_LABELS[variant] || variant,
-        color: VARIANT_COLORS[variant] || CHART.axis,
-        rows: rows.map((p) => ({
+    return VARIANT_ORDER.filter((v) => (all[v] || []).length >= 1)
+      .map((variant) => {
+        const snaps = all[variant];
+        // 基准优先用初始资金;缺失(迁移前/异常)时退回窗口首点,至少保证曲线可画
+        const base =
+          initialByVariant[variant] > 0 ? initialByVariant[variant] : Number(snaps[0].total_value);
+        const rows = snaps.map((p) => ({
           time: new Date(p.t).getTime(),
           pct: base > 0 ? ((Number(p.total_value) - base) / base) * 100 : 0,
-        })),
-      };
-    });
+        }));
+        const live = liveByVariant[variant];
+        const lastT = rows.length ? rows[rows.length - 1].time : 0;
+        if (Number.isFinite(live) && live > 0 && base > 0 && Date.now() > lastT) {
+          rows.push({ time: Date.now(), pct: ((live - base) / base) * 100 });
+        }
+        return {
+          variant,
+          name: SHADOW_VARIANT_LABELS[variant] || variant,
+          color: VARIANT_COLORS[variant] || CHART.axis,
+          rows,
+        };
+      })
+      .filter((s) => s.rows.length > 1);
   }, [data, VARIANT_COLORS]);
 
   const tableRows = useMemo(() => {
@@ -464,7 +486,7 @@ export default function AblationPage({ version = 0, onSymbolClick }) {
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
       <Card
         size="small"
-        title="净值对比(窗口起点归一为 0%)"
+        title="净值对比(自启用收益 %,与下表一致)"
         extra={
           <Space>
             <Segmented
