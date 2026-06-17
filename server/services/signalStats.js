@@ -21,48 +21,43 @@ import { isPressRelease } from './credibility.js';
 const HORIZONS = ['1h', '1d', '5d'];
 const PAGE_SIZE = 1000;
 const MAX_SAMPLE_ROWS = 5000;
-const ID_QUERY_CHUNK = 300;
+const SAMPLE_WEIGHTS = Object.freeze({
+  recent: 5,
+  matured_1d: 3,
+  matured_5d: 2,
+});
 
+/**
+ * 采样计划(防 horizon 样本被最新未成熟信号挤没):
+ * - recent: 最近信号(保实时性)
+ * - matured_1d: 强制 1d 已回填样本(保 1d 口径稳定)
+ * - matured_5d: 强制 5d 已回填样本(保 5d 口径稳定)
+ * 短窗口自动降级: days<2 不拉 matured_1d; days<6 不拉 matured_5d。
+ */
+export function buildSamplingPlan({ days = null, maxRows = MAX_SAMPLE_ROWS } = {}) {
+  const totalRows = Number.isFinite(maxRows) && maxRows > 0 ? Math.floor(maxRows) : MAX_SAMPLE_ROWS;
+  const windowDays = Number.isFinite(days) && days > 0 ? Number(days) : null;
+  const buckets = [{ bucket: 'recent', horizonColumn: null }];
+  if (windowDays === null || windowDays >= 2) {
+    buckets.push({ bucket: 'matured_1d', horizonColumn: 'fwd_return_1d' });
+  }
+  if (windowDays === null || windowDays >= 6) {
+    buckets.push({ bucket: 'matured_5d', horizonColumn: 'fwd_return_5d' });
+  }
+  const weightSum = buckets.reduce((sum, b) => sum + (SAMPLE_WEIGHTS[b.bucket] || 1), 0);
+  let allocated = 0;
+  return buckets.map((b, idx) => {
+    const rows =
+      idx === buckets.length - 1
+        ? totalRows - allocated
+        : Math.max(1, Math.floor((totalRows * (SAMPLE_WEIGHTS[b.bucket] || 1)) / weightSum));
+    allocated += rows;
+    return { ...b, maxRows: rows };
+  });
+}
 function round(n, digits = 2) {
   const f = 10 ** digits;
   return Math.round(n * f) / f;
-}
-
-function toChunks(list, size = ID_QUERY_CHUNK) {
-  const out = [];
-  for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
-  return out;
-}
-
-/**
- * 采样计划(纯函数,可单测):
- *  - recent: 最近样本(保障时效,主要支撑 1h)
- *  - matured_1d/matured_5d: 强制包含已回填口径,避免 1d/5d 被"新鲜未成熟样本"挤没
- */
-export function buildSamplingPlan({ days = null, maxRows = MAX_SAMPLE_ROWS } = {}) {
-  const d = Number.isFinite(days) && days > 0 ? days : null;
-  const include1d = d === null || d > 1;
-  const include5d = d === null || d > 5;
-
-  const specs = [{ key: 'recent', require: null, weight: 1 }];
-  if (include1d) specs.push({ key: 'matured_1d', require: 'fwd_return_1d', weight: include5d ? 0.3 : 0.35 });
-  if (include5d) specs.push({ key: 'matured_5d', require: 'fwd_return_5d', weight: 0.2 });
-  if (specs.length === 1) return [{ key: 'recent', require: null, cap: maxRows }];
-
-  // recent 的权重动态补足到 1(窗口越短,成熟口径占比越低)
-  const matureWeight = specs.filter((s) => s.key !== 'recent').reduce((sum, s) => sum + s.weight, 0);
-  specs[0].weight = Math.max(1 - matureWeight, 0.5);
-
-  const total = specs.reduce((sum, s) => sum + s.weight, 0);
-  let remain = Math.max(1, Math.floor(maxRows));
-  return specs.map((s, idx) => {
-    const cap =
-      idx === specs.length - 1
-        ? remain
-        : Math.max(1, Math.floor((maxRows * s.weight) / total));
-    remain -= cap;
-    return { key: s.key, require: s.require, cap };
-  });
 }
 
 /** 皮尔逊相关系数;样本不足或零方差返回 null */
@@ -351,19 +346,21 @@ async function fetchPaged(buildQuery, maxRows = MAX_SAMPLE_ROWS) {
   return { rows, truncated: true, error: null };
 }
 
+function chunk(list, size) {
+  const out = [];
+  for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
+  return out;
+}
+
 /**
- * 按 analysis_id 定向拉取关联表(候选/成交),避免按 created_at 扫描大量无关行。
- * 返回 { rows, error }。
+ * 以 analysis_id 精确拉取关联数据(按样本集合定向查询,避免时间窗扫全表造成错配/噪声)。
+ * buildQuery(idsChunk) 需返回已完成 select 的查询对象。
  */
-async function fetchByAnalysisIds(db, { table, select, analysisIds }) {
+async function fetchByAnalysisIds(ids, buildQuery, chunkSize = 300) {
+  if (!ids?.length) return { rows: [], error: null };
   const rows = [];
-  for (const chunk of toChunks(analysisIds)) {
-    const { data, error } = await db
-      .from(table)
-      .select(select)
-      .in('analysis_id', chunk)
-      .not('analysis_id', 'is', null)
-      .order('created_at', { ascending: false });
+  for (const idsChunk of chunk(ids, chunkSize)) {
+    const { data, error } = await buildQuery(idsChunk);
     if (error) return { rows, error };
     rows.push(...(data || []));
   }
@@ -396,9 +393,9 @@ export async function loadSignalRows({ days = null } = {}) {
           .in('sentiment', ['bullish', 'bearish'])
           .order('created_at', { ascending: false })
       );
-      if (slice.require) q = q.not(slice.require, 'is', null);
+      if (slice.horizonColumn) q = q.not(slice.horizonColumn, 'is', null);
       return q;
-    }, slice.cap);
+    }, slice.maxRows);
     if (analysesFetch.error) {
       if (/signal_price|fwd_return/.test(analysesFetch.error.message)) {
         return null;
@@ -419,17 +416,23 @@ export async function loadSignalRows({ days = null } = {}) {
   // 仅按本次样本的 analysis_id 定向拉取,避免 created_at 扫描大量无关成交。
   let tradeRows = [];
   if (analysisIds.length) {
-    const full = await fetchByAnalysisIds(db, {
-      table: 'trades',
-      select: 'analysis_id, side, pool_wait_minutes, pool_drift_percent, created_at',
-      analysisIds,
-    });
+    const full = await fetchByAnalysisIds(analysisIds, (idsChunk) =>
+      db
+        .from('trades')
+        .select('analysis_id, side, pool_wait_minutes, pool_drift_percent, created_at')
+        .in('analysis_id', idsChunk)
+        .not('analysis_id', 'is', null)
+        .order('created_at', { ascending: false })
+    );
     if (full.error && /pool_|column|schema/i.test(full.error.message)) {
-      const basic = await fetchByAnalysisIds(db, {
-        table: 'trades',
-        select: 'analysis_id, created_at',
-        analysisIds,
-      });
+      const basic = await fetchByAnalysisIds(analysisIds, (idsChunk) =>
+        db
+          .from('trades')
+          .select('analysis_id, created_at')
+          .in('analysis_id', idsChunk)
+          .not('analysis_id', 'is', null)
+          .order('created_at', { ascending: false })
+      );
       if (basic.error) throw new Error(basic.error.message);
       tradeRows = basic.rows;
     } else if (full.error) {
@@ -457,13 +460,20 @@ export async function loadSignalRows({ days = null } = {}) {
   let candidateById = new Map();
   if (analysisIds.length) {
     try {
-      const candFetch = await fetchByAnalysisIds(db, {
-        table: 'candidate_signals',
-        select: 'analysis_id, status, status_reason, macro_regime, created_at',
-        analysisIds,
-      });
+      const candFetch = await fetchByAnalysisIds(analysisIds, (idsChunk) =>
+        db
+          .from('candidate_signals')
+          .select('analysis_id, status, status_reason, macro_regime, created_at')
+          .in('analysis_id', idsChunk)
+          .not('analysis_id', 'is', null)
+          .order('created_at', { ascending: false })
+      );
       if (!candFetch.error) {
-        candidateById = new Map(candFetch.rows.map((c) => [c.analysis_id, c]));
+        for (const c of candFetch.rows) {
+          if (!candidateById.has(c.analysis_id)) {
+            candidateById.set(c.analysis_id, c);
+          }
+        }
       }
     } catch {
       // 候选池不可用时静默退回(本统计是纯观测层)
