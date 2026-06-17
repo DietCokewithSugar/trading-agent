@@ -153,7 +153,8 @@ export default function AblationPage({ version = 0, onSymbolClick }) {
       rows.push({
         variant: 'actual',
         total_value: data.actual.total_value,
-        pnl_percent: data.actual.pnl_percent,
+        window_return_pct: data.actual.window_return_pct ?? null,
+        lifetime_return_pct: data.actual.lifetime_return_pct ?? data.actual.pnl_percent ?? null,
         cash: data.actual.cash,
         positions_count: data.actual.positions_count,
         trades_count: null,
@@ -169,7 +170,8 @@ export default function AblationPage({ version = 0, onSymbolClick }) {
       rows.push({
         variant: v.variant,
         total_value: v.total_value,
-        pnl_percent: v.pnl_percent,
+        window_return_pct: v.window_return_pct ?? null,
+        lifetime_return_pct: v.lifetime_return_pct ?? v.pnl_percent ?? null,
         cash: v.cash,
         positions_count: v.positions?.length ?? 0,
         trades_count: v.trades_count,
@@ -232,9 +234,17 @@ export default function AblationPage({ version = 0, onSymbolClick }) {
       render: (v) => <span className="num">{fmtMoney(v)}</span>,
     },
     {
-      title: '自启用收益',
-      dataIndex: 'pnl_percent',
+      title: '窗口收益(同图)',
+      dataIndex: 'window_return_pct',
       width: 110,
+      align: 'right',
+      render: (v) =>
+        v === null || v === undefined ? '—' : <span className={`num ${pctClass(Number(v))}`}>{fmtPercent(v)}</span>,
+    },
+    {
+      title: '累计收益(自启用)',
+      dataIndex: 'lifetime_return_pct',
+      width: 130,
       align: 'right',
       render: (v) =>
         v === null || v === undefined ? '—' : <span className={`num ${pctClass(Number(v))}`}>{fmtPercent(v)}</span>,
@@ -375,11 +385,22 @@ export default function AblationPage({ version = 0, onSymbolClick }) {
           <Descriptions.Item label="总资产">
             <span className="num">{fmtMoney(record.total_value)}</span>
           </Descriptions.Item>
-          <Descriptions.Item label="自启用收益">
-            {record.pnl_percent === null || record.pnl_percent === undefined ? (
+          <Descriptions.Item label="窗口收益(同图)">
+            {record.window_return_pct === null || record.window_return_pct === undefined ? (
               '—'
             ) : (
-              <span className={`num ${pctClass(Number(record.pnl_percent))}`}>{fmtPercent(record.pnl_percent)}</span>
+              <span className={`num ${pctClass(Number(record.window_return_pct))}`}>
+                {fmtPercent(record.window_return_pct)}
+              </span>
+            )}
+          </Descriptions.Item>
+          <Descriptions.Item label="累计收益(自启用)">
+            {record.lifetime_return_pct === null || record.lifetime_return_pct === undefined ? (
+              '—'
+            ) : (
+              <span className={`num ${pctClass(Number(record.lifetime_return_pct))}`}>
+                {fmtPercent(record.lifetime_return_pct)}
+              </span>
             )}
           </Descriptions.Item>
           <Descriptions.Item label="现金">
@@ -554,7 +575,7 @@ export default function AblationPage({ version = 0, onSymbolClick }) {
           columns={summaryColumns}
           dataSource={tableRows}
           pagination={false}
-          scroll={{ x: 860 }}
+          scroll={{ x: 980 }}
           expandable={{
             expandedRowRender: renderExpanded,
             onExpand: (expanded, record) => {

@@ -12,7 +12,11 @@ import { getEffectiveRegime } from '../services/macroRegime.js';
 import { listRecentMacroEvents } from '../services/macroService.js';
 import { getBlackoutState, getUpcomingEvents } from '../services/macroCalendar.js';
 import { countByStatus, listPoolPreview } from '../services/candidateStore.js';
-import { getShadowOverview, getShadowTrades } from '../services/shadowPortfolio.js';
+import {
+  getShadowOverview,
+  getShadowTrades,
+  computeWindowReturnPercent,
+} from '../services/shadowPortfolio.js';
 import { safeTokenEqual, createAuthRateLimiter } from '../services/authGuard.js';
 import { clusterAnalyses } from '../services/newsDedup.js';
 
@@ -230,8 +234,10 @@ router.get(
       }));
     }
     const valuation = await getValuation().catch(() => null);
+    const actualLifetimePct = valuation?.pnl_percent ?? null;
     res.json({
       available: true,
+      window: { hours: windowHours, since },
       variants: overview.variants,
       series: overview.series,
       recent_trades: overview.recent_trades,
@@ -240,7 +246,9 @@ router.get(
         cash: valuation?.cash ?? null,
         initial_capital: valuation?.initial_capital ?? null,
         pnl: valuation?.pnl ?? null,
-        pnl_percent: valuation?.pnl_percent ?? null,
+        pnl_percent: actualLifetimePct, // 兼容旧前端字段
+        lifetime_return_pct: actualLifetimePct,
+        window_return_pct: computeWindowReturnPercent(actualSeries),
         positions_count: valuation?.positions?.length ?? null,
         series: actualSeries,
       },

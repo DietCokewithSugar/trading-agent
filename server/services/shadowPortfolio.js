@@ -57,6 +57,14 @@ function round2(n) {
   return Math.round(n * 100) / 100;
 }
 
+/** 同窗口收益(百分点):窗口序列首末两点;点数不足或非法时返回 null */
+export function computeWindowReturnPercent(points) {
+  const first = Number(points?.[0]?.total_value);
+  const last = Number(points?.[points.length - 1]?.total_value);
+  if (!(first > 0) || !Number.isFinite(last) || (points?.length || 0) < 2) return null;
+  return round2(((last - first) / first) * 100);
+}
+
 let tableMissing = false;
 
 function isMissingTable(error) {
@@ -765,6 +773,7 @@ export async function getShadowOverview({ hours = 24 * 7 } = {}) {
       const positionsValue = round2(held.reduce((sum, p) => sum + p.market_value, 0));
       const totalValue = round2(positionsValue + Number(pf.cash));
       const initial = Number(pf.initial_capital);
+      const lifetimeReturnPct = initial > 0 ? round2(((totalValue - initial) / initial) * 100) : 0;
       const win = winStats.get(pf.variant);
       return {
         variant: pf.variant,
@@ -774,7 +783,8 @@ export async function getShadowOverview({ hours = 24 * 7 } = {}) {
         positions_value: positionsValue,
         total_value: totalValue,
         pnl: round2(totalValue - initial),
-        pnl_percent: initial > 0 ? round2(((totalValue - initial) / initial) * 100) : 0,
+        pnl_percent: lifetimeReturnPct, // 兼容旧前端字段
+        lifetime_return_pct: lifetimeReturnPct,
         positions: held,
         trades_count: counts[i],
         wins: win ? win.wins : 0,
@@ -806,7 +816,12 @@ export async function getShadowOverview({ hours = 24 * 7 } = {}) {
       series[row.variant].push({ t: row.created_at, total_value: Number(row.total_value) });
     }
 
-    return { variants, series, recent_trades: recentTrades };
+    const variantsWithWindow = variants.map((v) => ({
+      ...v,
+      window_return_pct: computeWindowReturnPercent(series[v.variant] || []),
+    }));
+
+    return { variants: variantsWithWindow, series, recent_trades: recentTrades };
   } catch (err) {
     if (isMissingTable(err)) {
       warnMissingOnce();

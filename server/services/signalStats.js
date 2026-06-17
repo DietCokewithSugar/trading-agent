@@ -21,10 +21,48 @@ import { isPressRelease } from './credibility.js';
 const HORIZONS = ['1h', '1d', '5d'];
 const PAGE_SIZE = 1000;
 const MAX_SAMPLE_ROWS = 5000;
+const ID_QUERY_CHUNK = 300;
 
 function round(n, digits = 2) {
   const f = 10 ** digits;
   return Math.round(n * f) / f;
+}
+
+function toChunks(list, size = ID_QUERY_CHUNK) {
+  const out = [];
+  for (let i = 0; i < list.length; i += size) out.push(list.slice(i, i + size));
+  return out;
+}
+
+/**
+ * 采样计划(纯函数,可单测):
+ *  - recent: 最近样本(保障时效,主要支撑 1h)
+ *  - matured_1d/matured_5d: 强制包含已回填口径,避免 1d/5d 被"新鲜未成熟样本"挤没
+ */
+export function buildSamplingPlan({ days = null, maxRows = MAX_SAMPLE_ROWS } = {}) {
+  const d = Number.isFinite(days) && days > 0 ? days : null;
+  const include1d = d === null || d > 1;
+  const include5d = d === null || d > 5;
+
+  const specs = [{ key: 'recent', require: null, weight: 1 }];
+  if (include1d) specs.push({ key: 'matured_1d', require: 'fwd_return_1d', weight: include5d ? 0.3 : 0.35 });
+  if (include5d) specs.push({ key: 'matured_5d', require: 'fwd_return_5d', weight: 0.2 });
+  if (specs.length === 1) return [{ key: 'recent', require: null, cap: maxRows }];
+
+  // recent 的权重动态补足到 1(窗口越短,成熟口径占比越低)
+  const matureWeight = specs.filter((s) => s.key !== 'recent').reduce((sum, s) => sum + s.weight, 0);
+  specs[0].weight = Math.max(1 - matureWeight, 0.5);
+
+  const total = specs.reduce((sum, s) => sum + s.weight, 0);
+  let remain = Math.max(1, Math.floor(maxRows));
+  return specs.map((s, idx) => {
+    const cap =
+      idx === specs.length - 1
+        ? remain
+        : Math.max(1, Math.floor((maxRows * s.weight) / total));
+    remain -= cap;
+    return { key: s.key, require: s.require, cap };
+  });
 }
 
 /** 皮尔逊相关系数;样本不足或零方差返回 null */
@@ -314,6 +352,25 @@ async function fetchPaged(buildQuery, maxRows = MAX_SAMPLE_ROWS) {
 }
 
 /**
+ * 按 analysis_id 定向拉取关联表(候选/成交),避免按 created_at 扫描大量无关行。
+ * 返回 { rows, error }。
+ */
+async function fetchByAnalysisIds(db, { table, select, analysisIds }) {
+  const rows = [];
+  for (const chunk of toChunks(analysisIds)) {
+    const { data, error } = await db
+      .from(table)
+      .select(select)
+      .in('analysis_id', chunk)
+      .not('analysis_id', 'is', null)
+      .order('created_at', { ascending: false });
+    if (error) return { rows, error };
+    rows.push(...(data || []));
+  }
+  return { rows, error: null };
+}
+
+/**
  * 加载评估层原始行(getSignalStats 与参数建议器共用):每行一条非中性信号,
  * 带前瞻收益、成交/候选状态、排队度量与来源信息。011 未迁移时返回 null。
  * days 限定窗口(null=全量,受 MAX_SAMPLE_ROWS 截断)。
@@ -324,55 +381,58 @@ export async function loadSignalRows({ days = null } = {}) {
     Number.isFinite(days) && days > 0 ? new Date(Date.now() - days * 86400_000).toISOString() : null;
   const withSince = (q) => (since ? q.gte('created_at', since) : q);
 
-  const analysesFetch = await fetchPaged(() =>
-    withSince(
-      db
-        .from('news_analyses')
-        .select(
-          'id, symbol, sentiment, tier, confidence, final_confidence, signal_price, fwd_return_1h, fwd_return_1d, fwd_return_5d, created_at, news_articles(source_score, source, source_domain, url)'
-        )
-        .not('signal_price', 'is', null)
-        .in('sentiment', ['bullish', 'bearish'])
-        .order('created_at', { ascending: false })
-    )
-  );
-  if (analysesFetch.error) {
-    if (/signal_price|fwd_return/.test(analysesFetch.error.message)) {
-      return null;
+  const samplePlan = buildSamplingPlan({ days, maxRows: MAX_SAMPLE_ROWS });
+  const analysisById = new Map();
+  let analysesTruncated = false;
+  for (const slice of samplePlan) {
+    const analysesFetch = await fetchPaged(() => {
+      let q = withSince(
+        db
+          .from('news_analyses')
+          .select(
+            'id, symbol, sentiment, tier, confidence, final_confidence, signal_price, fwd_return_1h, fwd_return_1d, fwd_return_5d, created_at, news_articles(source_score, source, source_domain, url)'
+          )
+          .not('signal_price', 'is', null)
+          .in('sentiment', ['bullish', 'bearish'])
+          .order('created_at', { ascending: false })
+      );
+      if (slice.require) q = q.not(slice.require, 'is', null);
+      return q;
+    }, slice.cap);
+    if (analysesFetch.error) {
+      if (/signal_price|fwd_return/.test(analysesFetch.error.message)) {
+        return null;
+      }
+      throw new Error(analysesFetch.error.message);
     }
-    throw new Error(analysesFetch.error.message);
+    analysesTruncated = analysesTruncated || analysesFetch.truncated;
+    for (const row of analysesFetch.rows) {
+      if (!analysisById.has(row.id)) analysisById.set(row.id, row);
+    }
   }
-  const data = analysesFetch.rows;
+  const data = [...analysisById.values()].sort(
+    (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+  );
+  const analysisIds = data.map((r) => r.id).filter(Boolean);
 
   // 实际成交的分析集合(买卖都算)+ 排队成本(016 迁移容忍:缺 pool_* 列退回只取 analysis_id)。
-  // 同窗口过滤 + 时间倒序:全量截断时优先保住与最近分析对齐的成交
+  // 仅按本次样本的 analysis_id 定向拉取,避免 created_at 扫描大量无关成交。
   let tradeRows = [];
-  {
-    const full = await fetchPaged(() =>
-      withSince(
-        db
-          .from('trades')
-          .select('analysis_id, side, pool_wait_minutes, pool_drift_percent, created_at')
-          .not('analysis_id', 'is', null)
-          .order('created_at', { ascending: false })
-      )
-    );
+  if (analysisIds.length) {
+    const full = await fetchByAnalysisIds(db, {
+      table: 'trades',
+      select: 'analysis_id, side, pool_wait_minutes, pool_drift_percent, created_at',
+      analysisIds,
+    });
     if (full.error && /pool_|column|schema/i.test(full.error.message)) {
-      const basic = await fetchPaged(() =>
-        withSince(
-          db
-            .from('trades')
-            .select('analysis_id, created_at')
-            .not('analysis_id', 'is', null)
-            .order('created_at', { ascending: false })
-        )
-      );
-      // 缺列之外的失败同样不可吞:静默用空集会把全部信号标成"未交易"
+      const basic = await fetchByAnalysisIds(db, {
+        table: 'trades',
+        select: 'analysis_id, created_at',
+        analysisIds,
+      });
       if (basic.error) throw new Error(basic.error.message);
       tradeRows = basic.rows;
     } else if (full.error) {
-      // 非缺列类失败(网络/超时):不能拿部分/空结果继续——
-      // 全部信号会被静默标成"未交易",机会成本统计整组失真
       throw new Error(full.error.message);
     } else {
       tradeRows = full.rows;
@@ -395,21 +455,19 @@ export async function loadSignalRows({ days = null } = {}) {
   // 候选池状态 + 入池时宏观快照 + 状态理由(014 迁移容忍:表缺失时全部按 null,相关分组自然为空)。
   // status_reason 用于识别分配路径的风控官否决(rejected 且理由以"风控官"开头)
   let candidateById = new Map();
-  try {
-    const candFetch = await fetchPaged(() =>
-      withSince(
-        db
-          .from('candidate_signals')
-          .select('analysis_id, status, status_reason, macro_regime, created_at')
-          .not('analysis_id', 'is', null)
-          .order('created_at', { ascending: false })
-      )
-    );
-    if (!candFetch.error) {
-      candidateById = new Map(candFetch.rows.map((c) => [c.analysis_id, c]));
+  if (analysisIds.length) {
+    try {
+      const candFetch = await fetchByAnalysisIds(db, {
+        table: 'candidate_signals',
+        select: 'analysis_id, status, status_reason, macro_regime, created_at',
+        analysisIds,
+      });
+      if (!candFetch.error) {
+        candidateById = new Map(candFetch.rows.map((c) => [c.analysis_id, c]));
+      }
+    } catch {
+      // 候选池不可用时静默退回(本统计是纯观测层)
     }
-  } catch {
-    // 候选池不可用时静默退回(本统计是纯观测层)
   }
 
   const rows = (data || []).map((a) => {
@@ -444,7 +502,8 @@ export async function loadSignalRows({ days = null } = {}) {
       days: since ? days : null,
       since,
       max_rows: MAX_SAMPLE_ROWS,
-      truncated: analysesFetch.truncated,
+      truncated: analysesTruncated,
+      sample_plan: samplePlan,
       // 截断时实际覆盖到的最早信号时间(时间倒序,最后一行最旧)
       covered_since: data.length ? data[data.length - 1].created_at : null,
     },

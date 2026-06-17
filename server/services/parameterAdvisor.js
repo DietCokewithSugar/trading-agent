@@ -12,7 +12,7 @@
 import { config } from '../config.js';
 import { supabase } from '../db.js';
 import { loadSignalRows, wilsonInterval } from './signalStats.js';
-import { getShadowOverview } from './shadowPortfolio.js';
+import { getShadowOverview, computeWindowReturnPercent } from './shadowPortfolio.js';
 
 function round(n, digits = 2) {
   const f = 10 ** digits;
@@ -358,16 +358,16 @@ export async function getParameterAdvice({ days = 30 } = {}) {
         Math.max(Date.now() - days * 86400_000, earliestStart ? new Date(earliestStart).getTime() : 0)
       ).toISOString();
       const actualPct = await actualWindowReturn(since);
-      // 同窗口径:各变体的窗口收益由窗口内净值序列首末两点算出,与实盘窗口对齐
+      // 同窗口径:优先使用后端直接给出的 window_return_pct;
+      // 兼容旧结构时回退到窗口内净值序列首末两点。
       const variants = overview.variants.map((v) => {
-        const points = overview.series?.[v.variant] || [];
-        const first = Number(points[0]?.total_value);
-        const last = Number(points[points.length - 1]?.total_value);
-        const windowReturnPct =
-          points.length >= 2 && first > 0 && Number.isFinite(last)
-            ? ((last - first) / first) * 100
-            : null;
-        return { ...v, window_return_pct: windowReturnPct };
+        const direct = Number(v.window_return_pct);
+        return {
+          ...v,
+          window_return_pct: Number.isFinite(direct)
+            ? direct
+            : computeWindowReturnPercent(overview.series?.[v.variant] || []),
+        };
       });
       shadow = evaluateShadowRules({ variants, actualReturnPct: actualPct });
     }
