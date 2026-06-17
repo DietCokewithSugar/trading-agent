@@ -88,6 +88,7 @@ export default function AblationPage({ version = 0, onSymbolClick }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [returnView, setReturnView] = useState('both');
   // 展开行的成交流水懒加载缓存:variant -> { loading, trades, error }
   const [tradeCache, setTradeCache] = useState({});
 
@@ -208,22 +209,16 @@ export default function AblationPage({ version = 0, onSymbolClick }) {
     {
       title: '组合',
       dataIndex: 'variant',
-      width: 150,
+      width: 280,
       render: (v) => (
-        <Tag color={v === 'actual' ? 'blue' : 'default'} style={{ marginRight: 0 }}>
-          {SHADOW_VARIANT_LABELS[v] || v}
-        </Tag>
-      ),
-    },
-    {
-      title: '说明',
-      dataIndex: 'variant',
-      key: 'desc',
-      ellipsis: true,
-      render: (v) => (
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          {SHADOW_VARIANT_DESCRIPTIONS[v] || ''}
-        </Typography.Text>
+        <Space direction="vertical" size={2} style={{ width: '100%' }}>
+          <Tag color={v === 'actual' ? 'blue' : 'default'} style={{ marginRight: 0, width: 'fit-content' }}>
+            {SHADOW_VARIANT_LABELS[v] || v}
+          </Tag>
+          <Typography.Text type="secondary" style={{ fontSize: 12, lineHeight: 1.35 }}>
+            {SHADOW_VARIANT_DESCRIPTIONS[v] || ''}
+          </Typography.Text>
+        </Space>
       ),
     },
     {
@@ -232,22 +227,6 @@ export default function AblationPage({ version = 0, onSymbolClick }) {
       width: 120,
       align: 'right',
       render: (v) => <span className="num">{fmtMoney(v)}</span>,
-    },
-    {
-      title: '窗口收益(同图)',
-      dataIndex: 'window_return_pct',
-      width: 110,
-      align: 'right',
-      render: (v) =>
-        v === null || v === undefined ? '—' : <span className={`num ${pctClass(Number(v))}`}>{fmtPercent(v)}</span>,
-    },
-    {
-      title: '累计收益(自启用)',
-      dataIndex: 'lifetime_return_pct',
-      width: 130,
-      align: 'right',
-      render: (v) =>
-        v === null || v === undefined ? '—' : <span className={`num ${pctClass(Number(v))}`}>{fmtPercent(v)}</span>,
     },
     {
       title: '现金',
@@ -270,7 +249,33 @@ export default function AblationPage({ version = 0, onSymbolClick }) {
       align: 'right',
       render: (v) => (v === null || v === undefined ? '—' : <span className="num">{v}</span>),
     },
-  ];
+  ].concat(
+    returnView === 'window' || returnView === 'both'
+      ? [
+          {
+            title: '窗口收益(同图)',
+            dataIndex: 'window_return_pct',
+            width: 120,
+            align: 'right',
+            render: (v) =>
+              v === null || v === undefined ? '—' : <span className={`num ${pctClass(Number(v))}`}>{fmtPercent(v)}</span>,
+          },
+        ]
+      : []
+  ).concat(
+    returnView === 'lifetime' || returnView === 'both'
+      ? [
+          {
+            title: '累计收益(自启用)',
+            dataIndex: 'lifetime_return_pct',
+            width: 130,
+            align: 'right',
+            render: (v) =>
+              v === null || v === undefined ? '—' : <span className={`num ${pctClass(Number(v))}`}>{fmtPercent(v)}</span>,
+          },
+        ]
+      : []
+  );
 
   const tradeColumns = [
     { title: '时间', dataIndex: 'created_at', width: 110, render: (v) => fmtTime(v) },
@@ -568,14 +573,29 @@ export default function AblationPage({ version = 0, onSymbolClick }) {
         )}
       </Card>
 
-      <Card size="small" title="组合对比(点击行展开:说明 / 胜率 / 持仓 / 成交)">
+      <Card
+        size="small"
+        title="组合对比(点击行展开:说明 / 胜率 / 持仓 / 成交)"
+        extra={
+          <Segmented
+            size="small"
+            value={returnView}
+            onChange={setReturnView}
+            options={[
+              { label: '窗口收益', value: 'window' },
+              { label: '累计收益', value: 'lifetime' },
+              { label: '同时显示', value: 'both' },
+            ]}
+          />
+        }
+      >
         <Table
           rowKey="variant"
           size="small"
           columns={summaryColumns}
           dataSource={tableRows}
           pagination={false}
-          scroll={{ x: 980 }}
+          scroll={{ x: 1120 }}
           expandable={{
             expandedRowRender: renderExpanded,
             onExpand: (expanded, record) => {

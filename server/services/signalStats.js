@@ -20,7 +20,7 @@ import { isPressRelease } from './credibility.js';
 
 const HORIZONS = ['1h', '1d', '5d'];
 const PAGE_SIZE = 1000;
-const MAX_SAMPLE_ROWS = 5000;
+const MAX_SAMPLE_ROWS = 30000;
 const SAMPLE_WEIGHTS = Object.freeze({
   recent: 5,
   matured_1d: 3,
@@ -512,7 +512,9 @@ export async function loadSignalRows({ days = null } = {}) {
       days: since ? days : null,
       since,
       max_rows: MAX_SAMPLE_ROWS,
-      truncated: analysesTruncated,
+      // 仅当去重后的最终样本达到上限且任一分层采样触顶时,才提示被截断
+      // (避免分层重叠导致 unique<上限 却误报“达到上限”)
+      truncated: analysesTruncated && data.length >= MAX_SAMPLE_ROWS,
       sample_plan: samplePlan,
       // 截断时实际覆盖到的最早信号时间(时间倒序,最后一行最旧)
       covered_since: data.length ? data[data.length - 1].created_at : null,
