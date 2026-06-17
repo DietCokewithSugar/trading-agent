@@ -1,4 +1,5 @@
 import { supabase } from '../db.js';
+import { config } from '../config.js';
 import { isPressRelease } from './credibility.js';
 
 /**
@@ -20,7 +21,9 @@ import { isPressRelease } from './credibility.js';
 
 const HORIZONS = ['1h', '1d', '5d'];
 const PAGE_SIZE = 1000;
-const MAX_SAMPLE_ROWS = 5000;
+// 单次统计加载的样本上限(可经 SIGNAL_STATS_MAX_ROWS 配置)。按 created_at 倒序截断,
+// 上限过低会把已成熟(有 1/5 个交易日前瞻收益)的较早信号挤出窗口,统计逐渐丢失这些口径。
+const MAX_SAMPLE_ROWS = config.signalStatsMaxRows;
 
 function round(n, digits = 2) {
   const f = 10 ** digits;

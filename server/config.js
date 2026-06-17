@@ -56,6 +56,12 @@ export const config = {
   // 每轮最多用 DeepSeek 分析多少条新新闻(控制 API 成本)
   maxAnalyzePerCycle: num(process.env.MAX_ANALYZE_PER_CYCLE, 8),
 
+  // 信号质量页/参数建议器单次加载的最大信号样本数(纯观测,不影响交易)。
+  // 按 created_at 倒序分页拉取,达到该上限即截断——上限过低时,新信号(尚未成熟、
+  // 无 1/5 个交易日前瞻收益)会把更早已成熟的信号挤出窗口,导致 1d/5d 统计逐渐消失。
+  // 设得足够覆盖全部历史信号即可让成熟样本始终在内;截断时页面给出明确提示。
+  signalStatsMaxRows: num(process.env.SIGNAL_STATS_MAX_ROWS, 20000),
+
   // 是否补充 Yahoo Finance RSS 新闻源
   enableYahoo: process.env.ENABLE_YAHOO !== 'false',
 

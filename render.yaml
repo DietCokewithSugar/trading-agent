@@ -37,6 +37,8 @@ services:
         value: "30"
       - key: MAX_ANALYZE_PER_CYCLE
         value: "8"
+      - key: SIGNAL_STATS_MAX_ROWS
+        value: "20000"
       - key: INITIAL_CAPITAL
         value: "100000"
       - key: TRADE_TIER_THRESHOLD
