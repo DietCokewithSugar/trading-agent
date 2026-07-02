@@ -13,6 +13,7 @@ import { listRecentMacroEvents } from '../services/macroService.js';
 import { getBlackoutState, getUpcomingEvents } from '../services/macroCalendar.js';
 import { countByStatus, listPoolPreview } from '../services/candidateStore.js';
 import { getShadowOverview, getShadowTrades } from '../services/shadowPortfolio.js';
+import { getBrokerMirrorOverview } from '../services/brokerMirror.js';
 import { safeTokenEqual, createAuthRateLimiter } from '../services/authGuard.js';
 import { clusterAnalyses } from '../services/newsDedup.js';
 
@@ -258,6 +259,18 @@ router.get(
     const trades = await getShadowTrades({ variant, limit });
     if (trades === null) return res.json({ available: false });
     res.json({ available: true, variant, trades });
+  })
+);
+
+/**
+ * 券商模拟对照账本(021):实盘成交在外部券商模拟账户的真实撮合结果,
+ * 逐笔成交价偏差(bps)统计 + 账户净值对照。未配置券商 key 返回 enabled:false,
+ * 表缺失(021 未执行)返回 available:false。载荷按约定不含供应商名称。
+ */
+router.get(
+  '/broker-mirror',
+  asyncHandler(async (req, res) => {
+    res.json(await getBrokerMirrorOverview());
   })
 );
 

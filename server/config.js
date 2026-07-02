@@ -46,6 +46,17 @@ export const config = {
   supabaseUrl: process.env.SUPABASE_URL || '',
   supabaseKey: process.env.SUPABASE_SERVICE_ROLE_KEY || '',
 
+  // ── 券商模拟对照账本(021,Alpaca Paper Trading)──
+  // 实盘每笔成交镜像到券商模拟账户(marketable 限价单),度量成交价/净值偏差,
+  // 校准内部滑点模型。纯观测层:key 缺失时整体停用,绝不影响交易主链路
+  alpacaKeyId: process.env.ALPACA_KEY_ID || '',
+  alpacaSecretKey: process.env.ALPACA_SECRET_KEY || '',
+  alpacaBaseUrl: process.env.ALPACA_BASE_URL || 'https://paper-api.alpaca.markets',
+  enableBrokerMirror: process.env.ENABLE_BROKER_MIRROR !== 'false',
+  // marketable 限价单的穿价容忍(%):买 = 内部成交价 ×(1+N%),卖 = ×(1−N%);
+  // 当日有效,收盘未成交自动过期并计入"未成交"偏差样本
+  brokerMirrorLimitSlackPercent: num(process.env.BROKER_MIRROR_LIMIT_SLACK_PERCENT, 1),
+
   // 新闻轮询间隔(秒)。兼容旧的 NEWS_POLL_MINUTES 配置
   newsPollSeconds: num(
     process.env.NEWS_POLL_SECONDS,

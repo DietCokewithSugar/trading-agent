@@ -37,6 +37,7 @@ import {
 } from './shadowPortfolio.js';
 import { beginDecisionEpisode, attachOfficer, finishDecision } from './decisionLog.js';
 import { bumpTakeProfit } from './holding.js';
+import { mirrorTrade } from './brokerMirror.js';
 
 function round4(n) {
   return Math.round(n * 10000) / 10000;
@@ -1328,6 +1329,7 @@ async function settleBuyLocked({
     await refreshHoldClock(symbol);
     const trade = logTrade(await recordFillDetails(data, fill, extras));
     shadowMirror(trade);
+    mirrorTrade(trade); // 券商模拟对照账本(021,fire-and-forget)
     return { trade };
   }
   if (!isMissingTradeRpc(error)) throw new Error(`买入 ${symbol} 失败: ${error.message}`);
@@ -1347,6 +1349,7 @@ async function settleBuyLocked({
   noteBuyDone();
   await refreshHoldClock(symbol);
   shadowMirror(trade);
+  mirrorTrade(trade); // 券商模拟对照账本(021,fire-and-forget)
   return { trade };
 }
 
@@ -1489,6 +1492,7 @@ export async function executeSellOrder({
   // 影子组合:跟随型变体按同等比例镜像卖出(覆盖新闻/止损/止盈/复查全部卖出路径)
   if (trade) {
     mirrorSell(trade, { fraction: soldFraction });
+    mirrorTrade(trade); // 券商模拟对照账本(021,fire-and-forget)
   }
 
   // 平仓复盘:在交易锁外异步执行(LLM 调用可达 90 秒,绝不阻塞下单链路),
