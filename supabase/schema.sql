@@ -58,6 +58,11 @@ create table if not exists positions (
   opened_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+-- 持仓时限(020):opened_at 老库可能缺列(此前从无迁移补过);hold_refreshed_at 为
+-- 最近一次"持有依据刷新"时间(买入成交或同票新利好事件),持有期限 = 该值(缺失回退
+-- opened_at)+ MAX_HOLD_HOURS,到期由风控循环全仓卖出(trigger='max_hold')
+alter table positions add column if not exists opened_at timestamptz not null default now();
+alter table positions add column if not exists hold_refreshed_at timestamptz not null default now();
 
 -- 交易记录(含买卖原因与关联新闻)
 create table if not exists trades (
@@ -243,6 +248,9 @@ alter table trades add column if not exists macro_regime text;
 -- 每轮运行新增计数(014):入池候选数 / 宏观事件数
 alter table cycle_runs add column if not exists pooled integer not null default 0;
 alter table cycle_runs add column if not exists macro_events integer not null default 0;
+
+-- 每轮运行新增计数(020):同票利好刷新(刷新持有时钟+上抬止盈,不产生交易)的次数
+alter table cycle_runs add column if not exists refreshed integer not null default 0;
 
 -- 开盘队列(010):休市时段产生的交易信号挂单,待下一常规时段以开盘价成交,
 -- 隔夜跳空由市场兑现而不是被模拟盘白捡

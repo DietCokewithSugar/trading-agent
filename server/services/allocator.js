@@ -1,8 +1,9 @@
 // 资金分配器:候选池统一打分排序 → 冲突消解 → 按分数高低把资金分给最优信号。
 // 解决"先到的新闻把现金买光"的路径依赖:谁分高谁先买,资金不足的标记
 // capital_constrained 留池,下一轮(或卖出释放现金后)自动复评。
-// 节奏(用户指定):非盘中只入池持续排序;开盘首轮立即清算隔夜候选,
-// 盘中每 ALLOCATION_INTERVAL_MINUTES 一轮。LLM 交易决策只对每轮头部候选发生。
+// 节奏(用户指定):休市(夜间/周末/假日)只入池持续排序;可交易时段(盘前 04:00 起,
+// 含盘中/盘后至 20:00)每 ALLOCATION_INTERVAL_MINUTES 一轮,当日首轮(盘前开始)
+// 立即清算隔夜候选。LLM 交易决策只对每轮头部候选发生。
 // 本文件上半部为纯函数(打分/合并/排名,node:test 直接测),下半部为编排薄层。
 import { supabase } from '../db.js';
 import { config } from '../config.js';
@@ -23,9 +24,10 @@ import {
   cancelSiblings,
   countByStatus,
 } from './candidateStore.js';
-import { executeCandidate } from './trader.js';
-import { getPortfolio } from './portfolio.js';
+import { executeCandidate, executeSellOrder } from './trader.js';
+import { getPortfolio, getValuation } from './portfolio.js';
 import { onMacroFilteredCandidates } from './shadowPortfolio.js';
+import { pickRotationSell } from './rotation.js';
 
 export { tierScore };
 
@@ -124,12 +126,20 @@ const PER_CANDIDATE_CAPITAL_REASONS = new Set(['max_positions', 'position_cap'])
 const GLOBAL_TRANSIENT_REASONS = new Set(['trading_halted', 'daily_loss_halt', 'macro_shock']);
 
 /**
- * 调度器每分钟调用:盘中按 ALLOCATION_INTERVAL_MINUTES 限速,
- * 开盘后的第一个 tick 立即执行(清算隔夜积累的候选)。非盘中不执行。
+ * 止盈腾位(选盈利票机制)可触发的拒绝原因:卖出确实能缓解的容量/现金类约束。
+ * 排除 daily_budget(卖出不回补当日买入预算)、new_position_quota(卖出不恢复开仓配额)、
+ * position_cap(同票仓位帽,卖别的票无济于事)。
+ */
+const ROTATION_REASONS = new Set(['max_positions', 'cash_reserve', 'gross_exposure']);
+
+/**
+ * 调度器每分钟调用:可交易时段(盘前 04:00 起,含盘中/盘后)按
+ * ALLOCATION_INTERVAL_MINUTES 限速,当日第一个 tick(盘前开始时)立即执行,
+ * 清算隔夜积累的候选。休市(夜间/周末/假日)不执行,候选只入池排序。
  */
 export async function maybeRunAllocation() {
   if (!config.enableMacro || !isPoolAvailable()) return;
-  if (getMarketSession() !== 'regular') return;
+  if (getMarketSession() === 'closed') return;
   const today = etDayKey();
   const firstRunOfDay = allocatorStatus.lastRunDay !== today;
   const intervalMs = Math.max(config.allocationIntervalMinutes, 1) * 60_000;
@@ -328,6 +338,8 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
 
     let allocated = 0;
     let halted = false;
+    // 止盈腾位闸:每轮最多腾位一次(尝试即计数,失败也算),避免一轮内连环清仓
+    let rotated = false;
     for (let i = 0; i < planned.length; i += 1) {
       const candidate = planned[i];
       const conflictScale = scaleById.get(candidate.id);
@@ -367,6 +379,23 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
       } catch (err) {
         console.warn(`[allocator] ${candidate.symbol} 执行失败(候选留池): ${err.message}`);
         continue;
+      }
+
+      // 止盈腾位(选盈利票机制):好候选被容量/现金类约束拒绝时,全仓止盈一个
+      // 最接近止盈价的盈利持仓,腾出容量后立即重试该候选一次;
+      // 无盈利持仓/卖出失败则落回原 capital_constrained 流程
+      if (!result?.trade && ROTATION_REASONS.has(result?.reason) && !rotated) {
+        rotated = true;
+        const sellTrade = await rotateProfitablePosition(candidate.symbol, result.reason);
+        if (sellTrade) {
+          if (Number.isFinite(cashNow)) cashNow += Number(sellTrade.amount) || 0;
+          try {
+            result = await executeCandidate(candidate, { macroContext, extraScale, macroScale });
+          } catch (err) {
+            console.warn(`[allocator] ${candidate.symbol} 腾位后重试失败(候选留池): ${err.message}`);
+            continue;
+          }
+        }
       }
 
       if (result?.trade) {
@@ -450,6 +479,44 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
     console.error(`[allocator] 本轮分配失败: ${err.message}`);
   } finally {
     allocatorStatus.running = false;
+  }
+}
+
+/**
+ * 止盈腾位卖出:在未实现盈利且设有止盈价的持仓中,选 current_price/take_profit
+ * 最大者(最接近止盈价)全仓止盈,为新候选腾出持仓容量/现金。
+ * 排除候选自身同票(禁止卖 X 再买 X)。返回卖出 trade 或 null(无盈利持仓/失败)。
+ */
+async function rotateProfitablePosition(excludeSymbol, constraintReason) {
+  let valuation;
+  try {
+    valuation = await getValuation();
+  } catch (err) {
+    console.warn(`[allocator] 止盈腾位前获取估值失败: ${err.message}`);
+    return null;
+  }
+  // 持仓报价缺失时估值不可信,不据此做腾位决策(与 settleBuyLocked 的约定一致)
+  if (valuation.missing_quotes) return null;
+  const pick = pickRotationSell(valuation.positions, { excludeSymbol });
+  if (!pick) {
+    console.log(`[allocator] 无盈利持仓可腾位(${constraintReason}),候选按资金受限留池`);
+    return null;
+  }
+  const reason = `止盈腾位(${constraintReason}):现价 $${pick.current_price} 最接近止盈价 $${pick.take_profit},为新候选腾出容量`;
+  console.log(`[allocator] ${pick.symbol} ${reason}`);
+  try {
+    const trade = await executeSellOrder({
+      symbol: pick.symbol,
+      price: pick.current_price,
+      fraction: 1,
+      reason,
+      trigger: 'rotation',
+    });
+    if (trade) broadcast('trade', trade);
+    return trade || null;
+  } catch (err) {
+    console.warn(`[allocator] ${pick.symbol} 止盈腾位卖出失败: ${err.message}`);
+    return null;
   }
 }
 

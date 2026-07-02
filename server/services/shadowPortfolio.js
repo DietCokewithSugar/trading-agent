@@ -26,6 +26,7 @@ import { computeFill } from './execution.js';
 import { scaleFraction } from './sizing.js';
 import { sanitizeProviderText } from './metrics.js';
 import { isHalted } from './halt.js';
+import { isHoldExpired } from './holding.js';
 import {
   computeShadowSpend,
   applyBuy,
@@ -575,16 +576,21 @@ export function mirrorSell(trade, { fraction = 1 } = {}) {
 
 let stopsRunning = false;
 
-/** 影子持仓止损/止盈监控:与实盘 riskMonitor 同口径(全仓卖出),休市/全局 halt 跳过 */
+/**
+ * 影子持仓止损/止盈/持有时限监控:与实盘 riskMonitor 同口径(全仓卖出),休市/全局 halt 跳过。
+ * 持有时限仅以 opened_at 计(影子侧无"利好刷新"概念,消融近似);
+ * spy_benchmark 为买入持有基准,不受时限约束。
+ */
 export async function checkShadowStops() {
   if (!isShadowAvailable() || stopsRunning || isHalted()) return;
   if (getMarketSession() === 'closed') return;
   stopsRunning = true;
   try {
+    // 全量读取(不再按止损/止盈过滤):持有时限对未设止损的持仓同样生效
     const res = await supabase()
       .from('shadow_positions')
       .select('*')
-      .or('stop_loss.not.is.null,take_profit.not.is.null');
+      .neq('variant', 'spy_benchmark');
     const positions = unwrap(res, '读取影子持仓');
     if (!positions?.length) return;
 
@@ -601,14 +607,17 @@ export async function checkShadowStops() {
       const take = pos.take_profit !== null && pos.take_profit !== undefined ? Number(pos.take_profit) : null;
 
       let trigger = null;
-      if (stop !== null && price <= stop) trigger = 'stop_loss';
+      if (isHoldExpired(pos, { maxHoldHours: config.maxHoldHours })) trigger = 'max_hold';
+      else if (stop !== null && price <= stop) trigger = 'stop_loss';
       else if (take !== null && price >= take) trigger = 'take_profit';
       if (!trigger) continue;
 
       const reason =
-        trigger === 'stop_loss'
-          ? `影子止损:现价 $${price} 跌破止损价 $${stop}`
-          : `影子止盈:现价 $${price} 触及止盈价 $${take}`;
+        trigger === 'max_hold'
+          ? `影子持有超时:超过 ${config.maxHoldHours} 小时强制平仓`
+          : trigger === 'stop_loss'
+            ? `影子止损:现价 $${price} 跌破止损价 $${stop}`
+            : `影子止盈:现价 $${price} 触及止盈价 $${take}`;
       await enqueue(`${pos.variant} 止损止盈`, () =>
         shadowSell(pos.variant, {
           symbol: pos.symbol,

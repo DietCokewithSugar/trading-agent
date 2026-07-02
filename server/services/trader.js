@@ -36,6 +36,7 @@ import {
   mirrorSell,
 } from './shadowPortfolio.js';
 import { beginDecisionEpisode, attachOfficer, finishDecision } from './decisionLog.js';
+import { bumpTakeProfit } from './holding.js';
 
 function round4(n) {
   return Math.round(n * 10000) / 10000;
@@ -201,6 +202,15 @@ export async function handleSignal(article, analysisRow) {
     // 与实盘走不走候选池无关——它们消融的正是候选池+LLM 决策链本身
     onBullishSignal({ article, analysisRow, quote, profile, price });
 
+    // 同票新利好刷新(020):已持有该票时不再入池加仓,确定性刷新持有时钟并上抬止盈线。
+    // 上游已保证一/二档(TRADE_TIER_THRESHOLD)、置信度 ≥0.5、事件级去重(同一事件的
+    // 重复报道到不了这里,满足"须为不同利好"的相似度要求)与综合置信度门槛;
+    // 放在准入门槛之后——基本面/流动性恶化的持有票不因新闻续命。
+    // 刷新写入失败 fail-closed:事件不消费(等下一报道重试),也不退回入池路径
+    const refresh = await refreshHeldPositionOnBullish({ symbol, analysisRow });
+    if (refresh === 'refreshed') return { refreshed: true };
+    if (refresh === 'failed') return null;
+
     // 候选入池(014):利好信号不再先到先得即时成交,而是进候选池由资金分配器
     // 统一打分排序后分配资金——信号时刻不发起任何 LLM 交易决策调用。
     // 入池失败(表缺失/未启用宏观)退回下方的旧即时交易路径,信号不丢
@@ -220,6 +230,10 @@ export async function handleSignal(article, analysisRow) {
     await holdBuyCandidates(symbol, '同票利空信号触发冲突搁置');
     // 影子组合:独立变体(即时成交/等权)收到利空即清仓同票
     onBearishSignal({ analysisRow, quote, price });
+
+    // 确定性利空清仓:一/二档利空(上游已按档位/置信度/事件去重把关)且已持有 →
+    // 不经 LLM 立即全仓卖出;未持有 → 只做多无仓可卖,直接结束(省一次 LLM 决策)
+    return sellHeldPositionOnBearish({ symbol, price, analysisRow, article });
   }
 
   const valuation = await getValuation();
@@ -302,6 +316,11 @@ export async function handleSignal(article, analysisRow) {
   }
 
   if (decision.action === 'buy') {
+    // 固定止盈止损(代码强制):买入均价 ±config 百分比,触及即全仓卖出。
+    // LLM 的止损建议只留在决策回放快照(beginDecisionEpisode 已拷贝),成交一律用固定值
+    decision.stopLossPercent = config.stopLossPercent;
+    decision.takeProfitPercent = config.takeProfitPercent;
+
     // 仓位缩放链(按序叠加):LLM fraction → 档位/置信度/来源可信度缩放 → 风控官 scale → 硬性风控帽。
     // fraction 的基数是组合总值(受可用现金约束),而非可用现金本身——按现金比例下单
     // 会让先到的信号占大仓、后到的信号只剩零头,仓位大小取决于新闻先后而非信号强弱。
@@ -393,13 +412,7 @@ export async function handleSignal(article, analysisRow) {
           decision.fraction = scaled;
           officerScale = verdict.scale;
         }
-        // 只接受比交易员方案更紧的止损
-        if (
-          verdict.adjustedStopLossPercent !== null &&
-          verdict.adjustedStopLossPercent < decision.stopLossPercent
-        ) {
-          decision.stopLossPercent = verdict.adjustedStopLossPercent;
-        }
+        // 止盈止损为固定 ±config 百分比,不再采纳风控官的止损调整(verdict 仍完整落库)
         if (verdict.reason) {
           decision.reason = `${decision.reason};风控官:${verdict.reason}`.slice(0, 300);
         }
@@ -524,6 +537,131 @@ export async function handleSignal(article, analysisRow) {
       : { outcome: 'sell_skipped', reason: '未持有该股票或卖出金额低于下限' }
   );
   return sellTrade;
+}
+
+// hold_refreshed_at 列缺失(未执行 020 迁移)时停用持有时钟刷新,只警告一次
+let holdColumnUnavailable = false;
+
+/**
+ * 买入成交后刷新持有时钟(020):任何买入(新开仓/加仓/队列成交)都重置 48h 持有时限。
+ * best-effort:失败只告警不影响成交;列缺失警告一次后停用。
+ */
+async function refreshHoldClock(symbol) {
+  if (holdColumnUnavailable) return;
+  const { error } = await supabase()
+    .from('positions')
+    .update({ hold_refreshed_at: new Date().toISOString() })
+    .eq('symbol', symbol);
+  if (!error) return;
+  if (/hold_refreshed_at/.test(error.message)) {
+    holdColumnUnavailable = true;
+    console.warn('[trader] hold_refreshed_at 列不可用,持有时钟刷新停用(请执行 020 迁移)');
+  } else {
+    console.warn(`[trader] ${symbol} 持有时钟刷新失败: ${error.message}`);
+  }
+}
+
+/**
+ * 同票新利好刷新(020):已持有该票时,重置持有时钟(hold_refreshed_at)并把止盈线
+ * 上抬 takeProfitStepPercent 个百分点(逐事件累加,基数为加权平均成本)。
+ * 返回 'refreshed'=已刷新(调用方消费事件)/ false=未持有(走常规入池)/
+ * 'failed'=持有但读写失败(fail-closed:事件不消费,下轮重试,绝不误入池加仓)。
+ */
+async function refreshHeldPositionOnBullish({ symbol, analysisRow }) {
+  let position;
+  try {
+    const { data, error } = await supabase()
+      .from('positions')
+      .select('symbol, avg_cost, take_profit')
+      .eq('symbol', symbol)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    position = data;
+  } catch (err) {
+    console.warn(`[trader] ${symbol} 利好刷新前查询持仓失败: ${err.message}`);
+    return 'failed';
+  }
+  if (!position) return false;
+
+  const newTakeProfit = bumpTakeProfit({
+    takeProfit: position.take_profit,
+    avgCost: position.avg_cost,
+    stepPercent: config.takeProfitStepPercent,
+    defaultTakeProfitPercent: config.takeProfitPercent,
+  });
+  const patch = { updated_at: new Date().toISOString() };
+  if (!holdColumnUnavailable) patch.hold_refreshed_at = new Date().toISOString();
+  if (newTakeProfit !== null && newTakeProfit !== position.take_profit) {
+    patch.take_profit = newTakeProfit;
+  }
+
+  let { error } = await supabase().from('positions').update(patch).eq('symbol', symbol);
+  if (error && /hold_refreshed_at/.test(error.message)) {
+    // 020 未执行:去掉刷新列重试,止盈上抬仍生效(时钟刷新待迁移后可用)
+    holdColumnUnavailable = true;
+    console.warn('[trader] hold_refreshed_at 列不可用,持有时钟刷新停用(请执行 020 迁移)');
+    const { hold_refreshed_at: _stripped, ...rest } = patch;
+    ({ error } = await supabase().from('positions').update(rest).eq('symbol', symbol));
+  }
+  if (error) {
+    console.warn(`[trader] ${symbol} 利好刷新写入失败: ${error.message}`);
+    return 'failed';
+  }
+  console.log(
+    `[trader] ${symbol} 利好刷新: 持有时钟重置,止盈 ${position.take_profit ?? '未设'} → ${newTakeProfit}(第${analysisRow.tier}档新事件)`
+  );
+  return 'refreshed';
+}
+
+/**
+ * 确定性利空清仓:一/二档利空且已持有 → 不经 LLM 立即全仓卖出;
+ * 休市时段挂入开盘队列(入队失败退回立即成交,同 010 缺失回退)。
+ * trigger 沿用 'news':开盘队列卖单成交时同样落 'news'(pending_orders 无 trigger 列),
+ * 两条成交路径口径一致,且同向交易冷却(checkCooldown 只统计 news)语义不变。
+ * 返回 trade / { queued } / null(未持有或查询失败,事件均不消费)。
+ */
+async function sellHeldPositionOnBearish({ symbol, price, analysisRow, article }) {
+  let held = false;
+  try {
+    const { data, error } = await supabase()
+      .from('positions')
+      .select('symbol')
+      .eq('symbol', symbol)
+      .maybeSingle();
+    if (error) throw new Error(error.message);
+    held = Boolean(data);
+  } catch (err) {
+    // fail-closed:读库失败不消费事件,下一报道重试(与"去重失败即跳过"同一约定)
+    console.warn(`[trader] ${symbol} 利空清仓前查询持仓失败: ${err.message}`);
+    return null;
+  }
+  if (!held) return null;
+
+  const summary = analysisRow.event_summary || '';
+  const reason = `利空信号(第${analysisRow.tier}档)确定性清仓${summary ? `:${summary}` : ''}`.slice(0, 300);
+  if (getMarketSession() === 'closed') {
+    const pending = await enqueuePendingOrder({
+      symbol,
+      side: 'sell',
+      fraction: 1,
+      ref_price: round4(price),
+      reason,
+      news_id: article.id,
+      analysis_id: analysisRow.id,
+    });
+    if (pending) return { queued: true, pending };
+  }
+  console.log(`[trader] ${symbol} ${reason}`);
+  return executeSellOrder({
+    symbol,
+    price,
+    fraction: 1,
+    reason,
+    trigger: 'news',
+    news_id: article.id,
+    analysis_id: analysisRow.id,
+    meta: { run_id: currentRunId() },
+  });
 }
 
 /**
@@ -664,6 +802,10 @@ export async function executeCandidate(candidate, { macroContext = null, extraSc
     return { reject: `决策为${decision.action}: ${decision.reason}`.slice(0, 200), reason: 'llm_hold' };
   }
 
+  // 固定止盈止损(代码强制,与即时路径一致):LLM 建议只留在决策回放快照,成交用 ±config 百分比
+  decision.stopLossPercent = config.stopLossPercent;
+  decision.takeProfitPercent = config.takeProfitPercent;
+
   // 仓位缩放链(与即时路径同序):档位/置信度/来源 → 宏观环境(extraScale)→ 连亏 → 风控官
   const srcScore =
     article.source_score === null || article.source_score === undefined
@@ -749,12 +891,7 @@ export async function executeCandidate(candidate, { macroContext = null, extraSc
         decision.fraction = scaled;
         officerScale = verdict.scale;
       }
-      if (
-        verdict.adjustedStopLossPercent !== null &&
-        verdict.adjustedStopLossPercent < decision.stopLossPercent
-      ) {
-        decision.stopLossPercent = verdict.adjustedStopLossPercent;
-      }
+      // 止盈止损为固定 ±config 百分比,不再采纳风控官的止损调整(verdict 仍完整落库)
       if (verdict.reason) {
         decision.reason = `${decision.reason};风控官:${verdict.reason}`.slice(0, 300);
       }
@@ -881,7 +1018,8 @@ async function executeBuyStructured({ symbol, price, decision, analysisRow, arti
 }
 
 /**
- * 开盘队列成交:休市期间挂起的买单在常规时段以当日开盘价成交。
+ * 开盘队列成交:休市期间挂起的买单在下一可交易时段成交——常规时段以当日开盘价,
+ * 盘前/盘后以实时盘外成交价(quote.open 在盘前是上一交易日的过期开盘价,不可用)。
  * 不做漂移熔断——隔夜跳空正是这条路径要如实承担的成本;
  * 服务重启导致的延迟处理同样按开盘价回填(等价于市价开盘单)。
  * 返回 { trade } 成交 / { reject } 永久作废原因 / null 暂时失败(调用方下轮重试)。
@@ -901,10 +1039,13 @@ export async function executeQueuedBuy({
       console.warn(`[trader] ${symbol} 队列成交时无法获取报价,留待下轮重试`);
       return null;
     }
-    // 当日开盘价即市价开盘单的成交基准;开盘价缺失(刚开盘数据未就绪)用最新价
+    // 常规时段:当日开盘价即市价开盘单的成交基准(缺失时用最新价);
+    // 盘前/盘后:用 getQuote 已合并的盘外实时成交价(effective_price)
     const open = Number(quote.open);
     const fillQuote =
-      Number.isFinite(open) && open > 0 ? { ...quote, effective_price: open } : quote;
+      getMarketSession() === 'regular' && Number.isFinite(open) && open > 0
+        ? { ...quote, effective_price: open }
+        : quote;
     return settleBuyLocked({
       symbol,
       quote: fillQuote,
@@ -1183,6 +1324,8 @@ async function settleBuyLocked({
   });
   if (!error) {
     noteBuyDone();
+    // 任何买入成交(新开/加仓/队列)都刷新 48h 持有时钟(020,best-effort)
+    await refreshHoldClock(symbol);
     const trade = logTrade(await recordFillDetails(data, fill, extras));
     shadowMirror(trade);
     return { trade };
@@ -1202,6 +1345,7 @@ async function settleBuyLocked({
     extras,
   });
   noteBuyDone();
+  await refreshHoldClock(symbol);
   shadowMirror(trade);
   return { trade };
 }

@@ -121,6 +121,8 @@ export const TRIGGER_LABELS = {
   stop_loss: '自动止损',
   take_profit: '自动止盈',
   review: '持仓复查',
+  max_hold: '持有超时',
+  rotation: '止盈腾位',
 };
 
 // ===== 宏观环境与候选池(014)的标签映射 =====

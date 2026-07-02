@@ -51,8 +51,16 @@ services:
         value: "30"
       - key: ENABLE_REFLECTION
         value: "true"
+      - key: STOP_LOSS_PERCENT
+        value: "2"
+      - key: TAKE_PROFIT_PERCENT
+        value: "2"
+      - key: TAKE_PROFIT_STEP_PERCENT
+        value: "1"
+      - key: MAX_HOLD_HOURS
+        value: "48"
       - key: ENABLE_TRAILING_STOP
-        value: "true"
+        value: "false"
       - key: ENABLE_POSITION_REVIEW
         value: "true"
       - key: POSITION_REVIEW_HOUR
@@ -82,7 +90,7 @@ services:
       - key: DAILY_LOSS_HALT_PERCENT
         value: "2"
       - key: MAX_OPEN_POSITIONS
-        value: "10"
+        value: "15"
       - key: MAX_SECTOR_FRACTION
         value: "0.35"
       - key: LOSS_STREAK_COUNT
@@ -118,7 +126,7 @@ services:
       - key: CANDIDATE_MAX_AGE_HOURS
         value: "24"
       - key: MAX_NEW_POSITIONS_PER_DAY
-        value: "3"
+        value: "0"
       - key: CONFLICT_WINDOW_MINUTES
         value: "120"
       - key: ENABLE_SHADOW

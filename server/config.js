@@ -17,6 +17,11 @@ function parseTrustProxy(value) {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1;
 }
 
+// 固定止盈/止损百分比(相对加权平均成本;代码强制,覆盖 LLM 的止损建议)。
+// 提为模块级常量:shadowDefaultStops 需要在对象字面量内引用同一组值
+const stopLossPercent = num(process.env.STOP_LOSS_PERCENT, 2);
+const takeProfitPercent = num(process.env.TAKE_PROFIT_PERCENT, 2);
+
 export const config = {
   port: process.env.PORT || 3000,
   // 信任的反向代理跳数:决定 req.ip 的取值,鉴权失败限流按 IP 计数。
@@ -120,8 +125,17 @@ export const config = {
   // 仓位缩放:按信号档位的买入金额乘数(一档全额、二档七折,其余对半;
   // 在 LLM 给出的 fraction 之上叠加,最终仍受硬性风控帽约束)
   tierSizeMultipliers: { 1: 1.0, 2: 0.7 },
-  // 移动止损:股价创新高后止损价跟随上抬(只升不降),需执行 007 迁移
-  enableTrailingStop: process.env.ENABLE_TRAILING_STOP !== 'false',
+  // 固定止盈/止损(代码强制):买入均价 ±N%,触及即全仓卖出;LLM 的止损建议被覆盖
+  stopLossPercent,
+  takeProfitPercent,
+  // 同票新利好(一/二档、经事件去重)刷新持有时钟时,止盈线每次上抬的百分点(0=只刷新时钟)
+  takeProfitStepPercent: num0(process.env.TAKE_PROFIT_STEP_PERCENT, 1),
+  // 持仓最长持有小时数:超时由风控循环全仓卖出(trigger='max_hold');
+  // 同票新利好刷新时钟,买入成交也刷新;0=关闭;需执行 020 迁移
+  maxHoldHours: num0(process.env.MAX_HOLD_HOURS, 48),
+  // 移动止损:股价创新高后止损价跟随上抬(只升不降),需执行 007 迁移。
+  // 固定 ±2% 止盈止损语义下默认关闭("买入价变动 ±N% 即卖出"),显式设 true 才启用
+  enableTrailingStop: process.env.ENABLE_TRAILING_STOP === 'true',
   // 每日持仓复查:每个交易日由 DeepSeek 整体评估一次持仓(论点是否失效、是否收紧止损)
   enablePositionReview: process.env.ENABLE_POSITION_REVIEW !== 'false',
   // 持仓复查的触发时间(美东 24 小时制,盘中该小时之后执行,每天一次)
@@ -133,7 +147,7 @@ export const config = {
   // 当日组合亏损达到该百分比 → 当日停止开新仓(sticky,次日自动恢复;0=关闭)
   dailyLossHaltPercent: num0(process.env.DAILY_LOSS_HALT_PERCENT, 2),
   // 最大同时持仓数(只拦开新仓,加仓不受限;0=关闭)
-  maxOpenPositions: num0(process.env.MAX_OPEN_POSITIONS, 10),
+  maxOpenPositions: num0(process.env.MAX_OPEN_POSITIONS, 15),
   // 单行业市值占组合总值上限(超出部分钳制买入金额;0=关闭)
   maxSectorFraction: Math.min(num0(process.env.MAX_SECTOR_FRACTION, 0.35), 1),
   // 连亏降仓:最近 N 笔卖出全部亏损时,买入比例乘以该系数(1=关闭)
@@ -170,8 +184,9 @@ export const config = {
   maxAllocationsPerRun: num(process.env.MAX_ALLOCATIONS_PER_RUN, 3),
   // 候选有效期(小时):新闻信号的时效性,超龄自动过期
   candidateMaxAgeHours: num(process.env.CANDIDATE_MAX_AGE_HOURS, 24),
-  // 当日最多开多少个新仓(加仓不计;0=关闭)
-  maxNewPositionsPerDay: num0(process.env.MAX_NEW_POSITIONS_PER_DAY, 3),
+  // 当日最多开多少个新仓(加仓不计;0=关闭)。
+  // 高频轮换模式(持仓上限 15 + 48h 时限)下默认关闭,新仓节奏由宏观预算钳制与现金约束控制
+  maxNewPositionsPerDay: num0(process.env.MAX_NEW_POSITIONS_PER_DAY, 0),
   // 同票多空冲突判定窗口(分钟):窗口内存在反向高置信信号时进入冲突消解
   conflictWindowMinutes: num(process.env.CONFLICT_WINDOW_MINUTES, 120),
   // 各宏观环境下的组合参数(代码常量,沿 tierSizeMultipliers 先例不逐项开 env):
@@ -197,9 +212,9 @@ export const config = {
   shadowBaseFraction: Math.min(num(process.env.SHADOW_BASE_FRACTION, 0.1), 1),
   // equal_weight 变体的固定等权买入比例(占组合总值)
   shadowEqualWeightFraction: Math.min(num(process.env.SHADOW_EQUAL_WEIGHT_FRACTION, 0.05), 1),
-  // 影子组合确定性买入的默认止损/止盈百分比(代码常量,沿 macroRegimeParams 先例;
-  // 与 LLM 给出参数的钳制区间 3–15% / 5–30% 一致取中段)
-  shadowDefaultStops: { stopLossPercent: 8, takeProfitPercent: 20 },
+  // 影子组合确定性买入的默认止损/止盈百分比:与实盘一致取固定 ±N% 配置,
+  // 保证消融对比中各变体的离场规则相同
+  shadowDefaultStops: { stopLossPercent, takeProfitPercent },
   // 影子净值快照最小间隔(分钟,搭车主快照循环并自行限频)
   shadowSnapshotMinutes: 10,
 

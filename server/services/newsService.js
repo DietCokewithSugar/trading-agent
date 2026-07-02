@@ -302,6 +302,7 @@ export async function runCycle({ fullFetch = false, trigger = 'scheduler' } = {}
     held: 0,
     queued: 0,
     pooled: 0,
+    refreshed: 0,
     macroEvents: 0,
     trades: 0,
     errors: [],
@@ -443,6 +444,11 @@ export async function runCycle({ fullFetch = false, trigger = 'scheduler' } = {}
           // 是否真正成交由资金分配器按分数与预算决定
           summary.pooled += 1;
           await markEventTraded(dedup.eventId, null);
+        } else if (result?.refreshed) {
+          // 同票新利好已刷新持有时钟/上抬止盈(020):事件视同已消费,
+          // 防止后续独立信源的交叉确认(confirmable)对同一事件再次抬高止盈
+          summary.refreshed += 1;
+          await markEventTraded(dedup.eventId, null);
         } else if (result?.queued) {
           // 休市信号已挂入开盘队列:事件视同已消费,后续重复报道不再触发
           summary.queued += 1;
@@ -466,7 +472,7 @@ export async function runCycle({ fullFetch = false, trigger = 'scheduler' } = {}
     cycleStatus.lastError = null;
     if (summary.newArticles || summary.analyzed) {
       console.log(
-        `[cycle] 完成: 新增${summary.newArticles} 分析${summary.analyzed} 宏观${summary.macroEvents} 信号${summary.signals} 去重${summary.deduped} 挂起${summary.held} 挂单${summary.queued} 入池${summary.pooled} 成交${summary.trades} 用时${summary.durationMs}ms run=${runId.slice(0, 8)}`
+        `[cycle] 完成: 新增${summary.newArticles} 分析${summary.analyzed} 宏观${summary.macroEvents} 信号${summary.signals} 去重${summary.deduped} 挂起${summary.held} 挂单${summary.queued} 入池${summary.pooled} 刷新${summary.refreshed} 成交${summary.trades} 用时${summary.durationMs}ms run=${runId.slice(0, 8)}`
       );
     }
     broadcast('cycle', publicSummary);
@@ -496,6 +502,7 @@ export async function runCycle({ fullFetch = false, trigger = 'scheduler' } = {}
       held: summary.held,
       queued: summary.queued,
       pooled: summary.pooled,
+      refreshed: summary.refreshed,
       macro_events: summary.macroEvents,
       trades: summary.trades,
       errors: summary.errors,
