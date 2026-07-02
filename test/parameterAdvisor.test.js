@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   evaluateSignalRules,
   evaluateShadowRules,
+  evaluateOutcomeRules,
   subsetMetrics,
   withAdjustedReturns,
   ADVISOR_THRESHOLDS,
@@ -13,6 +14,8 @@ const cfg = {
   pressBullishPenalty: 0.75,
   maxAllocationsPerRun: 3,
   conflictWindowMinutes: 120,
+  stopLossPercent: 2,
+  takeProfitPercent: 2,
 };
 
 function rows(n, overrides) {
@@ -67,21 +70,76 @@ test('新闻稿利好命中率显著低于 50% → 建议加大 PRESS_BULLISH_PE
   assert.match(hit.suggestion, /0\.75 → 0\.55/);
 });
 
-test('第 2 档 5d 命中率显著高于第 1 档(区间不重叠)→ 档位校准建议', () => {
+test('第 2 档 1d 命中率显著高于第 1 档(区间不重叠)→ 档位校准建议', () => {
   const data = [
-    ...rows(40, { tier: 1, fwd_return_5d: -1 }),
-    ...rows(40, { tier: 2, fwd_return_5d: 1 }),
+    ...rows(40, { tier: 1, fwd_return_1d: -1 }),
+    ...rows(40, { tier: 2, fwd_return_1d: 1 }),
   ];
   const { suggestions } = evaluateSignalRules(data, cfg);
   assert.equal(suggestions.find((s) => s.id === 'tier_inversion')?.level, 'adjust');
 
   // 排序正常时不出结论
   const normal = [
-    ...rows(40, { tier: 1, fwd_return_5d: 1 }),
-    ...rows(40, { tier: 2, fwd_return_5d: -1 }),
+    ...rows(40, { tier: 1, fwd_return_1d: 1 }),
+    ...rows(40, { tier: 2, fwd_return_1d: -1 }),
   ];
   const r2 = evaluateSignalRules(normal, cfg);
   assert.equal(r2.suggestions.find((s) => s.id === 'tier_inversion'), undefined);
+});
+
+// ── 实盘兑现规则(±2%/48h 策略口径)──
+
+function outcomeRows(n, overrides) {
+  return Array.from({ length: n }, () => ({
+    trigger: 'take_profit',
+    realized_pnl: 10,
+    tier: 1,
+    source_score: 0.9,
+    is_press: false,
+    ...overrides,
+  }));
+}
+
+test('实盘兑现:止损占比过半 → adjust,止盈占比过半 → ok', () => {
+  const stopped = [
+    ...outcomeRows(20, { trigger: 'stop_loss', realized_pnl: -10 }),
+    ...outcomeRows(10, { trigger: 'take_profit' }),
+  ];
+  const r1 = evaluateOutcomeRules(stopped, cfg);
+  assert.equal(r1.suggestions.find((s) => s.id === 'outcome_stop_share')?.level, 'adjust');
+
+  const profited = [
+    ...outcomeRows(20, { trigger: 'take_profit' }),
+    ...outcomeRows(10, { trigger: 'stop_loss', realized_pnl: -10 }),
+  ];
+  const r2 = evaluateOutcomeRules(profited, cfg);
+  assert.equal(r2.suggestions.find((s) => s.id === 'outcome_stop_share')?.level, 'ok');
+});
+
+test('实盘兑现:样本不足或占比未过半时沉默', () => {
+  const few = outcomeRows(10, { trigger: 'stop_loss' });
+  const r1 = evaluateOutcomeRules(few, cfg);
+  assert.equal(r1.suggestions.length, 0);
+  assert.ok(r1.skipped.find((s) => s.id === 'outcome_stop_share'));
+
+  // 三方分布均未过半:不下结论
+  const mixed = [
+    ...outcomeRows(15, { trigger: 'take_profit' }),
+    ...outcomeRows(15, { trigger: 'stop_loss', realized_pnl: -10 }),
+    ...outcomeRows(10, { trigger: 'max_hold', realized_pnl: 1 }),
+  ];
+  const r2 = evaluateOutcomeRules(mixed, cfg);
+  assert.equal(r2.suggestions.find((s) => s.id === 'outcome_stop_share'), undefined);
+});
+
+test('实盘兑现:低可信来源止损占比过半 → 提高门槛建议', () => {
+  const data = [
+    ...outcomeRows(25, { trigger: 'stop_loss', realized_pnl: -5, source_score: 0.5 }),
+    ...outcomeRows(10, { trigger: 'take_profit', source_score: 0.5 }),
+    ...outcomeRows(40, { trigger: 'take_profit', source_score: 0.95 }),
+  ];
+  const { suggestions } = evaluateOutcomeRules(data, cfg);
+  assert.equal(suggestions.find((s) => s.id === 'outcome_low_source')?.level, 'adjust');
 });
 
 test('拦截层机会成本:被拦信号上涨 → adjust,下跌 → ok(确认价值)', () => {

@@ -3,10 +3,11 @@ import { Alert, Button, Card, Col, Empty, Row, Segmented, Space, Spin, Statistic
 
 import { api, fmtTime } from '../api.js';
 
+// ±2%/48h 策略下 1h/1d 是决策口径;5d 与策略盈亏几乎无关,降级为纯研究口径
 const HORIZONS = [
   { key: '1h', label: '1 小时' },
   { key: '1d', label: '1 个交易日' },
-  { key: '5d', label: '5 个交易日' },
+  { key: '5d', label: '5 个交易日(研究)' },
 ];
 
 const RANGES = [
@@ -93,10 +94,60 @@ function GroupTable({ group }) {
   );
 }
 
+/** 实盘兑现表:每笔平仓按源信号维度分桶,展示 ±2%/48h 离场规则下的触发分布与已实现盈亏 */
+function OutcomesTable({ outcomes }) {
+  if (!outcomes || !outcomes.total) return null;
+  const ratePct = (v) => (v === null || v === undefined ? '—' : <span className="num">{v.toFixed(0)}%</span>);
+  const columns = [
+    { title: '分组', dataIndex: 'label', fixed: 'left', width: 150 },
+    { title: '平仓笔数', dataIndex: 'n', width: 80, align: 'right', render: (v) => <span className="num">{v}</span> },
+    { title: '止盈', dataIndex: 'take_profit_rate', width: 70, align: 'right', render: ratePct },
+    { title: '止损', dataIndex: 'stop_loss_rate', width: 70, align: 'right', render: ratePct },
+    { title: '持有超时', dataIndex: 'max_hold_rate', width: 85, align: 'right', render: ratePct },
+    { title: '其他', dataIndex: 'other_rate', width: 70, align: 'right', render: ratePct },
+    {
+      title: '胜率',
+      dataIndex: 'win_rate',
+      width: 95,
+      align: 'right',
+      render: (v, row) => <HitCell value={v} lo={row.win_lo} hi={row.win_hi} />,
+    },
+    {
+      title: '平均盈亏($)',
+      dataIndex: 'avg_pnl',
+      width: 100,
+      align: 'right',
+      render: (v) =>
+        v === null || v === undefined ? (
+          '—'
+        ) : (
+          <span className={`num ${v > 0 ? 'up' : v < 0 ? 'down' : ''}`}>{v >= 0 ? '+' : ''}{v.toFixed(2)}</span>
+        ),
+    },
+  ];
+  return (
+    <Card title="实盘兑现(±2%/48h 离场分布)" size="small">
+      <Table
+        rowKey="label"
+        size="small"
+        columns={columns}
+        dataSource={outcomes.buckets}
+        pagination={false}
+        scroll={{ x: 720 }}
+      />
+      <Typography.Paragraph type="secondary" style={{ fontSize: 13, margin: '8px 0 0' }}>
+        每笔平仓按"同票最近一笔买入"回溯其源信号的档位与来源。这是最贴近当前策略的信号质量口径:
+        止盈占比高说明该类信号的强度足以在持有时限内兑现 +2%;止损占比过半说明信号与固定敞口不匹配
+        (入场噪音大或敞口过窄);持有超时占比高说明信号方向对但动能不足。
+      </Typography.Paragraph>
+    </Card>
+  );
+}
+
 /**
  * 信号质量页:评估"分析信号本身"的预测能力,与仓位/止损/组合表现解耦。
- * 统计覆盖全部记录了信号价的非中性信号,包括因事件去重、置信度不足
- * 而未实际交易的信号;收益按信号方向调整(利空信号下跌计为正)。
+ * 统计覆盖全部记录了信号价且至少一个口径已回填的非中性信号,包括因事件去重、
+ * 置信度不足而未实际交易的信号;收益按信号方向调整(利空信号下跌计为正)。
  */
 export default function SignalStatsPage() {
   const [rangeKey, setRangeKey] = useState('30d');
@@ -214,12 +265,16 @@ export default function SignalStatsPage() {
       <Typography.Paragraph type="secondary" style={{ fontSize: 13, margin: 0 }}>
         {windowNote ? `${windowNote} · 样本 ${data.total} 条。` : ''}
         本页评估的是「分析信号本身」的预测能力,与仓位大小、止损、组合表现解耦:统计覆盖全部非中性信号
-        (含因事件去重、置信度不足而未实际交易的),前瞻收益按信号方向调整(利空信号对应股价下跌计为命中),
+        (含因事件去重、置信度不足而未实际交易的),样本只计入至少回填了一个口径的信号——刚产生、
+        前瞻收益尚未到期的新信号不占样本预算。前瞻收益按信号方向调整(利空信号对应股价下跌计为命中),
         IC 为综合置信度与方向调整收益的相关系数——IC 持续为正且置信度分桶的命中率单调上升,才说明信号有可用的
         alpha,而不只是赶上了好行情。命中率下方的小字为 Wilson 95% 置信区间,数值仅在区间整体高于(绿)或
         低于(红)50% 时着色——区间跨过 50% 说明样本还不足以下结论。「实际交易 vs 拦截层」是各防线的机会成本:
         被宏观过滤/风控官否决/资金受限拦下的信号若持续跑出正收益,说明该层过度保守;若为负,说明该层在创造价值。
+        「实盘兑现」是 ±2%/48h 离场规则下的信号兑现质量,是当前策略最直接的观测口径。
       </Typography.Paragraph>
+
+      <OutcomesTable outcomes={data.outcomes} />
 
       {data.pooling && data.pooling.n > 0 && (
         <Card title="候选池排队成本(入池路径成交)" size="small">

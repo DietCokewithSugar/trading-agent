@@ -27,6 +27,8 @@ export const ADVISOR_THRESHOLDS = {
   edgePercent: 0.3, // 平均方向收益的最小可操作幅度(百分点)
   shadowMinDays: 14, // 影子组合对照的最短运行天数
   shadowEdgePercent: 2, // 影子组合与实盘的最小净值差(百分点)
+  minSamplesOutcome: 30, // 实盘兑现类规则的最小平仓样本
+  stopShareHighPercent: 55, // 止损/止盈占比的"显著占优"阈值(百分比)
 };
 
 /** 子集在某口径上的样本量/均值/命中率/区间(rows 需已带 adj_* 字段) */
@@ -131,17 +133,18 @@ export function evaluateSignalRules(rawRows, cfg, t = ADVISOR_THRESHOLDS) {
     }
   }
 
-  // 3. 档位校准:第 2 档 5d 命中率显著高于第 1 档 → 分档定义/LLM 校准需复核
+  // 3. 档位校准:第 2 档 1d 命中率显著高于第 1 档 → 分档定义/LLM 校准需复核。
+  // 口径用 1d 而非 5d:±2%/48h 策略下 1d 是决策口径,5d 已降级为研究口径且样本最稀疏
   {
-    const m1 = subsetMetrics(rows.filter((r) => r.tier === 1), '5d');
-    const m2 = subsetMetrics(rows.filter((r) => r.tier === 2), '5d');
-    const title = '事件档位的收益排序(第 1 档 vs 第 2 档,5 个交易日)';
+    const m1 = subsetMetrics(rows.filter((r) => r.tier === 1), '1d');
+    const m2 = subsetMetrics(rows.filter((r) => r.tier === 2), '1d');
+    const title = '事件档位的收益排序(第 1 档 vs 第 2 档,1 个交易日)';
     if (m1.n >= t.minSamples && m2.n >= t.minSamples && m2.hitLo !== null && m1.hitHi !== null && m2.hitLo > m1.hitHi) {
       suggestions.push({
         id: 'tier_inversion',
         level: 'adjust',
         title,
-        evidence: `第 1 档:${evidenceText(m1, '5d')};第 2 档:${evidenceText(m2, '5d')}`,
+        evidence: `第 1 档:${evidenceText(m1, '1d')};第 2 档:${evidenceText(m2, '1d')}`,
         suggestion:
           '第 2 档命中率显著高于第 1 档(置信区间不重叠),档位定义或分析师的影响程度/范围判定可能需要重新校准——复核 computeTier 规则与 analyst prompt 的分档措辞,或检视第 1 档是否被"已定价的大新闻"污染。',
       });
@@ -252,6 +255,77 @@ export function evaluateSignalRules(rawRows, cfg, t = ADVISOR_THRESHOLDS) {
 }
 
 /**
+ * 实盘兑现规则(纯函数,±2%/48h 策略口径):outcomeRows 为 loadSignalRows 的
+ * outcomeRows(每行一笔已平仓卖单:{ trigger, realized_pnl, tier, source_score, is_press })。
+ * 前瞻收益答"信号有没有 alpha",这组规则答"信号与固定敞口/持有时限的离场规则是否匹配"。
+ */
+export function evaluateOutcomeRules(outcomeRows, cfg, t = ADVISOR_THRESHOLDS) {
+  const suggestions = [];
+  const skipped = [];
+  const rows = outcomeRows || [];
+  const share = (subset, trigger) =>
+    subset.length ? (subset.filter((r) => r.trigger === trigger).length / subset.length) * 100 : null;
+
+  // 1. 全部平仓的止损/止盈占比:止损显著占优 → 信号与 ±2% 敞口不匹配
+  {
+    const title = '实盘兑现:离场触发分布(全部平仓)';
+    const n = rows.length;
+    const slShare = share(rows, 'stop_loss');
+    const tpShare = share(rows, 'take_profit');
+    const evidence = () =>
+      `平仓 ${n} 笔:止盈 ${round(tpShare, 1)}%,止损 ${round(slShare, 1)}%,持有超时 ${round(share(rows, 'max_hold'), 1)}%`;
+    if (n >= t.minSamplesOutcome && slShare !== null && slShare >= t.stopShareHighPercent) {
+      suggestions.push({
+        id: 'outcome_stop_share',
+        level: 'adjust',
+        title,
+        evidence: evidence(),
+        suggestion: `止损离场占比过半,信号与固定 ±${cfg.stopLossPercent}% 敞口不匹配——先提高综合置信度门槛 MIN_FINAL_CONFIDENCE(当前 ${cfg.minFinalConfidence})收紧入场;若「按事件档位」的 1h/1d 命中率仍然过硬,再考虑复核 STOP_LOSS_PERCENT/TAKE_PROFIT_PERCENT 的敞口是否过窄(噪音扫损)。`,
+      });
+    } else if (n >= t.minSamplesOutcome && tpShare !== null && tpShare >= t.stopShareHighPercent) {
+      suggestions.push({
+        id: 'outcome_stop_share',
+        level: 'ok',
+        title,
+        evidence: evidence(),
+        suggestion: '止盈离场占比过半,信号强度与当前固定敞口/持有时限匹配良好,维持现状。',
+      });
+    } else {
+      skipped.push({
+        id: 'outcome_stop_share',
+        title,
+        reason: n < t.minSamplesOutcome ? `样本不足(${n} < ${t.minSamplesOutcome})` : '止盈/止损占比均未过半,无显著结论',
+      });
+    }
+  }
+
+  // 2. 低可信来源的兑现质量:止损显著占优 → 加大来源折价/门槛
+  {
+    const subset = rows.filter((r) => r.source_score !== null && Number(r.source_score) < 0.65);
+    const title = '实盘兑现:低可信来源(<0.65)信号的平仓质量';
+    const n = subset.length;
+    const slShare = share(subset, 'stop_loss');
+    if (n >= t.minSamplesOutcome && slShare !== null && slShare >= t.stopShareHighPercent) {
+      suggestions.push({
+        id: 'outcome_low_source',
+        level: 'adjust',
+        title,
+        evidence: `平仓 ${n} 笔:止损占 ${round(slShare, 1)}%`,
+        suggestion: `低可信来源信号的持仓过半被止损打出,建议提高 MIN_FINAL_CONFIDENCE(当前 ${cfg.minFinalConfidence})或加深来源折价,让这类信号更多挂起等交叉确认。`,
+      });
+    } else {
+      skipped.push({
+        id: 'outcome_low_source',
+        title,
+        reason: n < t.minSamplesOutcome ? `样本不足(${n} < ${t.minSamplesOutcome})` : '止损占比未过半,无显著结论',
+      });
+    }
+  }
+
+  return { suggestions, skipped };
+}
+
+/**
  * 影子组合对照规则(纯函数):每个消融变体与实盘同窗收益差超过阈值才发声。
  * variants 为 getShadowOverview 的变体行,须带 window_return_pct(同窗收益,由窗口内
  * 净值序列首末两点算出)——变体的 pnl_percent 是自建立以来的累计收益,运行天数超过
@@ -344,6 +418,7 @@ export async function getParameterAdvice({ days = 30 } = {}) {
   if (!loaded) return { available: false };
 
   const signal = evaluateSignalRules(loaded.rows, config);
+  const outcome = evaluateOutcomeRules(loaded.outcomeRows, config);
 
   // 影子组合对照(017 未迁移/未启用时静默跳过该组规则)
   let shadow = { suggestions: [], skipped: [{ id: 'shadow', title: '影子组合对照', reason: '影子组合数据不可用' }] };
@@ -381,7 +456,7 @@ export async function getParameterAdvice({ days = 30 } = {}) {
     window: loaded.window,
     sample: loaded.rows.length,
     thresholds: ADVISOR_THRESHOLDS,
-    suggestions: [...signal.suggestions, ...shadow.suggestions],
-    skipped: [...signal.skipped, ...shadow.skipped],
+    suggestions: [...signal.suggestions, ...outcome.suggestions, ...shadow.suggestions],
+    skipped: [...signal.skipped, ...outcome.skipped, ...shadow.skipped],
   };
 }

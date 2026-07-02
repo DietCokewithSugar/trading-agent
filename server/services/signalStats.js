@@ -298,6 +298,87 @@ export function summarizeSignals(rows) {
 }
 
 /**
+ * 卖单配对源头买入信号(纯函数):止损/止盈/持有超时等自动卖单不带 analysis_id,
+ * 按"同票中 created_at 最近且不晚于卖出时间的买单"回溯其信号来源。
+ * sells = [{ symbol, trigger, realized_pnl, created_at }],
+ * buys = [{ symbol, analysis_id, created_at }](须为买单)。
+ * 返回配对成功的 [{ ...sell, analysis_id }],配不上的丢弃。
+ */
+export function pairSellsToBuys(sells, buys) {
+  const buysBySymbol = new Map();
+  for (const b of buys || []) {
+    if (!b?.symbol || b.analysis_id === null || b.analysis_id === undefined) continue;
+    const list = buysBySymbol.get(b.symbol) || [];
+    list.push(b);
+    buysBySymbol.set(b.symbol, list);
+  }
+  // 每票按时间倒序,配对时取第一个不晚于卖出时间的买单
+  for (const list of buysBySymbol.values()) {
+    list.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  }
+  const paired = [];
+  for (const s of sells || []) {
+    const list = buysBySymbol.get(s?.symbol);
+    if (!list) continue;
+    const sellTs = new Date(s.created_at).getTime();
+    const buy = list.find((b) => new Date(b.created_at).getTime() <= sellTs);
+    if (buy) paired.push({ ...s, analysis_id: buy.analysis_id });
+  }
+  return paired;
+}
+
+/**
+ * 实盘兑现聚合(纯函数,±2%/48h 策略口径):每笔已平仓卖单按源信号维度分桶,
+ * 统计离场触发分布(止盈/止损/持有超时/其他)与已实现盈亏。
+ * rows = [{ trigger, realized_pnl, tier, source_score, is_press }]。
+ * 直接回答"哪类信号在固定敞口+持有时限的规则下真能兑现到止盈"。
+ */
+export function summarizeTradeOutcomes(rows) {
+  const num = (v) => (v === null || v === undefined ? null : Number(v));
+  const buckets = [
+    { label: '全部', match: () => true },
+    { label: '第1档', match: (r) => r.tier === 1 },
+    { label: '第2档', match: (r) => r.tier === 2 },
+    { label: '来源高(≥0.85)', match: (r) => num(r.source_score) !== null && num(r.source_score) >= 0.85 },
+    {
+      label: '来源中(0.65~0.85)',
+      match: (r) => {
+        const s = num(r.source_score);
+        return s !== null && s >= 0.65 && s < 0.85;
+      },
+    },
+    { label: '来源低(<0.65)', match: (r) => num(r.source_score) !== null && num(r.source_score) < 0.65 },
+    { label: '新闻稿来源', match: (r) => r.is_press === true },
+  ];
+  const pct = (part, n) => (n ? round((part / n) * 100, 1) : null);
+  const out = buckets
+    .map(({ label, match }) => {
+      const subset = (rows || []).filter(match);
+      const n = subset.length;
+      const byTrigger = (t) => subset.filter((r) => r.trigger === t).length;
+      const wins = subset.filter((r) => Number(r.realized_pnl) > 0).length;
+      const pnls = subset.map((r) => Number(r.realized_pnl)).filter((v) => Number.isFinite(v));
+      const totalPnl = pnls.reduce((a, b) => a + b, 0);
+      const ci = wilsonInterval(wins, n);
+      return {
+        label,
+        n,
+        take_profit_rate: pct(byTrigger('take_profit'), n),
+        stop_loss_rate: pct(byTrigger('stop_loss'), n),
+        max_hold_rate: pct(byTrigger('max_hold'), n),
+        other_rate: pct(n - byTrigger('take_profit') - byTrigger('stop_loss') - byTrigger('max_hold'), n),
+        win_rate: pct(wins, n),
+        win_lo: ci ? ci.lo : null,
+        win_hi: ci ? ci.hi : null,
+        avg_pnl: pnls.length ? round(totalPnl / pnls.length, 2) : null,
+        total_pnl: pnls.length ? round(totalPnl, 2) : null,
+      };
+    })
+    .filter((b) => b.n > 0);
+  return { total: (rows || []).length, buckets: out };
+}
+
+/**
  * 分页拉取(突破 PostgREST 单次 1000 行上限):buildQuery 每次返回新查询,
  * 按 PAGE_SIZE 翻页直到取尽或达到 maxRows。返回 { rows, truncated, error }
  * (error 为首个失败页的 supabase 错误,调用方按迁移容忍逻辑处理)。
@@ -324,6 +405,9 @@ export async function loadSignalRows({ days = null } = {}) {
     Number.isFinite(days) && days > 0 ? new Date(Date.now() - days * 86400_000).toISOString() : null;
   const withSince = (q) => (since ? q.gte('created_at', since) : q);
 
+  // 只取"至少一个口径已回填"的有效行:未回填的新信号(1d/5d 结构性未到期)对统计是纯噪音,
+  // 却会按时间倒序把 MAX_SAMPLE_ROWS 的样本预算全部挤占——信号量涨到 ~千条/天后,
+  // 5000 条只够覆盖几天,页面上 1d/5d 样本直接归零。预算只花在有效行上,覆盖窗口自然拉长
   const analysesFetch = await fetchPaged(() =>
     withSince(
       db
@@ -332,6 +416,7 @@ export async function loadSignalRows({ days = null } = {}) {
           'id, symbol, sentiment, tier, confidence, final_confidence, signal_price, fwd_return_1h, fwd_return_1d, fwd_return_5d, created_at, news_articles(source_score, source, source_domain, url)'
         )
         .not('signal_price', 'is', null)
+        .or('fwd_return_1h.not.is.null,fwd_return_1d.not.is.null,fwd_return_5d.not.is.null')
         .in('sentiment', ['bullish', 'bearish'])
         .order('created_at', { ascending: false })
     )
@@ -352,7 +437,7 @@ export async function loadSignalRows({ days = null } = {}) {
       withSince(
         db
           .from('trades')
-          .select('analysis_id, side, pool_wait_minutes, pool_drift_percent, created_at')
+          .select('analysis_id, symbol, side, pool_wait_minutes, pool_drift_percent, created_at')
           .not('analysis_id', 'is', null)
           .order('created_at', { ascending: false })
       )
@@ -362,7 +447,7 @@ export async function loadSignalRows({ days = null } = {}) {
         withSince(
           db
             .from('trades')
-            .select('analysis_id, created_at')
+            .select('analysis_id, symbol, side, created_at')
             .not('analysis_id', 'is', null)
             .order('created_at', { ascending: false })
         )
@@ -412,6 +497,53 @@ export async function loadSignalRows({ days = null } = {}) {
     // 候选池不可用时静默退回(本统计是纯观测层)
   }
 
+  // 实盘兑现(±2%/48h 策略口径):已平仓卖单配对源头买入信号,统计离场触发分布与已实现盈亏。
+  // 止损/止盈/持有超时等自动卖单不带 analysis_id(上面的 trades 查询过滤掉了),
+  // 单独取卖单再按"同票最近买单"回溯。纯观测口径,失败只降级不抛出
+  let outcomeRows = [];
+  try {
+    const sellsFetch = await fetchPaged(() =>
+      withSince(
+        db
+          .from('trades')
+          .select('symbol, trigger, realized_pnl, created_at')
+          .eq('side', 'sell')
+          .not('realized_pnl', 'is', null)
+          .order('created_at', { ascending: false })
+      )
+    );
+    if (!sellsFetch.error && sellsFetch.rows.length) {
+      const buys = tradeRows.filter((t) => t.side === 'buy' && t.symbol);
+      const paired = pairSellsToBuys(sellsFetch.rows, buys);
+      // 批量反查配对买入的分析行,补齐档位/来源维度(卖单量级小,分批 in 查询)
+      const ids = [...new Set(paired.map((p) => p.analysis_id))];
+      const dimById = new Map();
+      for (let i = 0; i < ids.length; i += 500) {
+        const { data: dims } = await db
+          .from('news_analyses')
+          .select('id, tier, sentiment, news_articles(source_score, source, source_domain, url)')
+          .in('id', ids.slice(i, i + 500));
+        for (const d of dims || []) dimById.set(d.id, d);
+      }
+      outcomeRows = paired.map((p) => {
+        const dim = dimById.get(p.analysis_id);
+        const article = dim?.news_articles || {};
+        return {
+          trigger: p.trigger,
+          realized_pnl: Number(p.realized_pnl),
+          tier: dim?.tier ?? null,
+          source_score:
+            article.source_score === null || article.source_score === undefined
+              ? null
+              : Number(article.source_score),
+          is_press: dim ? isPressRelease(article) : false,
+        };
+      });
+    }
+  } catch (err) {
+    console.warn(`[signal] 实盘兑现统计加载失败(其余口径不受影响): ${err.message}`);
+  }
+
   const rows = (data || []).map((a) => {
     const cand = candidateById.get(a.id);
     const article = a.news_articles || {};
@@ -440,12 +572,13 @@ export async function loadSignalRows({ days = null } = {}) {
 
   return {
     rows,
+    outcomeRows,
     window: {
       days: since ? days : null,
       since,
       max_rows: MAX_SAMPLE_ROWS,
       truncated: analysesFetch.truncated,
-      // 截断时实际覆盖到的最早信号时间(时间倒序,最后一行最旧)
+      // 截断时实际覆盖到的最早信号时间(时间倒序,最后一行最旧;仅计已回填的有效行)
       covered_since: data.length ? data[data.length - 1].created_at : null,
     },
   };
@@ -464,5 +597,7 @@ export async function getSignalStats({ days = null } = {}) {
     generated_at: new Date().toISOString(),
     window: loaded.window,
     ...summarizeSignals(loaded.rows),
+    // 实盘兑现(±2%/48h 离场规则下的信号兑现质量):止盈/止损/超时分布 + 已实现盈亏
+    outcomes: summarizeTradeOutcomes(loaded.outcomeRows),
   };
 }

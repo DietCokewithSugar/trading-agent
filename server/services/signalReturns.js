@@ -100,46 +100,70 @@ async function backfill1h() {
   return filled;
 }
 
-/** 1/5 个交易日口径:用日线收盘价回填(每只股票一次历史行情请求,缓存 1 小时) */
-async function backfillDaily() {
+// 股票冷却(毒丸防护):退市股/无日线数据的股票会让回填行永远填不上,
+// 又因正序窗口长期占住每轮的行/股票预算,把吞吐拖到 0。
+// 历史行情抛错或无已定型日线 → 冷却 12 小时;有日线但本轮 0 填充(边界未定型)→ 冷却 2 小时。
+// 冷却中的股票在分组时直接跳过,不消耗当轮股票预算。
+const symbolCooldown = new Map(); // symbol -> 冷却截止毫秒时间戳
+const COOLDOWN_HARD_MS = 12 * 3600_000;
+const COOLDOWN_SOFT_MS = 2 * 3600_000;
+
+/**
+ * 取某一口径的到期未回填行:signal_price 非空、该列为空,
+ * created_at ∈ [now−30d, now−minAgeMs],正序(最老优先)。
+ * 1d/5d 拆成两条独立队列查询——旧实现的 .or() 会让"1d 已填但 5d 未到期"的行反复进窗空转。
+ */
+async function fetchPending({ column, minAgeMs, limit }) {
   const now = Date.now();
-  const todayEt = etDate(new Date().toISOString());
   const { data, error } = await supabase()
     .from('news_analyses')
     .select('id, symbol, signal_price, created_at, fwd_return_1d, fwd_return_5d')
     .not('signal_price', 'is', null)
-    .or('fwd_return_1d.is.null,fwd_return_5d.is.null')
+    .is(column, null)
     .gte('created_at', new Date(now - 30 * 24 * 3600_000).toISOString())
-    .lte('created_at', new Date(now - 24 * 3600_000).toISOString())
+    .lte('created_at', new Date(now - minAgeMs).toISOString())
     .order('created_at', { ascending: true })
-    .limit(200);
+    .limit(limit);
   if (error) throw error;
-  if (!data?.length) return 0;
+  return data || [];
+}
 
-  // 按股票分组,限制单轮历史行情请求数
+/** 处理一批到期行:按股票分组取日线并回填,返回填充行数(每只股票一次历史行情请求,缓存 1 小时) */
+async function fillDailyBatch(pending, { symbolBudget = 30 } = {}) {
+  const todayEt = etDate(new Date().toISOString());
+  const now = Date.now();
+
   const bySymbol = new Map();
-  for (const a of data) {
+  for (const a of pending) {
+    if ((symbolCooldown.get(a.symbol) || 0) > now) continue;
     const list = bySymbol.get(a.symbol) || [];
     list.push(a);
     bySymbol.set(a.symbol, list);
   }
 
   let filled = 0;
-  let symbolBudget = 25;
+  let budget = symbolBudget;
   for (const [symbol, items] of bySymbol) {
-    if (symbolBudget-- <= 0) break;
+    if (budget-- <= 0) break;
     const from = etDate(items[0].created_at);
     let rows;
     try {
       rows = await getHistoricalPrices(symbol, from, todayEt);
     } catch (err) {
-      console.warn(`[signal] ${symbol} 历史行情获取失败,下轮重试: ${err.message}`);
+      symbolCooldown.set(symbol, now + COOLDOWN_HARD_MS);
+      console.warn(`[signal] ${symbol} 历史行情获取失败,冷却 12 小时后重试: ${err.message}`);
       continue;
     }
     // FMP 日线端点在交易日盘中会返回当日(未收盘)的行,若拿它当"第 N 个交易日收盘"
     // 会把盘中价写死(回填只填 null、不再修正)。只采用日期早于今天的已定型 K 线,
     // 当日收盘留待下一轮回填——晚一天到账,但口径正确。
     const settledRows = (rows || []).filter((r) => r.date < todayEt);
+    if (!settledRows.length) {
+      // 查得到接口但没有任何已定型日线:退市/停牌/无数据,大概率永远填不上
+      symbolCooldown.set(symbol, now + COOLDOWN_HARD_MS);
+      continue;
+    }
+    let symbolFilled = 0;
     for (const a of items) {
       const { r1d, r5d } = computeDailyForwardReturns({
         rows: settledRows,
@@ -155,10 +179,26 @@ async function backfillDaily() {
         .update(update)
         .eq('id', a.id);
       if (updErr) throw updErr;
-      filled += 1;
+      symbolFilled += 1;
     }
+    filled += symbolFilled;
+    // 有日线却一行都填不上(收盘尚未定型/日期边界):短冷却,别让它每 10 分钟空转占预算
+    if (symbolFilled === 0) symbolCooldown.set(symbol, now + COOLDOWN_SOFT_MS);
   }
   return filled;
+}
+
+/**
+ * 1/5 个交易日口径:两条独立的到期队列。
+ * 1d:信号至少 24 小时前(次日收盘可定型);5d:至少 7 天前(5 个交易日的日历下界,
+ * 未成熟的行不再进窗反复扫描)。返回 { n1d, n5d }。
+ */
+async function backfillDaily() {
+  const pending1d = await fetchPending({ column: 'fwd_return_1d', minAgeMs: 24 * 3600_000, limit: 400 });
+  const n1d = pending1d.length ? await fillDailyBatch(pending1d) : 0;
+  const pending5d = await fetchPending({ column: 'fwd_return_5d', minAgeMs: 7 * 24 * 3600_000, limit: 400 });
+  const n5d = pending5d.length ? await fillDailyBatch(pending5d) : 0;
+  return { n1d, n5d };
 }
 
 /** 由调度器周期调用(每 10 分钟):回填到期的前瞻收益 */
@@ -167,9 +207,9 @@ export async function backfillForwardReturns() {
   running = true;
   try {
     const n1h = await backfill1h();
-    const nDaily = await backfillDaily();
-    if (n1h || nDaily) {
-      console.log(`[signal] 前瞻收益回填: 1小时口径 ${n1h} 条,交易日口径 ${nDaily} 条`);
+    const { n1d, n5d } = await backfillDaily();
+    if (n1h || n1d || n5d) {
+      console.log(`[signal] 前瞻收益回填: 1小时口径 ${n1h} 条,1d 队列 ${n1d} 条,5d 队列 ${n5d} 条`);
     }
   } catch (err) {
     if (isMissingColumn(err)) warnMissingOnce('回填');
