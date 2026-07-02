@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+> Full per-file architecture reference (every file's responsibility, scheduler table, DB tables, cross-cutting conventions): `docs/ARCHITECTURE.md` — keep it in sync when moving responsibilities between files. Project-level Agent Skills live in `.claude/skills/` (superpowers selection: TDD, systematic-debugging, verification-before-completion, code-review pair, brainstorming, writing/executing-plans; pinned by `skills-lock.json`).
+
 ## What this project is
 
 AI 新闻交易员 — a news-driven US stock paper-trading site. It fetches financial news (FMP API + Yahoo RSS), has DeepSeek classify each article as bullish/bearish on a four-tier scale, lets DeepSeek decide simulated buy/sell orders under server-side risk constraints, and shows the portfolio live in a React dashboard. Everything is virtual money; there is no real brokerage integration.
