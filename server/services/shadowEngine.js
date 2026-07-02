@@ -130,3 +130,19 @@ export function valuePositions(positions, priceBySymbol, cash) {
     totalValue: round2(positionsValue + Number(cash)),
   };
 }
+
+/**
+ * 休市顺延信号队列的修剪(纯函数):去掉超龄条目(与实盘开盘队列同一时效语义),
+ * 超过容量上限时丢弃最老的。entries 须带 queuedAt(毫秒时间戳),保持原有顺序。
+ * 返回 { kept, expired, dropped }。
+ */
+export function prunePendingSignals(entries, { now = Date.now(), maxAgeMs, maxSize } = {}) {
+  const list = entries || [];
+  const fresh = list.filter((e) => Number.isFinite(e?.queuedAt) && now - e.queuedAt <= maxAgeMs);
+  const dropped = maxSize > 0 && fresh.length > maxSize ? fresh.length - maxSize : 0;
+  return {
+    kept: dropped ? fresh.slice(dropped) : fresh,
+    expired: list.length - fresh.length,
+    dropped,
+  };
+}

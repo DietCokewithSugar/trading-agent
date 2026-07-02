@@ -168,8 +168,8 @@ export const SHADOW_VARIANT_DESCRIPTIONS = {
   actual: '当前真实模拟组合(全部防线开启)',
   no_risk_officer: '跟随实盘,但风控官否决/缩仓的买入按否决前方案照样执行',
   no_macro_filter: '跟随实盘,但被宏观层(环境过滤/冲击/黑窗/预算钳制)拦截的买入照样执行',
-  immediate_trade: '独立组合:可交易利好信号到达即按确定性仓位买入,不经候选池与 LLM 决策',
-  equal_weight: '独立组合:可交易信号一律按固定比例等权买入,检验 LLM 仓位是否有效',
+  immediate_trade: '独立组合:可交易利好信号到达即按确定性仓位买入(休市信号顺延至下一可交易时段),不经候选池与 LLM 决策',
+  equal_weight: '独立组合:可交易信号一律按固定比例等权买入(休市信号顺延),检验 LLM 仓位是否有效',
   spy_benchmark: '启用时一次性全仓买入 SPY 并持有',
   cash: '不做任何交易的现金基准',
 };

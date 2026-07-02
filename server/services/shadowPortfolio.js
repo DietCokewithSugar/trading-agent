@@ -35,6 +35,7 @@ import {
   unapplyScale,
   pickTopBlocked,
   valuePositions,
+  prunePendingSignals,
 } from './shadowEngine.js';
 
 export const SHADOW_VARIANTS = [
@@ -367,9 +368,63 @@ async function shadowSell(
 
 // ── 信号钩子(trader/allocator 调用,全部 fire-and-forget)──
 
-/** 可交易利好信号(已过档位/置信/去重/准入门槛):独立变体在此即时建仓 */
-export function onBullishSignal({ article, analysisRow, quote, profile, price }) {
-  if (!isShadowAvailable()) return;
+// 休市顺延队列:独立变体(即时成交/等权)的信号在休市时段不再按 stale 收盘价成交,
+// 排队至下一可交易时段(盘前 04:00 起)按实时盘外价成交——与实盘"休市入池/挂单"
+// 同一原则,隔夜跳空由市场兑现而不是被影子组合白捡。进程内队列,重启丢失
+// (纯观测层可接受;(variant, analysis_id) 唯一索引兜底防重复买入);
+// 超龄作废沿用实盘开盘队列的 PENDING_ORDER_MAX_AGE_HOURS 时效
+const pendingSignals = [];
+const PENDING_SIGNALS_MAX = 500;
+
+function queuePendingSignal(entry) {
+  pendingSignals.push({ ...entry, queuedAt: Date.now() });
+  const { kept, expired, dropped } = prunePendingSignals(pendingSignals, {
+    maxAgeMs: config.pendingOrderMaxAgeHours * 3600_000,
+    maxSize: PENDING_SIGNALS_MAX,
+  });
+  if (expired || dropped) {
+    console.warn(`[shadow] 顺延队列修剪: 过期 ${expired} 条,超容丢弃最老 ${dropped} 条`);
+  }
+  pendingSignals.length = 0;
+  pendingSignals.push(...kept);
+}
+
+/**
+ * 休市顺延信号的清算:由影子监控循环在可交易时段的首个 tick 调用,
+ * 逐条重取实时报价(盘前有真实盘外成交价)后按原信号执行;
+ * 报价暂不可得的留队下轮重试(超龄由修剪作废)。
+ */
+async function drainPendingSignals() {
+  if (!pendingSignals.length) return;
+  const { kept, expired } = prunePendingSignals(pendingSignals, {
+    maxAgeMs: config.pendingOrderMaxAgeHours * 3600_000,
+    maxSize: PENDING_SIGNALS_MAX,
+  });
+  pendingSignals.length = 0;
+  let dispatched = 0;
+  const retry = [];
+  for (const item of kept) {
+    const quote = await getQuote(item.analysisRow.symbol, 25_000).catch(() => null);
+    if (!quote) {
+      retry.push(item);
+      continue;
+    }
+    const price = quote.effective_price ?? quote.price;
+    if (item.kind === 'bullish') {
+      executeBullishSignal({ article: item.article, analysisRow: item.analysisRow, profile: item.profile, quote, price });
+    } else {
+      executeBearishSignal({ analysisRow: item.analysisRow, quote, price });
+    }
+    dispatched += 1;
+  }
+  pendingSignals.push(...retry);
+  if (dispatched || expired) {
+    console.log(`[shadow] 休市顺延信号清算: 执行 ${dispatched} 条,过期作废 ${expired} 条,待重试 ${retry.length} 条`);
+  }
+}
+
+/** 利好信号的实际执行(独立变体建仓);休市顺延后由 drainPendingSignals 以新报价调用 */
+function executeBullishSignal({ article, analysisRow, quote, profile, price }) {
   const base = {
     symbol: analysisRow.symbol,
     refPrice: price,
@@ -401,9 +456,8 @@ export function onBullishSignal({ article, analysisRow, quote, profile, price })
   );
 }
 
-/** 可交易利空信号:独立变体清仓同票(实盘镜像由 mirrorSell 覆盖跟随型变体) */
-export function onBearishSignal({ analysisRow, quote, price }) {
-  if (!isShadowAvailable()) return;
+/** 利空信号的实际执行(独立变体清仓同票) */
+function executeBearishSignal({ analysisRow, quote, price }) {
   for (const variant of SIGNAL_VARIANTS) {
     enqueue(`${variant} 利空清仓`, () =>
       shadowSell(variant, {
@@ -415,6 +469,32 @@ export function onBearishSignal({ analysisRow, quote, price }) {
       })
     );
   }
+}
+
+/**
+ * 可交易利好信号(已过档位/置信/去重/准入门槛):独立变体在此建仓。
+ * 休市时段(夜间/周末/假日)顺延至下一可交易时段,与实盘的交易时段约束(04:00–20:00 美东)对齐
+ */
+export function onBullishSignal({ article, analysisRow, quote, profile, price }) {
+  if (!isShadowAvailable()) return;
+  if (getMarketSession() === 'closed') {
+    queuePendingSignal({ kind: 'bullish', article, analysisRow, profile });
+    return;
+  }
+  executeBullishSignal({ article, analysisRow, quote, profile, price });
+}
+
+/**
+ * 可交易利空信号:独立变体清仓同票(实盘镜像由 mirrorSell 覆盖跟随型变体)。
+ * 休市时段同样顺延——按 stale 收盘价清仓会把隔夜跳空错记进影子净值
+ */
+export function onBearishSignal({ analysisRow, quote, price }) {
+  if (!isShadowAvailable()) return;
+  if (getMarketSession() === 'closed') {
+    queuePendingSignal({ kind: 'bearish', analysisRow });
+    return;
+  }
+  executeBearishSignal({ analysisRow, quote, price });
 }
 
 /** 风控官否决/审批失败:no_risk_officer 变体按否决前方案照样买入 */
@@ -586,6 +666,8 @@ export async function checkShadowStops() {
   if (getMarketSession() === 'closed') return;
   stopsRunning = true;
   try {
+    // 休市顺延的信号先清算(可交易时段的首个 tick ≈ 盘前 04:00,按实时盘外价成交)
+    await drainPendingSignals();
     // 全量读取(不再按止损/止盈过滤):持有时限对未设止损的持仓同样生效
     const res = await supabase()
       .from('shadow_positions')

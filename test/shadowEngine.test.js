@@ -8,6 +8,7 @@ import {
   unapplyScale,
   pickTopBlocked,
   valuePositions,
+  prunePendingSignals,
 } from '../server/services/shadowEngine.js';
 
 const caps = { maxBuyCashFraction: 0.2, maxPositionFraction: 0.25, minOrderAmount: 50 };
@@ -123,4 +124,32 @@ test('valuePositions: 报价缺失退回平均成本', () => {
   const { positionsValue, totalValue } = valuePositions(positions, prices, 1000);
   assert.equal(positionsValue, 1350); // 10×110 + 5×50
   assert.equal(totalValue, 2350);
+});
+
+// ── 休市顺延信号队列的修剪 ──
+
+test('prunePendingSignals:超龄作废、超容丢最老、顺序保持', () => {
+  const now = 1_000_000_000;
+  const hour = 3600_000;
+  const entries = [
+    { id: 'old', queuedAt: now - 100 * hour }, // 超龄(>96h)
+    { id: 'a', queuedAt: now - 10 * hour },
+    { id: 'b', queuedAt: now - 5 * hour },
+    { id: 'c', queuedAt: now - 1 * hour },
+  ];
+  const r1 = prunePendingSignals(entries, { now, maxAgeMs: 96 * hour, maxSize: 500 });
+  assert.equal(r1.expired, 1);
+  assert.equal(r1.dropped, 0);
+  assert.deepEqual(r1.kept.map((e) => e.id), ['a', 'b', 'c']);
+
+  // 超容:丢弃最老的,保留最新的 maxSize 条
+  const r2 = prunePendingSignals(entries, { now, maxAgeMs: 96 * hour, maxSize: 2 });
+  assert.equal(r2.dropped, 1);
+  assert.deepEqual(r2.kept.map((e) => e.id), ['b', 'c']);
+
+  // 缺 queuedAt 的异常条目按超龄处理;空输入安全
+  const r3 = prunePendingSignals([{ id: 'x' }], { now, maxAgeMs: hour, maxSize: 10 });
+  assert.equal(r3.expired, 1);
+  assert.equal(r3.kept.length, 0);
+  assert.equal(prunePendingSignals(null, { now, maxAgeMs: hour, maxSize: 10 }).kept.length, 0);
 });
