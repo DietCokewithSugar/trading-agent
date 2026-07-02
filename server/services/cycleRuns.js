@@ -42,8 +42,8 @@ export function aggregateRejectReasons(runs) {
   return merged;
 }
 
-// 014 新增的可选计数列:旧库(未执行 014)缺列时逐个剥离重试
-const OPTIONAL_RUN_COLUMNS = ['pooled', 'macro_events'];
+// 014/020 新增的可选计数列:旧库(迁移未执行)缺列时逐个剥离重试
+const OPTIONAL_RUN_COLUMNS = ['pooled', 'macro_events', 'refreshed'];
 
 /** 写入一轮运行指标,绝不抛错 */
 export async function saveCycleRun(row) {

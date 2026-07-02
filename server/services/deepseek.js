@@ -594,6 +594,8 @@ export async function reflectTrade({
     stop_loss: '自动止损',
     take_profit: '自动止盈',
     review: '每日持仓复查',
+    max_hold: '持有超时强制平仓',
+    rotation: '止盈腾位(为新候选让出容量)',
   };
   const user = JSON.stringify(
     {

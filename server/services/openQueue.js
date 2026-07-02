@@ -7,7 +7,7 @@ import { isHalted } from './halt.js';
 
 /**
  * 开盘队列:休市时段产生的交易信号不按 stale 收盘价成交,而是挂入 pending_orders,
- * 待下一个常规交易时段以当日开盘价(叠加盘中滑点)成交。
+ * 待下一个可交易时段成交——盘前/盘后按实时盘外成交价,常规时段按当日开盘价(叠加滑点)。
  * 隔夜新闻的跳空缺口由市场兑现,不再被模拟盘记成策略收益——这是成交真实化的关键一环。
  * pending_orders 表不可用(010 迁移未执行)时整体停用,trader 退回旧的立即成交路径。
  *
@@ -77,8 +77,11 @@ async function fillPendingOrder(order) {
     const result = await executeQueuedBuy({
       symbol: order.symbol,
       fraction: Number(order.fraction),
-      stopLossPercent: order.stop_loss_percent === null ? 8 : Number(order.stop_loss_percent),
-      takeProfitPercent: order.take_profit_percent === null ? 15 : Number(order.take_profit_percent),
+      // 缺省止损/止盈(历史遗留挂单无该字段)与固定 ±config 百分比对齐
+      stopLossPercent:
+        order.stop_loss_percent === null ? config.stopLossPercent : Number(order.stop_loss_percent),
+      takeProfitPercent:
+        order.take_profit_percent === null ? config.takeProfitPercent : Number(order.take_profit_percent),
       reason: order.reason,
       newsId: order.news_id,
       analysisId: order.analysis_id,
@@ -117,10 +120,10 @@ async function fillPendingOrder(order) {
   }
 }
 
-/** 由调度器周期调用:常规交易时段把挂起的订单逐一成交 */
+/** 由调度器周期调用:非休市时段(盘前/盘中/盘后)把挂起的订单逐一成交 */
 export async function processPendingOrders() {
   if (tableMissing || queueStatus.running || isHalted()) return;
-  if (getMarketSession() !== 'regular') return;
+  if (getMarketSession() === 'closed') return;
   queueStatus.running = true;
   try {
     const { data: orders, error } = await supabase()
