@@ -3,6 +3,7 @@ import { Button, Card, Descriptions, Empty, Space, Table, Tag } from 'antd';
 import PnlChart from './PnlChart.jsx';
 import StatsCards from './StatsCards.jsx';
 import TradeItem from './TradeItem.jsx';
+import FlashOnChange from './FlashOnChange.jsx';
 import { fmtMoney, fmtNum, fmtPercent, fmtTime, SESSION_LABELS } from '../api.js';
 
 export default function Dashboard({ portfolio, snapshots, trades, stats, performance, status, onSymbolClick }) {
@@ -36,7 +37,7 @@ export default function Dashboard({ portfolio, snapshots, trades, stats, perform
       width: 150,
       render: (v, p) => (
         <Space size={4}>
-          <span className="num">{fmtMoney(v)}</span>
+          <FlashOnChange value={v} className="num">{fmtMoney(v)}</FlashOnChange>
           {p.session && p.session !== 'regular' && p.extended_price !== null && (
             <Tag color="orange" style={{ marginRight: 0 }}>
               {SESSION_LABELS[p.session]}

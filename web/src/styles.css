@@ -339,6 +339,23 @@ body {
   border-radius: 2px;
 }
 
+/* 价格变动闪烁:涨绿/跌红后 ~0.8s 渐回原色(FlashOnChange.jsx 消费)。
+   只写 from 帧 → 结束态即元素自然色,纯颜色无位移;颜色只用 --up/--down
+   (theme.js 权威,双主题/中途切换自动正确);下方 reduced-motion 的全局
+   0.001ms 覆盖使其即时结束且无残留 */
+@keyframes quote-flash-up {
+  from { color: var(--up); }
+}
+@keyframes quote-flash-down {
+  from { color: var(--down); }
+}
+.flash-up {
+  animation: quote-flash-up 0.8s var(--ease);
+}
+.flash-down {
+  animation: quote-flash-down 0.8s var(--ease);
+}
+
 /* ---- 动效:克制的 ease-out,尊重减少动效偏好 ---- */
 @media (prefers-reduced-motion: reduce) {
   * {

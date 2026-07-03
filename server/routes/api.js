@@ -185,17 +185,26 @@ async function getPoolOverview() {
   ]);
   if (counts === null && top === null) return null;
 
-  // 现价富化(fail-open,报价失败仅缺 current_price 字段):
+  // 现价富化(fail-open,报价失败仅缺现价相关字段):
   // "若现在买入"的止盈止损参考只能锚定现价——入池价是另一个问题的答案
-  // (反事实:系统若在入池瞬间买入,这笔仓位现在处于区间的什么位置)
+  // (反事实:系统若在入池瞬间买入,这笔仓位现在处于区间的什么位置)。
+  // 时段/盘外价字段保证首屏(SSE quotes 首 tick 前)就能画盘前盘后徽标;
+  // 容忍度与报价推送循环一致(10s),SSE 在线时必命中缓存
   let enriched = top || [];
   if (enriched.length) {
     try {
-      const quotes = await getQuotes([...new Set(enriched.map((c) => c.symbol))], 30_000);
+      const quotes = await getQuotes([...new Set(enriched.map((c) => c.symbol))], 10_000);
       enriched = enriched.map((c) => {
         const q = quotes.get(c.symbol);
         const price = q ? Number(q.effective_price ?? q.price) : null;
-        return { ...c, current_price: Number.isFinite(price) && price > 0 ? price : null };
+        return {
+          ...c,
+          current_price: Number.isFinite(price) && price > 0 ? price : null,
+          session: q?.session ?? null,
+          extended_price: q?.extended_price ?? null,
+          extended_change_percent: q?.extended_change_percent ?? null,
+          change_percent: q?.changesPercentage ?? q?.changePercentage ?? null,
+        };
       });
     } catch {
       // 批量报价失败:候选照常返回,前端按缺价降级展示

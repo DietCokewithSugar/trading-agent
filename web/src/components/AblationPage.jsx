@@ -35,6 +35,7 @@ import {
 } from '../api.js';
 import { getChart, getPnl, ACCENT_PRIMARY } from '../theme.js';
 import { useThemeMode } from '../theme-context.jsx';
+import FlashOnChange from './FlashOnChange.jsx';
 
 const RANGES = [
   { key: '1d', label: '1天', hours: 24 },
@@ -238,6 +239,24 @@ export default function AblationPage({ version = 0, onSymbolClick }) {
     load();
   }, [load, version]);
 
+  // 定时静默刷新(60s,与服务端影子估值的报价缓存节奏匹配):不动 loading、
+  // 不清成交展开缓存,只让估值/现价保持活性;后台标签页不请求。
+  // 组件仅在「消融实验」tab 激活时挂载,天然只在该页轮询
+  const silentRefresh = useCallback(async () => {
+    try {
+      setData(await api.shadow(range.hours));
+    } catch {
+      /* 静默失败,保留旧数据 */
+    }
+  }, [range.hours]);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (document.visibilityState === 'visible') silentRefresh();
+    }, 60_000);
+    return () => clearInterval(timer);
+  }, [silentRefresh]);
+
   // 各序列重基:窗口内首点 = 0%,统一为相对收益曲线(各组合起始资金/时点不同,绝对值不可比)
   const chartSeries = useMemo(() => {
     if (!data?.available) return [];
@@ -340,7 +359,7 @@ export default function AblationPage({ version = 0, onSymbolClick }) {
       dataIndex: 'total_value',
       width: 120,
       align: 'right',
-      render: (v) => <span className="num">{fmtMoney(v)}</span>,
+      render: (v) => <FlashOnChange value={v} className="num">{fmtMoney(v)}</FlashOnChange>,
     },
     {
       title: '自启用收益',
@@ -453,7 +472,7 @@ export default function AblationPage({ version = 0, onSymbolClick }) {
       dataIndex: 'current_price',
       width: 100,
       align: 'right',
-      render: (v) => <span className="num">{fmtMoney(v)}</span>,
+      render: (v) => <FlashOnChange value={v} className="num">{fmtMoney(v)}</FlashOnChange>,
     },
     {
       title: '市值',

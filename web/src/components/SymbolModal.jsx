@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Alert, Button, Descriptions, Divider, Modal, Skeleton, Space, Tag, Typography } from 'antd';
 import NewsHeatmap, { etDateOf } from './NewsHeatmap.jsx';
+import FlashOnChange from './FlashOnChange.jsx';
+import { useLiveQuotes } from '../quotes-context.jsx';
 import {
   api,
   fmtMoney,
@@ -18,6 +20,10 @@ export default function SymbolModal({ symbol, open, onClose }) {
   const [error, setError] = useState(null);
   // 选中的热力图日期(null = 全部);拿到新数据后默认定位到最近有新闻的一天
   const [selectedDate, setSelectedDate] = useState(null);
+  // 实时报价(SSE quotes 事件,覆盖持仓 + 候选池 top 符号):live 优先、一次性拉取兜底
+  const { quotes: liveQuotes } = useLiveQuotes();
+  const live = symbol ? liveQuotes[String(symbol).toUpperCase()] : null;
+  const hasLive = Boolean(live);
 
   useEffect(() => {
     // Modal 常挂载,仅在拿到 symbol 时拉取
@@ -28,7 +34,21 @@ export default function SymbolModal({ symbol, open, onClose }) {
     api.symbol(symbol).then(setData).catch((err) => setError(err.message));
   }, [symbol]);
 
-  // 数据到位后默认选中最近有新闻的一天(把超长列表收成单日视图)
+  // SSE 未覆盖的符号(非持仓非池,新闻流点开的任意票):每 15s 轮询补活价,
+  // 只合并 quote 字段、保持 analyses 数组引用不变(热力图选中日期不被打断)
+  useEffect(() => {
+    if (!symbol || !open || hasLive) return;
+    const timer = setInterval(() => {
+      api
+        .symbol(symbol)
+        .then((fresh) => setData((prev) => (prev ? { ...prev, quote: fresh.quote } : fresh)))
+        .catch(() => {});
+    }, 15_000);
+    return () => clearInterval(timer);
+  }, [symbol, open, hasLive]);
+
+  // 数据到位后默认选中最近有新闻的一天(把超长列表收成单日视图);
+  // 依赖 analyses 数组引用而非整个 data:轮询只换 quote 时不重置选中日期
   useEffect(() => {
     if (!data?.analyses?.length) return;
     const latest = data.analyses.reduce((acc, a) => {
@@ -36,11 +56,15 @@ export default function SymbolModal({ symbol, open, onClose }) {
       return d && (!acc || d > acc) ? d : acc;
     }, null);
     setSelectedDate(latest);
-  }, [data]);
+  }, [data?.analyses]);
 
   const quote = data?.quote;
   const position = data?.position;
-  const price = quote?.effective_price ?? quote?.price;
+  const price = live?.effective_price ?? quote?.effective_price ?? quote?.price;
+  const session = live?.session ?? quote?.session ?? null;
+  const extendedPrice = live?.extended_price ?? quote?.extended_price ?? null;
+  const extendedChangePercent =
+    live?.extended_change_percent ?? quote?.extended_change_percent ?? null;
 
   // 按选中日过滤分析(null 时显示全部)
   const visibleAnalyses = useMemo(() => {
@@ -75,24 +99,26 @@ export default function SymbolModal({ symbol, open, onClose }) {
           {quote ? (
             <Space size={12} wrap align="baseline">
               <Typography.Title level={3} style={{ margin: 0 }} className="num">
-                {fmtMoney(price)}
+                <FlashOnChange value={price}>{fmtMoney(price)}</FlashOnChange>
               </Typography.Title>
-              {quote.session && quote.session !== 'regular' && (
-                <Tag color="orange">{SESSION_LABELS[quote.session]}</Tag>
+              {session && session !== 'regular' && (
+                <Tag color="orange">{SESSION_LABELS[session]}</Tag>
               )}
               {(() => {
                 // 上游字段名不稳定(changesPercentage/changePercentage),与服务端同样双字段兜底;
                 // 缺失时不着色(undefined 比较会把占位符误染跌色)
-                const chg = Number(quote.changesPercentage ?? quote.changePercentage);
+                const chg = Number(
+                  live?.change_percent ?? quote.changesPercentage ?? quote.changePercentage
+                );
                 return (
                   <span className={`num ${Number.isFinite(chg) ? (chg >= 0 ? 'up' : 'down') : 'muted'}`}>
                     今日 {fmtPercent(Number.isFinite(chg) ? chg : null)}
                   </span>
                 );
               })()}
-              {quote.extended_price !== null && quote.extended_change_percent !== null && (
-                <span className={`num ${quote.extended_change_percent >= 0 ? 'up' : 'down'}`}>
-                  {SESSION_LABELS[quote.session] || '盘后'} {fmtPercent(quote.extended_change_percent)}
+              {extendedPrice !== null && extendedChangePercent !== null && (
+                <span className={`num ${extendedChangePercent >= 0 ? 'up' : 'down'}`}>
+                  {SESSION_LABELS[session] || '盘后'} {fmtPercent(extendedChangePercent)}
                 </span>
               )}
             </Space>

@@ -358,7 +358,7 @@ cd web && npm run dev      # 终端 2:启动 Vite :5173(已配置 /api 代理)
 | `GET /api/snapshots` | 净值快照序列(盈亏折线图数据) |
 | `GET /api/trades` | 交易记录(含买卖原因、关联新闻) |
 | `GET /api/news` | 新闻流(含 DeepSeek 分析结果) |
-| `GET /api/stream` | SSE 实时推送流(news / analysis / trade / portfolio / snapshot / cycle / reset / macro) |
+| `GET /api/stream` | SSE 实时推送流(news / analysis / trade / portfolio / snapshot / cycle / reset / macro / quotes) |
 | `GET /api/stats` | 组合统计(今日盈亏、已实现盈亏、胜率、最大回撤) |
 | `GET /api/performance` | 业绩指标(夏普比率、累计收益率、SPY 基准对比与超额收益) |
 | `GET /api/signal-stats` | 信号质量统计(命中率含 Wilson 95% 区间/平均收益/IC,按档位/来源/置信度/拦截层分桶;`?days=` 限定窗口) |
