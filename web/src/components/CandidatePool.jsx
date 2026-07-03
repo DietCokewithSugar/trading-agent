@@ -175,7 +175,9 @@ export default function CandidatePool({ version = 0, onSymbolClick }) {
       title: '说明',
       dataIndex: 'status_reason',
       ellipsis: true,
-      render: (v, row) => v || STATUS_FALLBACK_NOTES[row.status] || '—',
+      // 同票多事件入池即合并(022):合并计数作说明前缀,池里不再出现同票重复行
+      render: (v, row) =>
+        `${Number(row.merged_events) > 1 ? `已合并 ${row.merged_events} 个事件 · ` : ''}${v || STATUS_FALLBACK_NOTES[row.status] || '—'}`,
     },
     { title: '入池时间', dataIndex: 'created_at', width: 110, render: (v) => fmtTime(v) },
   ];

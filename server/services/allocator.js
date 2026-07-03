@@ -41,10 +41,13 @@ export function decayFactor(ageHours) {
 /**
  * 候选打分:档位 × LLM 置信度 × 时效衰减 × 来源可信度 × 宏观乘数 × 行业乘数。
  * 缺失置信度/来源分按 0.7 计(与 sizing 链缺省一致)。返回保留三位小数。
+ * 衰减锚点取 last_signal_at(022 同票合并后的最新事件时刻),缺失回退 created_at
+ *(旧行/未迁移库自动兼容)——合并进来的新事件续命,不按首次入池时间衰减。
  */
 export function scoreCandidate(candidate, { now = new Date(), macroMultiplier = 1, sectorMult = 1 } = {}) {
   const nowTs = now instanceof Date ? now.getTime() : Number(now);
-  const ageHours = (nowTs - new Date(candidate.created_at || nowTs).getTime()) / 3600_000;
+  const ageHours =
+    (nowTs - new Date(candidate.last_signal_at || candidate.created_at || nowTs).getTime()) / 3600_000;
   const conf = Number.isFinite(Number(candidate.confidence)) ? Number(candidate.confidence) : 0.7;
   const src = Number.isFinite(Number(candidate.source_score)) ? Number(candidate.source_score) : 0.7;
   const score =
@@ -53,9 +56,11 @@ export function scoreCandidate(candidate, { now = new Date(), macroMultiplier = 
 }
 
 /**
- * 同票候选合并:取最高分者为代表,多事件共振给小幅加成(+0.05/条,上限 +0.1)。
- * 返回 { merged: 代表候选(带 score), absorbed: [{ candidate, into }] }。
- * 输入候选需已带 score 字段。
+ * 同票候选合并:取最高分者为代表,多事件共振给小幅加成(+0.05/事件,上限 +0.1)。
+ * 事件数按组内 merged_events 之和计(022 入池即合并后同票只剩一行,行数不再反映
+ * 事件数;旧行/缺列按 1 计,legacy 多行与现行为完全一致)。
+ * 返回 { merged: 代表候选(带 score), absorbed: [{ candidate, into }] }——
+ * 保留多行合并逻辑作为存量重复行的安全网。输入候选需已带 score 字段。
  */
 export function mergeBySymbol(candidates) {
   const groups = new Map();
@@ -68,7 +73,8 @@ export function mergeBySymbol(candidates) {
   for (const group of groups.values()) {
     group.sort((a, b) => (b.score || 0) - (a.score || 0));
     const rep = group[0];
-    const bonus = Math.min(0.05 * (group.length - 1), 0.1);
+    const events = group.reduce((sum, c) => sum + (Number(c.merged_events) || 1), 0);
+    const bonus = Math.min(0.05 * (events - 1), 0.1);
     merged.push({ ...rep, score: Number(((rep.score || 0) + bonus).toFixed(3)) });
     for (const other of group.slice(1)) absorbed.push({ candidate: other, into: rep });
   }

@@ -478,7 +478,9 @@ export async function loadSignalRows({ days = null } = {}) {
   }
 
   // 候选池状态 + 入池时宏观快照 + 状态理由(014 迁移容忍:表缺失时全部按 null,相关分组自然为空)。
-  // status_reason 用于识别分配路径的风控官否决(rejected 且理由以"风控官"开头)
+  // status_reason 用于识别分配路径的风控官否决(rejected 且理由以"风控官"开头)。
+  // 022 同票合并后,被合并事件的 analysis 不再有自己的候选行(candidate_status 为 null,
+  // 不进 traded-vs-blocked 分桶)——候选行只代表每票最强的那条信号,口径的已知取舍
   let candidateById = new Map();
   try {
     const candFetch = await fetchPaged(() =>
