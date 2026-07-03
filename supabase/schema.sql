@@ -704,3 +704,12 @@ alter table broker_mirror_orders enable row level security;
 alter table broker_mirror_snapshots enable row level security;
 create policy "public read broker_mirror_orders" on broker_mirror_orders for select using (true);
 create policy "public read broker_mirror_snapshots" on broker_mirror_snapshots for select using (true);
+
+-- 候选池同票合并(022):同票多事件不再各插一行,合并进已有活跃候选。
+-- merged_events 持久记录共振事件数(mergeBySymbol 加成依据),
+-- last_signal_at 是时效衰减/续命的锚点(缺失回退 created_at)
+alter table candidate_signals add column if not exists merged_events integer not null default 1;
+alter table candidate_signals add column if not exists last_signal_at timestamptz;
+create unique index if not exists idx_candidate_signals_active_symbol_unique
+  on candidate_signals (symbol)
+  where status in ('pending', 'capital_constrained', 'conflict_hold', 'macro_filtered');

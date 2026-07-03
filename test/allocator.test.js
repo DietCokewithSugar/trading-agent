@@ -41,6 +41,27 @@ test('scoreCandidate:乘数链与缺省值', () => {
   assert.equal(scoreCandidate(stale, { now: NOW }), Number((0.75 * 0.7 * 0.5 * 0.7).toFixed(3)));
 });
 
+test('scoreCandidate:last_signal_at 为衰减锚点,缺失回退 created_at', () => {
+  const merged = {
+    tier: 1,
+    confidence: 0.8,
+    source_score: 0.9,
+    created_at: new Date(NOW.getTime() - 30 * 3600_000).toISOString(), // 首次入池已 30 小时
+    last_signal_at: new Date(NOW.getTime() - 30 * 60_000).toISOString(), // 最新事件 30 分钟前
+  };
+  assert.equal(
+    scoreCandidate(merged, { now: NOW }),
+    Number((1 * 0.8 * 1 * 0.9).toFixed(3)),
+    '合并续命后按最新事件时刻不衰减'
+  );
+  const legacy = { ...merged, last_signal_at: undefined };
+  assert.equal(
+    scoreCandidate(legacy, { now: NOW }),
+    Number((1 * 0.8 * 0.5 * 0.9).toFixed(3)),
+    '旧行回退 created_at,30 小时衰减到下限 0.5'
+  );
+});
+
 test('mergeBySymbol:取最高分代表,多事件共振加成上限 +0.1', () => {
   const candidates = [
     { id: 1, symbol: 'NVDA', score: 0.6 },
@@ -61,6 +82,23 @@ test('mergeBySymbol:取最高分代表,多事件共振加成上限 +0.1', () => 
     { symbol: 'TSLA', score: 0.2 },
   ]);
   assert.equal(many.merged[0].score, 0.6);
+});
+
+test('mergeBySymbol:事件数按 merged_events 之和(022 入池即合并后单行携带计数)', () => {
+  // 单行 merged_events=2:与旧的两行重复候选同等加成
+  const single = mergeBySymbol([{ symbol: 'NVDA', score: 0.6, merged_events: 2 }]);
+  assert.equal(single.merged[0].score, 0.65, '单行 2 个事件 → +0.05');
+  // 单行 merged_events=5:封顶 +0.1
+  const capped = mergeBySymbol([{ symbol: 'NVDA', score: 0.6, merged_events: 5 }]);
+  assert.equal(capped.merged[0].score, 0.7);
+  // legacy 多行(存量重复,安全网)与带计数的行混合:按求和计事件
+  const mixed = mergeBySymbol([
+    { id: 1, symbol: 'TSLA', score: 0.6, merged_events: 2 },
+    { id: 2, symbol: 'TSLA', score: 0.4 }, // 旧行无计数按 1
+  ]);
+  assert.equal(mixed.merged[0].id, 1, '最高分为代表');
+  assert.equal(mixed.merged[0].score, 0.7, 'Σ=3 个事件 → +0.1');
+  assert.equal(mixed.absorbed.length, 1);
 });
 
 test('rankCandidates:分数降序,同分按综合置信度、入池时间', () => {

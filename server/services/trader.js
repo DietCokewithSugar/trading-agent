@@ -24,7 +24,14 @@ import { computeFill, computePoolMetrics } from './execution.js';
 import { checkBuyEligibility } from './eligibility.js';
 import { scaleFraction } from './sizing.js';
 import { enqueuePendingOrder } from './openQueue.js';
-import { enqueueCandidate, holdBuyCandidates, isPoolAvailable, getCandidateStatus } from './candidateStore.js';
+import {
+  enqueueCandidate,
+  findActiveCandidate,
+  mergeIntoCandidate,
+  holdBuyCandidates,
+  isPoolAvailable,
+  getCandidateStatus,
+} from './candidateStore.js';
 import { scoreCandidate } from './allocator.js';
 import { checkTradeCooldown } from './eventService.js';
 import {
@@ -674,6 +681,36 @@ async function poolBullishSignal({ article, analysisRow, profile, price = null }
   if (!isPoolAvailable()) return null;
   const symbol = analysisRow.symbol;
 
+  const baseScore = scoreCandidate(
+    {
+      tier: analysisRow.tier,
+      confidence: analysisRow.confidence,
+      source_score: article.source_score ?? null,
+      created_at: new Date().toISOString(),
+    },
+    { now: new Date() }
+  );
+
+  // 同票已有活跃候选(022):不再插行,合并进已有候选(更强信号刷新字段,
+  // 事件计数/时效锚点续命;状态与入池价锚点保持)。合并写落空(利空
+  // holdBuyCandidates/分配器并发写赢)也视同已入池——同票已在池,
+  // fail-closed 不插重复行,返回 truthy 让 runCycle 照常消费事件
+  const existing = await findActiveCandidate(symbol);
+  if (existing) {
+    const merged = await mergeIntoCandidate(existing, {
+      news_id: article.id,
+      analysis_id: analysisRow.id,
+      event_id: analysisRow.event_id ?? null,
+      tier: analysisRow.tier,
+      confidence: analysisRow.confidence,
+      final_confidence: analysisRow.final_confidence ?? null,
+      source_score: article.source_score ?? null,
+      sector: profile?.sector ?? null,
+      base_score: baseScore,
+    });
+    return merged || existing;
+  }
+
   // 出生即冲突:同票存在待开盘卖单(方向已明确要离场);查询失败按无冲突处理(fail-open)
   let conflict = false;
   try {
@@ -689,15 +726,6 @@ async function poolBullishSignal({ article, analysisRow, profile, price = null }
     conflict = false;
   }
 
-  const baseScore = scoreCandidate(
-    {
-      tier: analysisRow.tier,
-      confidence: analysisRow.confidence,
-      source_score: article.source_score ?? null,
-      created_at: new Date().toISOString(),
-    },
-    { now: new Date() }
-  );
   return enqueueCandidate({
     symbol,
     side: 'buy',
