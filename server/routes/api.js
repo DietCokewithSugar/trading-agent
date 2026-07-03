@@ -4,7 +4,8 @@ import { config } from '../config.js';
 import { getValuation } from '../services/portfolio.js';
 import { runCycle, cycleStatus } from '../services/newsService.js';
 import { sseHandler, clientCount } from '../services/bus.js';
-import { getQuote, getQuotes } from '../services/fmp.js';
+import { getQuote, getQuotes, getMarketSession, quoteDisplayFields } from '../services/fmp.js';
+import { CLOSED_QUOTE_MAX_AGE_MS } from '../services/quotesPush.js';
 import { getStats, getPerformance } from '../services/statsService.js';
 import { getSignalStats } from '../services/signalStats.js';
 import { listPendingOrders } from '../services/openQueue.js';
@@ -188,22 +189,21 @@ async function getPoolOverview() {
   // 现价富化(fail-open,报价失败仅缺现价相关字段):
   // "若现在买入"的止盈止损参考只能锚定现价——入池价是另一个问题的答案
   // (反事实:系统若在入池瞬间买入,这笔仓位现在处于区间的什么位置)。
-  // 时段/盘外价字段保证首屏(SSE quotes 首 tick 前)就能画盘前盘后徽标;
-  // 容忍度与报价推送循环一致(10s),SSE 在线时必命中缓存
+  // 时段/盘外价字段保证首屏(SSE quotes 首 tick 前)就能画盘前盘后徽标。
+  // 报价容忍度:/api/pool 也是 SSE 断线时的兜底路径(此时推送循环没在暖缓存),
+  // 非休市 30s 避免每次请求都打新 FMP 调用;休市价格冻结,与推送循环同一 5 分钟口径
   let enriched = top || [];
   if (enriched.length) {
     try {
-      const quotes = await getQuotes([...new Set(enriched.map((c) => c.symbol))], 10_000);
+      const maxAge = getMarketSession() === 'closed' ? CLOSED_QUOTE_MAX_AGE_MS : 30_000;
+      const quotes = await getQuotes([...new Set(enriched.map((c) => c.symbol))], maxAge);
       enriched = enriched.map((c) => {
         const q = quotes.get(c.symbol);
         const price = q ? Number(q.effective_price ?? q.price) : null;
         return {
           ...c,
           current_price: Number.isFinite(price) && price > 0 ? price : null,
-          session: q?.session ?? null,
-          extended_price: q?.extended_price ?? null,
-          extended_change_percent: q?.extended_change_percent ?? null,
-          change_percent: q?.changesPercentage ?? q?.changePercentage ?? null,
+          ...quoteDisplayFields(q),
         };
       });
     } catch {
@@ -306,6 +306,18 @@ router.get(
   '/broker-mirror',
   asyncHandler(async (req, res) => {
     res.json(await getBrokerMirrorOverview());
+  })
+);
+
+/** 单票轻量报价(个股弹窗兜底轮询用):只走报价缓存,不查库、不拉分析/交易历史 */
+router.get(
+  '/quote/:symbol',
+  asyncHandler(async (req, res) => {
+    const symbol = String(req.params.symbol || '').toUpperCase();
+    if (!/^[A-Z0-9.\-]{1,10}$/.test(symbol)) {
+      return res.status(400).json({ error: '无效的股票代码' });
+    }
+    res.json({ quote: await getQuote(symbol).catch(() => null) });
   })
 );
 

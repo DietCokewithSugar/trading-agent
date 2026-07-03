@@ -21,8 +21,8 @@ export default function SymbolModal({ symbol, open, onClose }) {
   // 选中的热力图日期(null = 全部);拿到新数据后默认定位到最近有新闻的一天
   const [selectedDate, setSelectedDate] = useState(null);
   // 实时报价(SSE quotes 事件,覆盖持仓 + 候选池 top 符号):live 优先、一次性拉取兜底
-  const { quotes: liveQuotes } = useLiveQuotes();
-  const live = symbol ? liveQuotes[String(symbol).toUpperCase()] : null;
+  const liveQuotes = useLiveQuotes();
+  const live = (symbol && liveQuotes[String(symbol).toUpperCase()]) || null;
   const hasLive = Boolean(live);
 
   useEffect(() => {
@@ -34,17 +34,25 @@ export default function SymbolModal({ symbol, open, onClose }) {
     api.symbol(symbol).then(setData).catch((err) => setError(err.message));
   }, [symbol]);
 
-  // SSE 未覆盖的符号(非持仓非池,新闻流点开的任意票):每 15s 轮询补活价,
-  // 只合并 quote 字段、保持 analyses 数组引用不变(热力图选中日期不被打断)
+  // SSE 未覆盖的符号(非持仓非池,新闻流点开的任意票):每 15s 轮询轻量报价接口补活价,
+  // 只替换 quote 字段、保持 analyses 数组引用不变(热力图选中日期不被打断)。
+  // cancelled 守卫:切换符号后在途响应作废,防止把上一只票的报价装进新弹窗
   useEffect(() => {
     if (!symbol || !open || hasLive) return;
+    let cancelled = false;
     const timer = setInterval(() => {
       api
-        .symbol(symbol)
-        .then((fresh) => setData((prev) => (prev ? { ...prev, quote: fresh.quote } : fresh)))
+        .quote(symbol)
+        .then((fresh) => {
+          if (cancelled || !fresh?.quote) return;
+          setData((prev) => (prev ? { ...prev, quote: fresh.quote } : prev));
+        })
         .catch(() => {});
     }, 15_000);
-    return () => clearInterval(timer);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
   }, [symbol, open, hasLive]);
 
   // 数据到位后默认选中最近有新闻的一天(把超长列表收成单日视图);
@@ -60,11 +68,14 @@ export default function SymbolModal({ symbol, open, onClose }) {
 
   const quote = data?.quote;
   const position = data?.position;
-  const price = live?.effective_price ?? quote?.effective_price ?? quote?.price;
-  const session = live?.session ?? quote?.session ?? null;
-  const extendedPrice = live?.extended_price ?? quote?.extended_price ?? null;
-  const extendedChangePercent =
-    live?.extended_change_percent ?? quote?.extended_change_percent ?? null;
+  // live 与一次性拉取的 quote 是两份完整快照,整体取其一、不逐字段混用:
+  // live 的盘外字段为 null 是"当前时段没有盘外价"的有效信息(如开盘瞬间),
+  // 逐字段 ?? 回退会把旧快照的盘后涨跌挂到新时段标签上
+  const src = live ?? quote;
+  const price = src?.effective_price ?? src?.price;
+  const session = src?.session ?? null;
+  const extendedPrice = src?.extended_price ?? null;
+  const extendedChangePercent = src?.extended_change_percent ?? null;
 
   // 按选中日过滤分析(null 时显示全部)
   const visibleAnalyses = useMemo(() => {
@@ -105,10 +116,11 @@ export default function SymbolModal({ symbol, open, onClose }) {
                 <Tag color="orange">{SESSION_LABELS[session]}</Tag>
               )}
               {(() => {
-                // 上游字段名不稳定(changesPercentage/changePercentage),与服务端同样双字段兜底;
+                // live 快照已带归一化的 change_percent;一次性拉取的原始报价
+                // 字段名不稳定(changesPercentage/changePercentage),双字段兜底;
                 // 缺失时不着色(undefined 比较会把占位符误染跌色)
                 const chg = Number(
-                  live?.change_percent ?? quote.changesPercentage ?? quote.changePercentage
+                  live ? live.change_percent : (quote.changesPercentage ?? quote.changePercentage)
                 );
                 return (
                   <span className={`num ${Number.isFinite(chg) ? (chg >= 0 ? 'up' : 'down') : 'muted'}`}>

@@ -1,6 +1,6 @@
 import { supabase } from '../db.js';
 import { config } from '../config.js';
-import { getQuotes, getMarketSession } from './fmp.js';
+import { getQuotes, getMarketSession, quoteDisplayFields } from './fmp.js';
 
 /** 读取(必要时初始化)资金账户与持仓 */
 export async function getPortfolio() {
@@ -52,10 +52,7 @@ export async function getValuation({ quoteMaxAgeMs = 10_000 } = {}) {
         p.take_profit !== null && p.take_profit !== undefined ? Number(p.take_profit) : null,
       current_price: price,
       live_quote: Boolean(quote),
-      session: quote?.session ?? null,
-      extended_price: quote?.extended_price ?? null,
-      extended_change_percent: quote?.extended_change_percent ?? null,
-      change_percent: quote?.changesPercentage ?? quote?.changePercentage ?? null,
+      ...quoteDisplayFields(quote),
       market_value: marketValue,
       unrealized_pnl: marketValue - costBasis,
       unrealized_pnl_percent: costBasis > 0 ? ((marketValue - costBasis) / costBasis) * 100 : 0,

@@ -169,6 +169,22 @@ export async function getQuote(symbol, maxAgeMs = 10_000) {
   return q;
 }
 
+/**
+ * 报价 → 前端展示字段(纯函数):时段/盘外价/当日涨跌幅。
+ * 上游涨跌幅字段名不稳定(changesPercentage/changePercentage),这里统一双字段兜底
+ * 并钳制为有限数或 null——estValuation/候选池富化/实时推送三处共用,避免各自维护。
+ * 入参可以是原始 FMP 报价,也可以是已映射过的展示对象(change_percent 优先读取,幂等)。
+ */
+export function quoteDisplayFields(q) {
+  const chg = Number(q?.change_percent ?? q?.changesPercentage ?? q?.changePercentage);
+  return {
+    session: q?.session ?? null,
+    extended_price: q?.extended_price ?? null,
+    extended_change_percent: q?.extended_change_percent ?? null,
+    change_percent: Number.isFinite(chg) ? chg : null,
+  };
+}
+
 /** 历史日线缓存:日线收盘价当天内不变,缓存 1 小时足够 */
 const historyCache = new Map(); // symbol:from:to -> { rows, at }
 

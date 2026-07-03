@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import {
   collectQuoteSymbols,
   buildQuotesPayload,
+  positionsToQuotes,
   MAX_QUOTE_SYMBOLS,
 } from '../server/services/quotesPush.js';
+import { quoteDisplayFields } from '../server/services/fmp.js';
 
 test('collectQuoteSymbols:大小写去重,持仓优先于池', () => {
   const out = collectQuoteSymbols({
@@ -26,7 +28,44 @@ test('collectQuoteSymbols:空输入与空白符号', () => {
   assert.deepEqual(collectQuoteSymbols({ heldSymbols: ['', null], poolSymbols: [' '] }), []);
 });
 
-test('buildQuotesPayload:字段映射与双字段涨跌幅兜底', () => {
+test('quoteDisplayFields:双字段涨跌幅兜底,幂等接受已映射对象,0 不当缺失', () => {
+  assert.equal(quoteDisplayFields({ changesPercentage: 1.2 }).change_percent, 1.2);
+  assert.equal(quoteDisplayFields({ changePercentage: -0.5 }).change_percent, -0.5);
+  // 已映射对象(change_percent)优先——positionsToQuotes 的输出再过一遍也不丢值
+  assert.equal(quoteDisplayFields({ change_percent: 3.4, changesPercentage: 9 }).change_percent, 3.4);
+  assert.equal(quoteDisplayFields({ changesPercentage: 0 }).change_percent, 0);
+  assert.equal(quoteDisplayFields({ changesPercentage: 'garbage' }).change_percent, null);
+  assert.deepEqual(quoteDisplayFields(undefined), {
+    session: null,
+    extended_price: null,
+    extended_change_percent: null,
+    change_percent: null,
+  });
+});
+
+test('positionsToQuotes:取估值现价,跳过报价缺失(live_quote=false)与非法价的持仓', () => {
+  const map = positionsToQuotes([
+    {
+      symbol: 'aapl',
+      live_quote: true,
+      current_price: 201.5,
+      session: 'post',
+      extended_price: 201.5,
+      extended_change_percent: 0.75,
+      change_percent: 1.2,
+    },
+    // 报价缺失的持仓现价是成本价兜底,不能当实时价广播
+    { symbol: 'MSFT', live_quote: false, current_price: 100 },
+    { symbol: 'BAD', live_quote: true, current_price: 0 },
+    { symbol: '', live_quote: true, current_price: 5 },
+  ]);
+  assert.deepEqual([...map.keys()], ['AAPL']);
+  assert.equal(map.get('AAPL').effective_price, 201.5);
+  assert.equal(map.get('AAPL').change_percent, 1.2);
+  assert.deepEqual(positionsToQuotes(), new Map());
+});
+
+test('buildQuotesPayload:字段映射,effective_price 缺失回退 price', () => {
   const map = new Map([
     [
       'AAPL',
@@ -46,12 +85,11 @@ test('buildQuotesPayload:字段映射与双字段涨跌幅兜底', () => {
   assert.equal(payload.ts, '2026-07-03T21:00:00.000Z');
   assert.equal(payload.session, 'post');
   assert.deepEqual(payload.quotes.AAPL, {
-    price: 200,
     effective_price: 201.5,
+    session: 'post',
     extended_price: 201.5,
     extended_change_percent: 0.75,
     change_percent: 1.2,
-    session: 'post',
   });
   assert.equal(payload.quotes.MSFT.effective_price, 400);
   assert.equal(payload.quotes.MSFT.change_percent, -0.5);
@@ -81,4 +119,14 @@ test('buildQuotesPayload:quote 自带 session 缺失时用顶层 session 兜底,
   assert.equal(payload.quotes.SPY.session, 'closed');
   assert.equal(buildQuotesPayload(null), null);
   assert.equal(buildQuotesPayload(undefined), null);
+});
+
+test('buildQuotesPayload:持仓映射(positionsToQuotes 输出)可直接作为输入', () => {
+  const held = positionsToQuotes([
+    { symbol: 'NVDA', live_quote: true, current_price: 101.5, session: 'pre', change_percent: 0 },
+  ]);
+  const payload = buildQuotesPayload(held, { session: 'pre' });
+  assert.equal(payload.quotes.NVDA.effective_price, 101.5);
+  assert.equal(payload.quotes.NVDA.change_percent, 0, '涨跌幅 0 不能被当成缺失');
+  assert.equal(payload.quotes.NVDA.session, 'pre');
 });

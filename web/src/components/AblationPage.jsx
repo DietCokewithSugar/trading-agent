@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Button,
@@ -223,39 +223,42 @@ export default function AblationPage({ version = 0, onSymbolClick }) {
 
   const range = RANGES.find((r) => r.key === rangeKey);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      setData(await api.shadow(range.hours));
-      setError(null);
-      setTradeCache({}); // 重新拉取后清空展开缓存,避免展示过期成交
-    } catch (err) {
-      setError(err.message);
-    }
-    setLoading(false);
-  }, [range.hours]);
+  // 请求序号守卫:切换窗口/连续刷新时,迟到的旧响应作废(否则旧窗口数据会盖掉新窗口)
+  const reqSeq = useRef(0);
+
+  // silent=true 为定时静默刷新:不动 loading、不清成交展开缓存、失败保留旧数据,
+  // 只让估值/现价保持活性
+  const load = useCallback(
+    async (silent = false) => {
+      const seq = ++reqSeq.current;
+      if (!silent) setLoading(true);
+      try {
+        const fresh = await api.shadow(range.hours);
+        if (seq === reqSeq.current) {
+          setData(fresh);
+          setError(null);
+          if (!silent) setTradeCache({}); // 重新拉取后清空展开缓存,避免展示过期成交
+        }
+      } catch (err) {
+        if (!silent && seq === reqSeq.current) setError(err.message);
+      }
+      if (!silent) setLoading(false);
+    },
+    [range.hours]
+  );
 
   useEffect(() => {
     load();
   }, [load, version]);
 
-  // 定时静默刷新(60s,与服务端影子估值的报价缓存节奏匹配):不动 loading、
-  // 不清成交展开缓存,只让估值/现价保持活性;后台标签页不请求。
+  // 定时静默刷新(60s,与服务端影子估值的报价缓存节奏匹配);后台标签页不请求。
   // 组件仅在「消融实验」tab 激活时挂载,天然只在该页轮询
-  const silentRefresh = useCallback(async () => {
-    try {
-      setData(await api.shadow(range.hours));
-    } catch {
-      /* 静默失败,保留旧数据 */
-    }
-  }, [range.hours]);
-
   useEffect(() => {
     const timer = setInterval(() => {
-      if (document.visibilityState === 'visible') silentRefresh();
+      if (document.visibilityState === 'visible') load(true);
     }, 60_000);
     return () => clearInterval(timer);
-  }, [silentRefresh]);
+  }, [load]);
 
   // 各序列重基:窗口内首点 = 0%,统一为相对收益曲线(各组合起始资金/时点不同,绝对值不可比)
   const chartSeries = useMemo(() => {
@@ -603,7 +606,7 @@ export default function AblationPage({ version = 0, onSymbolClick }) {
               value={rangeKey}
               onChange={setRangeKey}
             />
-            <Button size="small" onClick={load} loading={loading}>
+            <Button size="small" onClick={() => load()} loading={loading}>
               刷新
             </Button>
           </Space>

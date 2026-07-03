@@ -1,10 +1,11 @@
 import React from 'react';
-import { Button, Card, Descriptions, Empty, Space, Table, Tag } from 'antd';
+import { Button, Card, Descriptions, Empty, Space, Table } from 'antd';
 import PnlChart from './PnlChart.jsx';
 import StatsCards from './StatsCards.jsx';
 import TradeItem from './TradeItem.jsx';
 import FlashOnChange from './FlashOnChange.jsx';
-import { fmtMoney, fmtNum, fmtPercent, fmtTime, SESSION_LABELS } from '../api.js';
+import SessionBadge from './SessionBadge.jsx';
+import { fmtMoney, fmtNum, fmtPercent, fmtTime } from '../api.js';
 
 export default function Dashboard({ portfolio, snapshots, trades, stats, performance, status, onSymbolClick }) {
   const positionColumns = [
@@ -38,12 +39,11 @@ export default function Dashboard({ portfolio, snapshots, trades, stats, perform
       render: (v, p) => (
         <Space size={4}>
           <FlashOnChange value={v} className="num">{fmtMoney(v)}</FlashOnChange>
-          {p.session && p.session !== 'regular' && p.extended_price !== null && (
-            <Tag color="orange" style={{ marginRight: 0 }}>
-              {SESSION_LABELS[p.session]}
-              {p.extended_change_percent !== null && ` ${fmtPercent(p.extended_change_percent)}`}
-            </Tag>
-          )}
+          <SessionBadge
+            session={p.session}
+            extendedPrice={p.extended_price}
+            extendedChangePercent={p.extended_change_percent}
+          />
         </Space>
       ),
     },

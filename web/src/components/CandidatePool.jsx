@@ -1,16 +1,9 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Card, Empty, Space, Table, Tag } from 'antd';
-import {
-  api,
-  fmtNum,
-  fmtPercent,
-  fmtTime,
-  CANDIDATE_STATUS_LABELS,
-  SESSION_LABELS,
-  TIER_LABELS,
-} from '../api.js';
+import { api, fmtNum, fmtTime, CANDIDATE_STATUS_LABELS, TIER_LABELS } from '../api.js';
 import { useLiveQuotes } from '../quotes-context.jsx';
 import FlashOnChange from './FlashOnChange.jsx';
+import SessionBadge from './SessionBadge.jsx';
 
 const CANDIDATE_STATUS_COLORS = {
   pending: 'blue',
@@ -70,7 +63,7 @@ function EntryBandBar({ price, entry, slPct, tpPct }) {
  */
 export default function CandidatePool({ version = 0, onSymbolClick }) {
   const [pool, setPool] = useState(null);
-  const { quotes } = useLiveQuotes();
+  const quotes = useLiveQuotes();
 
   useEffect(() => {
     let cancelled = false;
@@ -83,20 +76,21 @@ export default function CandidatePool({ version = 0, onSymbolClick }) {
     };
   }, [version]);
 
-  // 实时报价合并(SSE quotes 事件,每个推送 tick 覆盖):现价/时段/盘外价 live 优先、
-  // /api/pool 拉取值兜底——修复非常规时段现价与入池漂移冻结在旧收盘价的问题
+  // 实时报价合并(SSE quotes 事件,每个推送 tick 覆盖):有 live 时时段/盘外字段
+  // 整体取 live 快照,不与旧拉取值逐字段混用——盘外字段为 null 是"当前时段没有
+  // 盘外价"的有效信息(如开盘瞬间),回退旧值会把昨晚的盘后涨跌挂到今天的时段上
   const rows = useMemo(
     () =>
       (pool?.top || []).map((c) => {
         const live = quotes[String(c.symbol).toUpperCase()];
         if (!live) return c;
-        const price = Number(live.effective_price ?? live.price);
+        const price = Number(live.effective_price);
         return {
           ...c,
           current_price: Number.isFinite(price) && price > 0 ? price : c.current_price,
-          session: live.session ?? c.session ?? null,
-          extended_price: live.extended_price ?? c.extended_price ?? null,
-          extended_change_percent: live.extended_change_percent ?? c.extended_change_percent ?? null,
+          session: live.session ?? null,
+          extended_price: live.extended_price ?? null,
+          extended_change_percent: live.extended_change_percent ?? null,
         };
       }),
     [pool, quotes]
@@ -146,13 +140,11 @@ export default function CandidatePool({ version = 0, onSymbolClick }) {
           <div className="num" style={{ fontSize: 12, lineHeight: 1.6 }}>
             <Space size={4}>
               <FlashOnChange value={p}>现价 ${p.toFixed(2)}</FlashOnChange>
-              {row.session && row.session !== 'regular' && row.extended_price != null && (
-                <Tag color="orange" style={{ marginRight: 0 }}>
-                  {SESSION_LABELS[row.session]}
-                  {row.extended_change_percent != null &&
-                    ` ${fmtPercent(row.extended_change_percent)}`}
-                </Tag>
-              )}
+              <SessionBadge
+                session={row.session}
+                extendedPrice={row.extended_price}
+                extendedChangePercent={row.extended_change_percent}
+              />
             </Space>
             <div>
               止损 ${(p * (1 - slPct / 100)).toFixed(2)} · 止盈 ${(p * (1 + tpPct / 100)).toFixed(2)}

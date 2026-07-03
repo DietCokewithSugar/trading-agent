@@ -60,8 +60,8 @@ function MainApp() {
   const [live, setLive] = useState(false);
   const liveRef = useRef(false);
   const [activeSymbol, setActiveSymbol] = useState(null);
-  // 实时报价映射(SSE quotes 事件):候选池/个股弹窗经 QuotesProvider 消费
-  const [liveQuotes, setLiveQuotes] = useState({ quotes: {}, ts: null, session: null });
+  // 实时报价映射(SSE quotes 事件,大写 symbol → 报价):候选池/个股弹窗经 QuotesProvider 消费
+  const [liveQuotes, setLiveQuotes] = useState({});
 
   const pushToast = useCallback(
     (text, tone = '') => {
@@ -126,14 +126,16 @@ function MainApp() {
       liveRef.current = false;
       wasDown = true;
       setLive(false);
+      // 断线即作废实时报价:否则冻结的旧 live 价会一直压过兜底轮询拉到的新价,
+      // 还会抑制个股弹窗自己的兜底轮询(它以"live 覆盖该票"为不轮询条件)
+      setLiveQuotes({});
     };
 
     es.addEventListener('portfolio', (e) => setPortfolio(JSON.parse(e.data)));
     // 实时报价映射(持仓 + 候选池 top 符号):整包覆盖,消费方自行按 symbol 取用
     es.addEventListener('quotes', (e) => {
       try {
-        const q = JSON.parse(e.data);
-        setLiveQuotes({ quotes: q.quotes || {}, ts: q.ts ?? null, session: q.session ?? null });
+        setLiveQuotes(JSON.parse(e.data).quotes || {});
       } catch { /* 忽略畸形数据 */ }
     });
     es.addEventListener('snapshot', (e) => {
@@ -188,7 +190,7 @@ function MainApp() {
     });
     // 管理后台执行了全量数据重置:全部数据作废,整体刷新,清空实时报价残留
     es.addEventListener('reset', () => {
-      setLiveQuotes({ quotes: {}, ts: null, session: null });
+      setLiveQuotes({});
       refresh();
       pushToast('数据已重置,账户恢复初始状态');
     });

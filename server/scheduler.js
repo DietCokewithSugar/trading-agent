@@ -58,9 +58,10 @@ export function startScheduler() {
       quoteMaxAgeMs: Math.max(quoteSec * 1000 - 1000, 1000),
     });
     broadcast('portfolio', valuation);
-    // 附带广播「持仓 + 候选池 top」的紧凑报价映射(SSE quotes 事件),
-    // 前端候选池/个股弹窗据此实时刷新盘前盘后价;内部 fail-open,失败不影响上面的推送
-    await pushLiveQuotes(valuation);
+    // 附带广播「持仓 + 候选池 top」的紧凑报价映射(SSE quotes 事件)。
+    // 不 await:池符号报价慢(FMP 超时最长 20s)不能拖累 portfolio 推送节奏,
+    // 模块内部有单飞旗标防重入,且 fail-open 永不 reject
+    pushLiveQuotes(valuation).catch(() => {});
   });
 
   // 净值快照(盈亏折线图数据点),休市时段降频;影子组合快照搭车(内部限频)
