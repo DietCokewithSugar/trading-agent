@@ -17,6 +17,8 @@ import {
 import { makeSingleton } from './services/singleton.js';
 import { getMarketSession } from './services/fmp.js';
 import { broadcast, clientCount } from './services/bus.js';
+import { pollMirrorOrders } from './services/brokerMirror.js';
+import { isBrokerEnabled } from './services/alpacaBroker.js';
 
 // 休市时段净值几乎不变,快照降频到每 30 分钟一条(保持折线图连续),
 // 同时避免对持仓报价的无谓 FMP 请求
@@ -90,6 +92,12 @@ export function startScheduler() {
 
   // 信号前瞻收益回填(评估层):每 10 分钟一批,到期的信号补 1h/1d/5d 前瞻收益
   every(10 * 60_000, '信号前瞻收益回填', backfillForwardReturns);
+
+  // 券商模拟对照账本(021):回填在途对照单的真实撮合结果 + 限频净值对照快照
+  //(未配置券商 key 时函数内直接跳过)
+  if (isBrokerEnabled()) {
+    every(60_000, '券商对照轮询', pollMirrorOrders);
+  }
 
   if (config.enableMacro) {
     // 经济日历刷新(黑窗与 surprise 数据源;套餐不含端点时模块内部自动停用)

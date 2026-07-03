@@ -661,3 +661,46 @@ create policy "public read shadow_portfolios" on shadow_portfolios for select us
 create policy "public read shadow_positions" on shadow_positions for select using (true);
 create policy "public read shadow_trades" on shadow_trades for select using (true);
 create policy "public read shadow_snapshots" on shadow_snapshots for select using (true);
+
+-- 券商模拟对照账本(021):实盘成交镜像到外部券商模拟账户,度量成交价/净值偏差。
+-- 纯观测层:未配置券商 API key 或表缺失时整体停用,绝不影响交易主链路
+create table if not exists broker_mirror_orders (
+  id bigint generated always as identity primary key,
+  trade_id bigint references trades(id) on delete set null,
+  symbol text not null,
+  side text not null check (side in ('buy', 'sell')),
+  qty numeric not null,
+  limit_price numeric,
+  extended_hours boolean not null default false,
+  client_order_id text unique,       -- trade-{trade_id},幂等防重复镜像
+  broker_order_id text,
+  status text not null default 'submitted',
+  filled_qty numeric,
+  filled_avg_price numeric,
+  internal_price numeric not null,   -- 内部账本成交价(偏差基准)
+  diff_bps numeric,                  -- 带方向偏差,正值=对我们不利
+  note text,
+  submitted_at timestamptz not null default now(),
+  filled_at timestamptz,
+  updated_at timestamptz not null default now()
+);
+create index if not exists idx_broker_mirror_orders_open
+  on broker_mirror_orders (submitted_at)
+  where status in ('submitted', 'partially_filled');
+create index if not exists idx_broker_mirror_orders_recent
+  on broker_mirror_orders (submitted_at desc);
+
+create table if not exists broker_mirror_snapshots (
+  id bigint generated always as identity primary key,
+  equity numeric not null,
+  cash numeric not null,
+  internal_total_value numeric,
+  created_at timestamptz not null default now()
+);
+create index if not exists idx_broker_mirror_snapshots_created
+  on broker_mirror_snapshots (created_at desc);
+
+alter table broker_mirror_orders enable row level security;
+alter table broker_mirror_snapshots enable row level security;
+create policy "public read broker_mirror_orders" on broker_mirror_orders for select using (true);
+create policy "public read broker_mirror_snapshots" on broker_mirror_snapshots for select using (true);

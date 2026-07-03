@@ -19,6 +19,16 @@ services:
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
+      - key: ALPACA_KEY_ID
+        sync: false # 券商模拟对照账本(可选,021 迁移);不填则该功能停用
+      - key: ALPACA_SECRET_KEY
+        sync: false
+      - key: ALPACA_BASE_URL
+        value: "https://paper-api.alpaca.markets"
+      - key: ENABLE_BROKER_MIRROR
+        value: "true"
+      - key: BROKER_MIRROR_LIMIT_SLACK_PERCENT
+        value: "1"
       - key: DEEPSEEK_MODEL
         value: deepseek-chat
       - key: DEEPSEEK_BASE_URL

@@ -73,6 +73,117 @@ function pctClass(v) {
   return v > 0 ? 'up' : v < 0 ? 'down' : '';
 }
 
+const MIRROR_STATUS_LABELS = {
+  submitted: '在途',
+  partially_filled: '部分成交',
+  filled: '已成交',
+  canceled: '已撤销',
+  expired: '已过期',
+  rejected: '被拒绝',
+  skipped: '跳过',
+  error: '出错',
+};
+
+/**
+ * 券商模拟对照账本:实盘每笔成交镜像到外部券商模拟账户(真实盘口撮合),
+ * 逐笔成交价偏差(bps,正值=对我们不利)+ 账户净值对照 —— 校准内部滑点模型。
+ * 未配置券商账户时整卡隐藏;version 变化(SSE/重置)时重拉。
+ */
+function BrokerMirrorCard({ version = 0 }) {
+  const [data, setData] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .brokerMirror()
+      .then((d) => !cancelled && setData(d))
+      .catch(() => !cancelled && setData(null));
+    return () => {
+      cancelled = true;
+    };
+  }, [version]);
+
+  if (!data?.enabled) return null;
+  if (!data.available) {
+    return (
+      <Card size="small" title="券商模拟对照账本">
+        <Typography.Text type="secondary">
+          已配置券商模拟账户,但对照数据表不可用(请执行 021 迁移)。
+        </Typography.Text>
+      </Card>
+    );
+  }
+
+  const { account, stats, recent } = data;
+  const bpsCell = (v) => {
+    if (v === null || v === undefined) return '—';
+    const n = Number(v);
+    // 正值 = 券商撮合对我们不利(内部账本记赚了),按风险色红显
+    return <span className={`num ${n > 0 ? 'down' : n < 0 ? 'up' : ''}`}>{n > 0 ? '+' : ''}{fmtNum(n, 1)}</span>;
+  };
+  const columns = [
+    { title: '时间', dataIndex: 'submitted_at', width: 130, render: (v) => <span className="num">{fmtTime(v)}</span> },
+    { title: '代码', dataIndex: 'symbol', width: 80 },
+    { title: '方向', dataIndex: 'side', width: 60, render: (v) => (v === 'buy' ? <Tag color="green">买入</Tag> : <Tag color="red">卖出</Tag>) },
+    { title: '内部价', dataIndex: 'internal_price', width: 90, align: 'right', render: (v) => <span className="num">{fmtMoney(v)}</span> },
+    { title: '券商价', dataIndex: 'filled_avg_price', width: 90, align: 'right', render: (v) => (v ? <span className="num">{fmtMoney(v)}</span> : '—') },
+    { title: '偏差(bps)', dataIndex: 'diff_bps', width: 90, align: 'right', render: bpsCell },
+    { title: '状态', dataIndex: 'status', width: 90, render: (v, row) => <span title={row.note || ''}>{MIRROR_STATUS_LABELS[v] || v}</span> },
+  ];
+
+  return (
+    <Card size="small" title="券商模拟对照账本(真实盘口撮合)">
+      <Descriptions size="small" column={{ xs: 2, sm: 4 }} bordered>
+        <Descriptions.Item label="券商账户净值">
+          {account ? <span className="num">{fmtMoney(account.equity)}</span> : '—'}
+        </Descriptions.Item>
+        <Descriptions.Item label="净值偏离">
+          {account?.diff_percent === null || account?.diff_percent === undefined ? (
+            '—'
+          ) : (
+            // 偏离超过 ±0.5% 才标红提醒(方向本身不分好坏,大偏离才说明两本账在分叉)
+            <span className={`num ${Math.abs(account.diff_percent) > 0.5 ? 'down' : ''}`}>
+              {account.diff_percent > 0 ? '+' : ''}
+              {fmtNum(account.diff_percent, 2)}%
+            </span>
+          )}
+        </Descriptions.Item>
+        <Descriptions.Item label="对照单(成交/总数)">
+          <span className="num">
+            {stats.filled}/{stats.orders}
+            {stats.fill_rate !== null && (
+              <Typography.Text type="secondary" style={{ fontSize: 11, marginLeft: 4 }}>
+                ({fmtNum(stats.fill_rate, 1)}%)
+              </Typography.Text>
+            )}
+          </span>
+        </Descriptions.Item>
+        <Descriptions.Item label="平均偏差">
+          {stats.avg_bps === null ? '—' : <>{bpsCell(stats.avg_bps)}<Typography.Text type="secondary" style={{ fontSize: 11, marginLeft: 4 }}>bps(买 {stats.buy.avg_bps ?? '—'} / 卖 {stats.sell.avg_bps ?? '—'})</Typography.Text></>}
+        </Descriptions.Item>
+      </Descriptions>
+
+      {Boolean(recent?.length) && (
+        <Table
+          rowKey="id"
+          size="small"
+          columns={columns}
+          dataSource={recent}
+          pagination={false}
+          scroll={{ x: 640 }}
+          style={{ marginTop: 12 }}
+        />
+      )}
+      <Typography.Paragraph type="secondary" style={{ fontSize: 13, margin: '12px 0 0' }}>
+        实盘每笔成交同步以「限价单」发往券商模拟账户,按真实盘口撮合(盘前盘后带盘外标记,当日有效)。
+        偏差为正表示券商撮合价对我们不利(买得更贵/卖得更便宜)——即内部滑点模型偏乐观;
+        长期未成交/过期的单说明该价格在真实盘口拿不到。净值偏离与逐笔偏差共同回答:
+        内部账本的收益有多少经得起真实撮合的检验。
+      </Typography.Paragraph>
+    </Card>
+  );
+}
+
 /**
  * 消融实验页:实盘与各影子变体的净值曲线(窗口起点归一为 0%)与汇总对比。
  * 影子组合从启用时刻开始与实盘并行记账,每套关闭一层防线——
@@ -570,6 +681,8 @@ export default function AblationPage({ version = 0, onSymbolClick }) {
           是消融近似而非完整重放;结论应结合「信号质量」页的前瞻收益统计交叉验证,样本不足一个月时不要下结论。
         </Typography.Paragraph>
       </Card>
+
+      <BrokerMirrorCard version={version} />
 
       {Boolean(data.recent_trades?.length) && (
         <Card size="small" title="最近影子成交">

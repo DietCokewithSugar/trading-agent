@@ -33,6 +33,7 @@ export const api = {
   shadow: (hours) => get(`/shadow${hours ? `?hours=${hours}` : ''}`),
   shadowTrades: (variant, limit = 100) =>
     get(`/shadow/${encodeURIComponent(variant)}/trades?limit=${limit}`),
+  brokerMirror: () => get('/broker-mirror'),
   macro: () => get('/macro'),
   pool: () => get('/pool'),
   pendingOrders: () => get('/pending-orders'),
