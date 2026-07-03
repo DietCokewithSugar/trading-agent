@@ -18,6 +18,42 @@ const STATUS_FALLBACK_NOTES = {
 };
 
 /**
+ * 入池价锚定的反事实区间条:现价落在 [入池价−止损%, 入池价+止盈%] 的什么位置。
+ * 回答"系统若在入池瞬间买入,这笔仓位现在处于什么状态"——已越界的直接标注
+ * 已止盈/已止损(候选池延迟的可视化,即 016 排队成本埋点的展示层)。
+ */
+function EntryBandBar({ price, entry, slPct, tpPct }) {
+  const p = Number(price);
+  const e = Number(entry);
+  if (!Number.isFinite(p) || p <= 0 || !Number.isFinite(e) || e <= 0 || !(slPct > 0) || !(tpPct > 0)) {
+    return '—';
+  }
+  const lo = e * (1 - slPct / 100);
+  const hi = e * (1 + tpPct / 100);
+  const drift = (p / e - 1) * 100;
+  const driftText = `${drift >= 0 ? '+' : ''}${drift.toFixed(1)}%`;
+  if (p >= hi) {
+    return <span className="up" style={{ fontSize: 12 }}>若入池即买已止盈({driftText})</span>;
+  }
+  if (p <= lo) {
+    return <span className="down" style={{ fontSize: 12 }}>若入池即买已止损({driftText})</span>;
+  }
+  const ratio = Math.min(Math.max((p - lo) / (hi - lo), 0), 1);
+  const entryTick = (slPct / (slPct + tpPct)) * 100; // 入池价在区间中的刻度位置
+  return (
+    <div style={{ minWidth: 120 }}>
+      <div style={{ position: 'relative', height: 4, background: 'var(--border-visible)', borderRadius: 2, margin: '4px 0 2px' }}>
+        <div style={{ position: 'absolute', left: `${entryTick}%`, top: -2, width: 1, height: 8, background: 'var(--text-secondary)' }} />
+        <div style={{ position: 'absolute', left: `calc(${(ratio * 100).toFixed(1)}% - 1px)`, top: -3, width: 2, height: 10, background: 'currentColor' }} />
+      </div>
+      <div className="num" style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
+        入池 ${e.toFixed(2)} · 漂移 {driftText}
+      </div>
+    </div>
+  );
+}
+
+/**
  * 买入候选池:通过准入门槛、等待资金分配器盘中统一执行的利好信号。
  * version 由 App 的 SSE macro 事件(含池数量变化)驱动自增,触发重新拉取;
  * 候选池不可用(未启用宏观层/014 迁移未执行)时整体隐藏。
@@ -38,6 +74,10 @@ export default function CandidatePool({ version = 0, onSymbolClick }) {
 
   if (!pool) return null;
   const counts = pool.counts || {};
+  // 系统离场口径(服务端下发,未来改动态敞口时展示自动跟随)
+  const slPct = Number(pool.reference?.stop_loss_percent) || 0;
+  const tpPct = Number(pool.reference?.take_profit_percent) || 0;
+  const bandLabel = slPct === tpPct ? `±${tpPct}%` : `−${slPct}%/+${tpPct}%`;
   const columns = [
     {
       title: '股票',
@@ -62,6 +102,33 @@ export default function CandidatePool({ version = 0, onSymbolClick }) {
       width: 90,
       align: 'right',
       render: (v) => <span className="num">{v === null || v === undefined ? '—' : fmtNum(v, 3)}</span>,
+    },
+    {
+      // "若现在买入":锚点只能是现价(≈此刻自己下单的成交价)。
+      // 入池价 ±N% 回答的是另一个问题(见下一列),两者可相差整个漂移幅度
+      title: `若现在买入(系统口径 ${bandLabel})`,
+      dataIndex: 'current_price',
+      width: 170,
+      render: (v) => {
+        const p = Number(v);
+        if (!Number.isFinite(p) || p <= 0 || !(slPct > 0) || !(tpPct > 0)) return '—';
+        return (
+          <div className="num" style={{ fontSize: 12, lineHeight: 1.6 }}>
+            <div>现价 ${p.toFixed(2)}</div>
+            <div>
+              止损 ${(p * (1 - slPct / 100)).toFixed(2)} · 止盈 ${(p * (1 + tpPct / 100)).toFixed(2)}
+            </div>
+          </div>
+        );
+      },
+    },
+    {
+      title: '入池价反事实区间',
+      dataIndex: 'entry_price',
+      width: 180,
+      render: (v, row) => (
+        <EntryBandBar price={row.current_price} entry={v} slPct={slPct} tpPct={tpPct} />
+      ),
     },
     {
       title: '状态',
@@ -103,7 +170,7 @@ export default function CandidatePool({ version = 0, onSymbolClick }) {
           columns={columns}
           dataSource={pool.top}
           pagination={false}
-          scroll={{ x: 700 }}
+          scroll={{ x: 1050 }}
         />
       ) : (
         <Empty
