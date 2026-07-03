@@ -67,6 +67,8 @@ export const adminApi = {
   advisor: (token) => adminRequest('/advisor', { token }),
   tradingHalt: (token, halted) =>
     adminRequest('/trading-halt', { method: 'POST', token, body: { halted } }),
+  volBracket: (token, enabled) =>
+    adminRequest('/vol-bracket', { method: 'POST', token, body: { enabled } }),
   runCycle: (token) => adminRequest('/run-cycle', { method: 'POST', token }),
   reset: (token) =>
     adminRequest('/reset', { method: 'POST', token, body: { confirm: 'RESET' } }),
@@ -161,6 +163,9 @@ export const SHADOW_VARIANT_LABELS = {
   actual: '实盘组合',
   no_risk_officer: '无风控官',
   no_macro_filter: '无宏观过滤',
+  wide_bracket: '宽敞口离场',
+  trailing_only: '仅移动止损',
+  vol_bracket: '波动敞口',
   immediate_trade: '信号即时成交',
   equal_weight: '信号等权买入',
   spy_benchmark: 'SPY 买入持有',
@@ -171,6 +176,9 @@ export const SHADOW_VARIANT_DESCRIPTIONS = {
   actual: '当前真实模拟组合(全部防线开启)',
   no_risk_officer: '跟随实盘,但风控官否决/缩仓的买入按否决前方案照样执行',
   no_macro_filter: '跟随实盘,但被宏观层(环境过滤/冲击/黑窗/预算钳制)拦截的买入照样执行',
+  wide_bracket: '1:1 跟随实盘买入,但止损/止盈放宽到 ±4%、持有上限 96 小时——检验固定 ±2%/48h 是否过窄(噪音扫损)',
+  trailing_only: '1:1 跟随实盘买入,初始止损同实盘距离但不设止盈上限,移动止损只升不降——检验固定止盈是否截断利润',
+  vol_bracket: '1:1 跟随实盘买入,止损/止盈按该股 20 日波动自适应(1.5%–4%)——实盘开关开启前的对照实验,跑赢则顾问提示在管理页开启',
   immediate_trade: '独立组合:可交易利好信号到达即按确定性仓位买入(休市信号顺延至下一可交易时段),不经候选池与 LLM 决策',
   equal_weight: '独立组合:可交易信号一律按固定比例等权买入(休市信号顺延),检验 LLM 仓位是否有效',
   spy_benchmark: '启用时一次性全仓买入 SPY 并持有',

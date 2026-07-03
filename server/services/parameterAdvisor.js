@@ -13,6 +13,7 @@ import { config } from '../config.js';
 import { supabase } from '../db.js';
 import { loadSignalRows, wilsonInterval } from './signalStats.js';
 import { getShadowOverview } from './shadowPortfolio.js';
+import { isVolBracketEnabled } from './volBracket.js';
 
 function round(n, digits = 2) {
   const f = 10 ** digits;
@@ -280,7 +281,9 @@ export function evaluateOutcomeRules(outcomeRows, cfg, t = ADVISOR_THRESHOLDS) {
         level: 'adjust',
         title,
         evidence: evidence(),
-        suggestion: `止损离场占比过半,信号与固定 ±${cfg.stopLossPercent}% 敞口不匹配——先提高综合置信度门槛 MIN_FINAL_CONFIDENCE(当前 ${cfg.minFinalConfidence})收紧入场;若「按事件档位」的 1h/1d 命中率仍然过硬,再考虑复核 STOP_LOSS_PERCENT/TAKE_PROFIT_PERCENT 的敞口是否过窄(噪音扫损)。`,
+        suggestion: cfg.volBracketEnabled
+          ? `止损离场占比过半,信号与波动自适应敞口(clamp(${cfg.bracketVolK}×20日波动, ${cfg.bracketMinPercent}%, ${cfg.bracketMaxPercent}%))不匹配——先提高综合置信度门槛 MIN_FINAL_CONFIDENCE(当前 ${cfg.minFinalConfidence})收紧入场;若「按事件档位」的 1h/1d 命中率仍然过硬,再考虑上调 BRACKET_MAX_PERCENT 或 BRACKET_VOL_K(敞口仍过窄,噪音扫损)。`
+          : `止损离场占比过半,信号与固定 ±${cfg.stopLossPercent}% 敞口不匹配——先提高综合置信度门槛 MIN_FINAL_CONFIDENCE(当前 ${cfg.minFinalConfidence})收紧入场;若「按事件档位」的 1h/1d 命中率仍然过硬,再考虑复核 STOP_LOSS_PERCENT/TAKE_PROFIT_PERCENT 的敞口是否过窄(噪音扫损)。`,
       });
     } else if (n >= t.minSamplesOutcome && tpShare !== null && tpShare >= t.stopShareHighPercent) {
       suggestions.push({
@@ -338,13 +341,41 @@ export function evaluateShadowRules({ variants, actualReturnPct, now = Date.now(
   if (!Array.isArray(variants) || actualReturnPct === null || actualReturnPct === undefined) {
     return { suggestions, skipped: [{ id: 'shadow', title: '影子组合对照', reason: '影子组合数据不可用' }] };
   }
+  // 每变体的标题与建议文案:入场侧两个消融沿用原文案;出场侧三个(023)针对
+  // ±2%/48h 出场规则给出方向性建议——vol_bracket 的建议直接指向管理页运行时开关(自熄闭环)
   const ablation = {
-    no_risk_officer: '风控官',
-    no_macro_filter: '宏观过滤',
+    no_risk_officer: {
+      title: '消融对照:关闭风控官(no_risk_officer)',
+      adjust: '关闭风控官的影子组合显著跑赢实盘,风控官可能在损耗收益——结合上方对应拦截层的机会成本统计交叉验证后再考虑放宽。',
+      ok: '关闭风控官的影子组合显著跑输实盘,风控官正在创造净收益,维持现状。',
+    },
+    no_macro_filter: {
+      title: '消融对照:关闭宏观过滤(no_macro_filter)',
+      adjust: '关闭宏观过滤的影子组合显著跑赢实盘,宏观过滤可能在损耗收益——结合上方对应拦截层的机会成本统计交叉验证后再考虑放宽。',
+      ok: '关闭宏观过滤的影子组合显著跑输实盘,宏观过滤正在创造净收益,维持现状。',
+    },
+    wide_bracket: {
+      title: '消融对照:宽敞口离场(wide_bracket,±4%/96h)',
+      adjust:
+        '宽敞口镜像显著跑赢实盘,固定 ±2%/48h 出场可能过窄(噪音扫损截断信号表达)——结合「实盘兑现」的止损占比交叉验证后,考虑上调 STOP_LOSS_PERCENT/TAKE_PROFIT_PERCENT/MAX_HOLD_HOURS,或在管理员页开启波动自适应敞口并上调 BRACKET_MAX_PERCENT。',
+      ok: '宽敞口镜像显著跑输实盘,±2%/48h 的快进快出正在创造净收益,维持现状。',
+    },
+    trailing_only: {
+      title: '消融对照:仅移动止损(trailing_only,无止盈上限)',
+      adjust:
+        '仅移动止损(无止盈上限)的镜像显著跑赢实盘,固定止盈可能在截断利润——考虑开启 ENABLE_TRAILING_STOP,并评估放宽或取消固定止盈上限(让利润奔跑,由移动止损锁盈)。',
+      ok: '仅移动止损镜像显著跑输实盘,固定止盈的落袋纪律正在创造净收益,维持现状。',
+    },
+    vol_bracket: {
+      title: '消融对照:波动自适应敞口(vol_bracket)',
+      adjust:
+        '波动自适应敞口镜像显著跑赢实盘——建议在管理员页开启「波动自适应敞口」运行时开关(无需改环境变量);开启后实盘与本变体趋同,该建议将自然消失。',
+      ok: '波动自适应敞口镜像显著跑输实盘,固定 ±2% 敞口更优,维持关闭。',
+    },
   };
-  for (const [variant, layer] of Object.entries(ablation)) {
+  for (const [variant, copy] of Object.entries(ablation)) {
     const v = variants.find((x) => x.variant === variant);
-    const title = `消融对照:关闭${layer}(${variant})`;
+    const title = copy.title;
     if (!v) {
       skipped.push({ id: `shadow_${variant}`, title, reason: '变体不存在' });
       continue;
@@ -371,7 +402,7 @@ export function evaluateShadowRules({ variants, actualReturnPct, now = Date.now(
         level: 'adjust',
         title,
         evidence,
-        suggestion: `关闭${layer}的影子组合显著跑赢实盘,${layer}可能在损耗收益——结合上方对应拦截层的机会成本统计交叉验证后再考虑放宽。`,
+        suggestion: copy.adjust,
       });
     } else if (diff <= -t.shadowEdgePercent) {
       suggestions.push({
@@ -379,7 +410,7 @@ export function evaluateShadowRules({ variants, actualReturnPct, now = Date.now(
         level: 'ok',
         title,
         evidence,
-        suggestion: `关闭${layer}的影子组合显著跑输实盘,${layer}正在创造净收益,维持现状。`,
+        suggestion: copy.ok,
       });
     } else {
       skipped.push({ id: `shadow_${variant}`, title, reason: `与实盘差异 ${diff >= 0 ? '+' : ''}${diff}% 未超过 ±${t.shadowEdgePercent}% 阈值` });
@@ -418,7 +449,11 @@ export async function getParameterAdvice({ days = 30 } = {}) {
   if (!loaded) return { available: false };
 
   const signal = evaluateSignalRules(loaded.rows, config);
-  const outcome = evaluateOutcomeRules(loaded.outcomeRows, config);
+  // volBracketEnabled 是运行时开关(023,非 env),纯函数经 cfg 感知模式切换建议文案
+  const outcome = evaluateOutcomeRules(loaded.outcomeRows, {
+    ...config,
+    volBracketEnabled: isVolBracketEnabled(),
+  });
 
   // 影子组合对照(017 未迁移/未启用时静默跳过该组规则)
   let shadow = { suggestions: [], skipped: [{ id: 'shadow', title: '影子组合对照', reason: '影子组合数据不可用' }] };

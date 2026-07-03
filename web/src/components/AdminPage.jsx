@@ -79,6 +79,7 @@ export default function AdminPage() {
   const [advisor, setAdvisor] = useState(null);
   const [busy, setBusy] = useState(false);
   const [haltBusy, setHaltBusy] = useState(false);
+  const [volBracketBusy, setVolBracketBusy] = useState(false);
   const [confirmText, setConfirmText] = useState('');
   const [message, setMessage] = useState(null);
 
@@ -171,6 +172,23 @@ export default function AdminPage() {
       setError(err.message);
     } finally {
       setHaltBusy(false);
+    }
+  };
+
+  const toggleVolBracket = async (enabled) => {
+    setVolBracketBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await adminApi.volBracket(token, enabled);
+      setMessage(
+        `波动自适应敞口已${result.enabled ? '开启:买入止损止盈按 20 日波动缩放' : '关闭:恢复固定 ±2% 敞口'}`
+      );
+      adminApi.status(token).then(setStatus).catch(() => {});
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setVolBracketBusy(false);
     }
   };
 
@@ -469,6 +487,34 @@ export default function AdminPage() {
                   style={{ marginTop: 12 }}
                 />
               )}
+            </Card>
+
+            <Card title="波动自适应敞口">
+              <Typography.Paragraph type="secondary" style={{ fontSize: 12.5 }}>
+                开启后每笔买入的止损/止盈敞口按该股 20 日已实现波动缩放(1.5%–4% 区间,
+                波动取数失败的单笔自动回退固定 ±2%);关闭(默认)沿用固定 ±2%。
+                状态跨重启保留。关闭期间「波动敞口」影子变体持续积累对照证据,
+                跑赢实盘时参数顾问会在下方建议开启。
+              </Typography.Paragraph>
+              <Space align="center" size={16}>
+                <Switch
+                  checked={status?.volBracketEnabled === true}
+                  loading={volBracketBusy}
+                  onChange={toggleVolBracket}
+                  checkedChildren="已开启"
+                  unCheckedChildren="关闭"
+                />
+                {status?.volBracketEnabled ? (
+                  <Alert
+                    type="info"
+                    showIcon
+                    message="波动自适应敞口已开启:买入 bracket = clamp(k × 20日波动, 1.5%, 4%)"
+                    style={{ marginBottom: 0 }}
+                  />
+                ) : (
+                  <Alert type="info" showIcon message="固定 ±2% 敞口(波动自适应关闭)" style={{ marginBottom: 0 }} />
+                )}
+              </Space>
             </Card>
 
             <Card title="危险区:初始化所有数据">

@@ -44,13 +44,16 @@ const RANGES = [
   { key: 'all', label: '一年', hours: 24 * 366 },
 ];
 
-// 各变体的识别色:实盘用单色主色,基准/现金用灰;4 个消融变体用克制的分类色
+// 各变体的识别色:实盘用单色主色,基准/现金用灰;7 个消融变体用克制的分类色
 // (变体身份属"颜色编码数据"的正当用法,避免与盈亏绿/红撞色)。
 function buildVariantColors(mode, CHART) {
   return {
     actual: mode === 'light' ? ACCENT_PRIMARY.light : ACCENT_PRIMARY.dark,
     no_risk_officer: '#7C6FF0', // 紫
     no_macro_filter: '#D4A843', // 琥珀
+    wide_bracket: '#C08552', // 赭
+    trailing_only: '#6B9AC4', // 钢蓝
+    vol_bracket: '#9B8AA6', // 灰紫
     immediate_trade: '#3FB7C4', // 青
     equal_weight: '#E0719B', // 玫红
     spy_benchmark: CHART.benchmark,
@@ -62,6 +65,9 @@ const VARIANT_ORDER = [
   'actual',
   'no_risk_officer',
   'no_macro_filter',
+  'wide_bracket',
+  'trailing_only',
+  'vol_bracket',
   'immediate_trade',
   'equal_weight',
   'spy_benchmark',

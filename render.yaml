@@ -71,6 +71,13 @@ services:
         value: "48"
       - key: ENABLE_TRAILING_STOP
         value: "false"
+      # 波动自适应敞口区间常量(开/关是管理员页运行时开关,不在此配置)
+      - key: BRACKET_VOL_K
+        value: "1"
+      - key: BRACKET_MIN_PERCENT
+        value: "1.5"
+      - key: BRACKET_MAX_PERCENT
+        value: "4"
       - key: ENABLE_POSITION_REVIEW
         value: "true"
       - key: POSITION_REVIEW_HOUR

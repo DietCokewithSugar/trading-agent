@@ -9,6 +9,7 @@ import { safeTokenEqual, createAuthRateLimiter } from '../services/authGuard.js'
 import { getTodayMetrics } from '../services/metrics.js';
 import { listRecentRuns, aggregateRejectReasons, isCycleRunsAvailable } from '../services/cycleRuns.js';
 import { isTradingHalted, setTradingHalt } from '../services/tradingHalt.js';
+import { isVolBracketEnabled, setVolBracketEnabled } from '../services/volBracket.js';
 import { getRiskControlState } from '../services/riskControls.js';
 import { listRecentDecisions } from '../services/decisionLog.js';
 import { getParameterAdvice } from '../services/parameterAdvisor.js';
@@ -51,6 +52,7 @@ router.get('/status', (req, res) => {
     ...cycleStatus,
     halted: isHalted(),
     tradingHalted: isTradingHalted(),
+    volBracketEnabled: isVolBracketEnabled(),
     riskControls: getRiskControlState(),
     sseClients: clientCount(),
     pollSeconds: config.newsPollSeconds,
@@ -70,6 +72,24 @@ router.post(
     const result = await setTradingHalt(req.body.halted);
     console.log(
       `[admin] 交易暂停开关 → ${result.halted ? '开启' : '关闭'}${result.persisted ? '' : '(未持久化,请执行 013 迁移)'}`
+    );
+    res.json(result);
+  })
+);
+
+/**
+ * 波动自适应敞口运行时开关(023):开启后买入 bracket = clamp(k × 20日波动, min%, max%);
+ * 关闭(默认)沿用固定 ±2%。持久化在 portfolio_state,缺列(未执行 023 迁移)开启时报 409
+ */
+router.post(
+  '/vol-bracket',
+  asyncHandler(async (req, res) => {
+    if (typeof req.body?.enabled !== 'boolean') {
+      return res.status(400).json({ error: '请求体需携带 {"enabled": true|false}' });
+    }
+    const result = await setVolBracketEnabled(req.body.enabled);
+    console.log(
+      `[admin] 波动自适应敞口 → ${result.enabled ? '开启' : '关闭'}${result.persisted ? '' : '(未持久化)'}`
     );
     res.json(result);
   })

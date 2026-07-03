@@ -147,6 +147,15 @@ export const config = {
   // 移动止损:股价创新高后止损价跟随上抬(只升不降),需执行 007 迁移。
   // 固定 ±2% 止盈止损语义下默认关闭("买入价变动 ±N% 即卖出"),显式设 true 才启用
   enableTrailingStop: process.env.ENABLE_TRAILING_STOP === 'true',
+  // 波动自适应敞口(023):bracket = clamp(k × 20日已实现日波动, min%, max%),对称止损止盈。
+  // 三个参数是 env 常量;开/关是运行时开关(管理员页切换,持久化在 portfolio_state,
+  // 无 ENABLE_VOL_BRACKET 环境变量)。关闭期间 vol_bracket 影子变体持续积累对照证据
+  bracketVolK: num(process.env.BRACKET_VOL_K, 1),
+  bracketMinPercent: num(process.env.BRACKET_MIN_PERCENT, 1.5),
+  bracketMaxPercent: num(process.env.BRACKET_MAX_PERCENT, 4),
+  // 出场消融影子变体(代码常量):wide_bracket 的固定宽度与每变体持有时限覆盖
+  shadowWideBracketPercent: 4,
+  shadowVariantMaxHoldHours: { wide_bracket: 96 },
   // 每日持仓复查:每个交易日由 DeepSeek 整体评估一次持仓(论点是否失效、是否收紧止损)
   enablePositionReview: process.env.ENABLE_POSITION_REVIEW !== 'false',
   // 持仓复查的触发时间(美东 24 小时制,盘中该小时之后执行,每天一次)
