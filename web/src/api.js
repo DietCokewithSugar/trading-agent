@@ -38,6 +38,8 @@ export const api = {
   pool: () => get('/pool'),
   pendingOrders: () => get('/pending-orders'),
   symbol: (symbol) => get(`/symbol/${encodeURIComponent(symbol)}`),
+  // 单票轻量报价:个股弹窗对 SSE 未覆盖符号的兜底轮询,不拉分析/交易历史
+  quote: (symbol) => get(`/quote/${encodeURIComponent(symbol)}`),
   status: () => get('/status'),
 };
 

@@ -1,6 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Card, Empty, Space, Table, Tag } from 'antd';
 import { api, fmtNum, fmtTime, CANDIDATE_STATUS_LABELS, TIER_LABELS } from '../api.js';
+import { useLiveQuotes } from '../quotes-context.jsx';
+import FlashOnChange from './FlashOnChange.jsx';
+import SessionBadge from './SessionBadge.jsx';
 
 const CANDIDATE_STATUS_COLORS = {
   pending: 'blue',
@@ -47,7 +50,7 @@ function EntryBandBar({ price, entry, slPct, tpPct }) {
         <div style={{ position: 'absolute', left: `calc(${(ratio * 100).toFixed(1)}% - 1px)`, top: -3, width: 2, height: 10, background: 'currentColor' }} />
       </div>
       <div className="num" style={{ fontSize: 11, color: 'var(--text-secondary)' }}>
-        入池 ${e.toFixed(2)} · 漂移 {driftText}
+        入池 ${e.toFixed(2)} · 漂移 <FlashOnChange value={drift}>{driftText}</FlashOnChange>
       </div>
     </div>
   );
@@ -60,6 +63,7 @@ function EntryBandBar({ price, entry, slPct, tpPct }) {
  */
 export default function CandidatePool({ version = 0, onSymbolClick }) {
   const [pool, setPool] = useState(null);
+  const quotes = useLiveQuotes();
 
   useEffect(() => {
     let cancelled = false;
@@ -71,6 +75,26 @@ export default function CandidatePool({ version = 0, onSymbolClick }) {
       cancelled = true;
     };
   }, [version]);
+
+  // 实时报价合并(SSE quotes 事件,每个推送 tick 覆盖):有 live 时时段/盘外字段
+  // 整体取 live 快照,不与旧拉取值逐字段混用——盘外字段为 null 是"当前时段没有
+  // 盘外价"的有效信息(如开盘瞬间),回退旧值会把昨晚的盘后涨跌挂到今天的时段上
+  const rows = useMemo(
+    () =>
+      (pool?.top || []).map((c) => {
+        const live = quotes[String(c.symbol).toUpperCase()];
+        if (!live) return c;
+        const price = Number(live.effective_price);
+        return {
+          ...c,
+          current_price: Number.isFinite(price) && price > 0 ? price : c.current_price,
+          session: live.session ?? null,
+          extended_price: live.extended_price ?? null,
+          extended_change_percent: live.extended_change_percent ?? null,
+        };
+      }),
+    [pool, quotes]
+  );
 
   if (!pool) return null;
   const counts = pool.counts || {};
@@ -108,13 +132,20 @@ export default function CandidatePool({ version = 0, onSymbolClick }) {
       // 入池价 ±N% 回答的是另一个问题(见下一列),两者可相差整个漂移幅度
       title: `若现在买入(系统口径 ${bandLabel})`,
       dataIndex: 'current_price',
-      width: 170,
-      render: (v) => {
+      width: 200,
+      render: (v, row) => {
         const p = Number(v);
         if (!Number.isFinite(p) || p <= 0 || !(slPct > 0) || !(tpPct > 0)) return '—';
         return (
           <div className="num" style={{ fontSize: 12, lineHeight: 1.6 }}>
-            <div>现价 ${p.toFixed(2)}</div>
+            <Space size={4}>
+              <FlashOnChange value={p}>现价 ${p.toFixed(2)}</FlashOnChange>
+              <SessionBadge
+                session={row.session}
+                extendedPrice={row.extended_price}
+                extendedChangePercent={row.extended_change_percent}
+              />
+            </Space>
             <div>
               止损 ${(p * (1 - slPct / 100)).toFixed(2)} · 止盈 ${(p * (1 + tpPct / 100)).toFixed(2)}
             </div>
@@ -163,14 +194,14 @@ export default function CandidatePool({ version = 0, onSymbolClick }) {
         </Space>
       }
     >
-      {pool.top?.length ? (
+      {rows.length ? (
         <Table
           rowKey="id"
           size="small"
           columns={columns}
-          dataSource={pool.top}
+          dataSource={rows}
           pagination={false}
-          scroll={{ x: 1050 }}
+          scroll={{ x: 1080 }}
         />
       ) : (
         <Empty
