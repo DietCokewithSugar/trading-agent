@@ -98,10 +98,20 @@ export default function CandidatePool({ version = 0, onSymbolClick }) {
 
   if (!pool) return null;
   const counts = pool.counts || {};
-  // 系统离场口径(服务端下发,未来改动态敞口时展示自动跟随)
-  const slPct = Number(pool.reference?.stop_loss_percent) || 0;
-  const tpPct = Number(pool.reference?.take_profit_percent) || 0;
-  const bandLabel = slPct === tpPct ? `±${tpPct}%` : `−${slPct}%/+${tpPct}%`;
+  // 系统离场口径(服务端下发):波动自适应模式(023,管理页开关)下 bracket 是每票动态的
+  //(1.5%–4%),逐票精确值需逐票取历史不值得——展示统一用最宽口径,标签写明
+  const volMode = pool.reference?.mode === 'vol';
+  const slPct = volMode
+    ? Number(pool.reference?.vol_bracket?.max_percent) || 0
+    : Number(pool.reference?.stop_loss_percent) || 0;
+  const tpPct = volMode
+    ? Number(pool.reference?.vol_bracket?.max_percent) || 0
+    : Number(pool.reference?.take_profit_percent) || 0;
+  const bandLabel = volMode
+    ? `波动自适应,最宽 ±${tpPct}%`
+    : slPct === tpPct
+      ? `±${tpPct}%`
+      : `−${slPct}%/+${tpPct}%`;
   const columns = [
     {
       title: '股票',

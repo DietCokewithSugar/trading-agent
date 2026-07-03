@@ -6,23 +6,19 @@ import { executeSellOrder } from './trader.js';
 import { broadcast } from './bus.js';
 import { isHalted } from './halt.js';
 import { holdAnchor, isHoldExpired } from './holding.js';
+import { computeTrailedStop } from './trailing.js';
 
 let running = false;
 
 // opened_at/hold_refreshed_at 列缺失(未执行 020 迁移)时持有时限自动停用,只警告一次
 let holdLimitUnavailable = false;
 
-function round4(n) {
-  return Math.round(n * 10000) / 10000;
-}
-
 // peak_price 列缺失(未执行 007 迁移)时停用移动止损,只警告一次
 let trailingUnavailable = false;
 
 /**
- * 移动止损:股价创出建仓后新高时,按"峰值价 × (1 - 原止损距离)"上抬止损价。
- * 止损只升不降,止盈价不动;新止损至少高出现值 0.5% 才落库,避免高频写。
- * 返回本次检查应使用的止损价。
+ * 移动止损:棘轮数学在 trailing.js#computeTrailedStop(与 trailing_only 影子变体共用),
+ * 本函数只保留开关/降级判断与 DB 写入。返回本次检查应使用的止损价。
  * 注:盘前盘后采用 effective_price,极端情况下稀疏成交可能推高峰值,
  * 模拟盘可接受,换取隔夜跳空前更紧的保护。
  */
@@ -30,23 +26,19 @@ async function maybeTrailStop(pos, price) {
   const stop = Number(pos.stop_loss);
   if (trailingUnavailable || !config.enableTrailingStop || !(stop > 0)) return stop;
 
-  const base =
-    pos.peak_price !== null && pos.peak_price !== undefined
-      ? Number(pos.peak_price)
-      : Number(pos.avg_cost);
-  if (!(base > 0) || price <= base) return stop;
-
-  // 止损距离:由当前基准价与止损价反推,首次即买入时设定的百分比,之后保持不变
-  const distance = (base - stop) / base;
-  if (distance <= 0 || distance >= 1) return stop;
-
-  const newStop = round4(price * (1 - distance));
-  if (newStop < stop * 1.005) return stop;
+  const trailed = computeTrailedStop({
+    price,
+    stop,
+    peakPrice: pos.peak_price,
+    avgCost: pos.avg_cost,
+  });
+  if (!trailed) return stop;
+  const newStop = trailed.stop;
 
   const { error } = await supabase()
     .from('positions')
     .update({
-      peak_price: round4(price),
+      peak_price: trailed.peak,
       stop_loss: newStop,
       updated_at: new Date().toISOString(),
     })

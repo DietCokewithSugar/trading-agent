@@ -37,10 +37,14 @@ import {
   valuePositions,
   prunePendingSignals,
 } from './shadowEngine.js';
+import { computeTrailedStop } from './trailing.js';
 
 export const SHADOW_VARIANTS = [
   'no_risk_officer',
   'no_macro_filter',
+  'wide_bracket',
+  'trailing_only',
+  'vol_bracket',
   'immediate_trade',
   'equal_weight',
   'spy_benchmark',
@@ -49,6 +53,16 @@ export const SHADOW_VARIANTS = [
 
 /** 跟随实盘成交镜像记账的变体(独立策略变体与基准不镜像) */
 const MIRROR_VARIANTS = ['no_risk_officer', 'no_macro_filter'];
+/**
+ * 出场消融镜像变体(023):1:1 跟随实盘买入(不做任何比例还原),只改出场规则——
+ * 出场规则是全系统唯一没被消融的层,这三个变体度量 ±2%/48h 本身:
+ *   wide_bracket   固定 ±4%/96h(bracket 是否过窄、噪音扫损)
+ *   trailing_only  初始止损同实盘距离、不设止盈、移动止损棘轮(固定止盈是否截断利润)
+ *   vol_bracket    按 20 日波动缩放的对称 bracket(实盘开关开启前的对照实验)
+ */
+const EXIT_MIRROR_VARIANTS = ['wide_bracket', 'trailing_only', 'vol_bracket'];
+/** bracket 驱动的实盘卖出触发器:不镜像进出场消融变体(它们有自己的出场规则) */
+const BRACKET_TRIGGERS = new Set(['stop_loss', 'take_profit', 'max_hold']);
 /** 独立信号驱动的变体(自己的买卖逻辑,不跟随实盘) */
 const SIGNAL_VARIANTS = ['immediate_trade', 'equal_weight'];
 
@@ -608,22 +622,44 @@ export function onMacroFilteredCandidates(candidates, note) {
  *   no_macro_filter:请求比例 ÷ 宏观分量(宏观乘数×行业乘数,双向还原;
  *     风控官/冲突缩放保留,影子引擎本身无宏观钳制)
  */
-export function mirrorBuy(trade, { effectiveFraction, requestFraction, officerScale = 1, macroScale = 1, stopLossPercent = null, takeProfitPercent = null } = {}) {
+export function mirrorBuy(trade, { effectiveFraction, requestFraction, officerScale = 1, macroScale = 1, stopLossPercent = null, takeProfitPercent = null, volBracketPercent = null } = {}) {
   if (!isShadowAvailable() || !trade) return;
   const plans = [
     { variant: 'no_risk_officer', fraction: unscaleFraction(effectiveFraction, officerScale) },
     { variant: 'no_macro_filter', fraction: unapplyScale(requestFraction, macroScale) },
+    // 出场消融变体:1:1 实际成交比例,只改止损止盈参数(时限差异在 checkShadowStops)
+    {
+      variant: 'wide_bracket',
+      fraction: effectiveFraction,
+      stops: { stopLossPercent: config.shadowWideBracketPercent, takeProfitPercent: config.shadowWideBracketPercent },
+    },
+    {
+      variant: 'trailing_only',
+      fraction: effectiveFraction,
+      stops: { stopLossPercent, takeProfitPercent: null }, // 无止盈上限,离场靠棘轮止损/时限
+    },
+    {
+      // 波动取数失败时回退实盘同宽(该笔对本变体无区分度,可接受);
+      // 实盘开关开启后本变体与实盘趋同(diff≈0)= 实验完成态
+      variant: 'vol_bracket',
+      fraction: effectiveFraction,
+      stops: {
+        stopLossPercent: volBracketPercent ?? stopLossPercent,
+        takeProfitPercent: volBracketPercent ?? takeProfitPercent,
+      },
+    },
   ];
   for (const plan of plans) {
     if (!(plan.fraction > 0)) continue;
+    const stops = plan.stops ?? { stopLossPercent, takeProfitPercent };
     enqueue(`${plan.variant} 镜像买入`, () =>
       shadowBuy(plan.variant, {
         symbol: trade.symbol,
         refPrice: trade.price,
         fillPrice: trade.price,
         fraction: plan.fraction,
-        stopLossPercent,
-        takeProfitPercent,
+        stopLossPercent: stops.stopLossPercent,
+        takeProfitPercent: stops.takeProfitPercent,
         trigger: trade.trigger || 'news',
         newsId: trade.news_id ?? null,
         analysisId: trade.analysis_id ?? null,
@@ -634,10 +670,20 @@ export function mirrorBuy(trade, { effectiveFraction, requestFraction, officerSc
   }
 }
 
-/** 实盘卖出成交镜像:跟随型变体按同等比例卖出自己的持仓(未持有自动跳过) */
+/**
+ * 实盘卖出成交镜像:跟随型变体按同等比例卖出自己的持仓(未持有自动跳过)。
+ * 触发器过滤(023,本特性的核心):信号驱动卖出(news/review/rotation)镜像进
+ * 全部跟随变体——出场消融变体只消融 bracket,不消融对信号的响应;
+ * bracket 驱动卖出(stop_loss/take_profit/max_hold)只镜像进入场侧消融变体,
+ * **跳过出场消融变体**——否则实盘 ±2% 止盈会拉平 wide_bracket,消融失效。
+ * 已知近似:实盘经 bracket 离场后,后续利空找不到实盘持仓 → 无卖出成交可镜像,
+ * 出场变体此后只靠自身 bracket/时限离场;观测层可接受。
+ */
 export function mirrorSell(trade, { fraction = 1 } = {}) {
   if (!isShadowAvailable() || !trade) return;
-  for (const variant of MIRROR_VARIANTS) {
+  const bracketDriven = BRACKET_TRIGGERS.has(trade.trigger);
+  const variants = bracketDriven ? MIRROR_VARIANTS : [...MIRROR_VARIANTS, ...EXIT_MIRROR_VARIANTS];
+  for (const variant of variants) {
     enqueue(`${variant} 镜像卖出`, () =>
       shadowSell(variant, {
         symbol: trade.symbol,
@@ -655,6 +701,40 @@ export function mirrorSell(trade, { fraction = 1 } = {}) {
 // ── 后台循环(scheduler 调用)──
 
 let stopsRunning = false;
+
+// shadow_positions.peak_price 列缺失(未执行 023 迁移)时棘轮整体停用,只警告一次:
+// "无持久化棘轮"语义错误(peak 丢失而 stop 已抬,距离会单调收紧),
+// trailing_only 退化为固定初始止损 + 48h 时限
+let shadowTrailingUnavailable = false;
+
+/** trailing_only 变体的移动止损棘轮(不依赖 config.enableTrailingStop——该变体的定义就是棘轮) */
+async function maybeTrailShadowStop(pos, price) {
+  const stop = Number(pos.stop_loss);
+  if (shadowTrailingUnavailable || !(stop > 0)) return stop;
+  const trailed = computeTrailedStop({
+    price,
+    stop,
+    peakPrice: pos.peak_price,
+    avgCost: pos.avg_cost,
+  });
+  if (!trailed) return stop;
+  const { error } = await supabase()
+    .from('shadow_positions')
+    .update({ peak_price: trailed.peak, stop_loss: trailed.stop, updated_at: new Date().toISOString() })
+    .eq('variant', pos.variant)
+    .eq('symbol', pos.symbol);
+  if (error) {
+    if (/peak_price/.test(error.message)) {
+      shadowTrailingUnavailable = true;
+      console.warn('[shadow] shadow_positions 缺少 peak_price 列,trailing_only 棘轮停用(请执行 023 迁移)');
+    } else {
+      console.warn(`[shadow] ${pos.symbol} 影子移动止损更新失败: ${error.message}`);
+    }
+    return stop;
+  }
+  console.log(`[shadow] trailing_only ${pos.symbol} 移动止损上抬: $${stop} → $${trailed.stop}(峰值 $${trailed.peak})`);
+  return trailed.stop;
+}
 
 /**
  * 影子持仓止损/止盈/持有时限监控:与实盘 riskMonitor 同口径(全仓卖出),休市/全局 halt 跳过。
@@ -685,18 +765,25 @@ export async function checkShadowStops() {
       const quote = quoteBySymbol.get(pos.symbol);
       if (!quote) continue;
       const price = quote.effective_price ?? quote.price;
-      const stop = pos.stop_loss !== null && pos.stop_loss !== undefined ? Number(pos.stop_loss) : null;
+      let stop = pos.stop_loss !== null && pos.stop_loss !== undefined ? Number(pos.stop_loss) : null;
       const take = pos.take_profit !== null && pos.take_profit !== undefined ? Number(pos.take_profit) : null;
 
+      // trailing_only:止损比较前先跑棘轮(创新高上抬止损,只升不降)
+      if (pos.variant === 'trailing_only' && stop !== null) {
+        stop = await maybeTrailShadowStop(pos, price);
+      }
+      // 每变体持有时限:wide_bracket 96h,其余沿用全局 48h
+      const maxHoldHours = config.shadowVariantMaxHoldHours[pos.variant] ?? config.maxHoldHours;
+
       let trigger = null;
-      if (isHoldExpired(pos, { maxHoldHours: config.maxHoldHours })) trigger = 'max_hold';
+      if (isHoldExpired(pos, { maxHoldHours })) trigger = 'max_hold';
       else if (stop !== null && price <= stop) trigger = 'stop_loss';
       else if (take !== null && price >= take) trigger = 'take_profit';
       if (!trigger) continue;
 
       const reason =
         trigger === 'max_hold'
-          ? `影子持有超时:超过 ${config.maxHoldHours} 小时强制平仓`
+          ? `影子持有超时:超过 ${maxHoldHours} 小时强制平仓`
           : trigger === 'stop_loss'
             ? `影子止损:现价 $${price} 跌破止损价 $${stop}`
             : `影子止盈:现价 $${price} 触及止盈价 $${take}`;

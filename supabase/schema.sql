@@ -713,3 +713,11 @@ alter table candidate_signals add column if not exists last_signal_at timestampt
 create unique index if not exists idx_candidate_signals_active_symbol_unique
   on candidate_signals (symbol)
   where status in ('pending', 'capital_constrained', 'conflict_hold', 'macro_filtered');
+
+-- 出场策略层(023):trailing_only 影子变体棘轮锚点、每笔 bracket 宽度/波动快照、
+-- 波动自适应敞口运行时开关(管理页切换)
+alter table shadow_positions add column if not exists peak_price numeric;
+alter table trades add column if not exists stop_loss_percent numeric;
+alter table trades add column if not exists take_profit_percent numeric;
+alter table trades add column if not exists bracket_vol numeric;
+alter table portfolio_state add column if not exists vol_bracket_enabled boolean not null default false;

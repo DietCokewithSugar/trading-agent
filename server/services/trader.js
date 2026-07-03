@@ -45,12 +45,32 @@ import {
 import { beginDecisionEpisode, attachOfficer, finishDecision } from './decisionLog.js';
 import { bumpTakeProfit } from './holding.js';
 import { mirrorTrade } from './brokerMirror.js';
+import { computeSymbolBracket } from './volatility.js';
+import { isVolBracketEnabled } from './volBracket.js';
 
 function round4(n) {
   return Math.round(n * 10000) / 10000;
 }
 function round2(n) {
   return Math.round(n * 100) / 100;
+}
+
+/**
+ * 买入 bracket 赋值(023):默认固定 ±config 百分比;波动自适应开关(管理页)开启且
+ * 波动可算时,止损止盈改为 clamp(k × 20日波动, min%, max%) 的对称宽度。
+ * 无论开关,波动与"应然 bracket"都记在 decision 上:成交后落 trades(证据链),
+ * 并传给 vol_bracket 影子变体——开关关闭期间对照实验照常积累。
+ */
+async function applyBracket(decision, symbol) {
+  const vb = await computeSymbolBracket(symbol);
+  const useVol = isVolBracketEnabled() && vb.bracketPercent !== null;
+  decision.stopLossPercent = useVol ? vb.bracketPercent : config.stopLossPercent;
+  decision.takeProfitPercent = useVol ? vb.bracketPercent : config.takeProfitPercent;
+  decision.bracketVol = vb.volPercent;
+  decision.volBracketPercent = vb.bracketPercent;
+  if (useVol) {
+    console.log(`[trader] ${symbol} 波动自适应敞口: 20日波动 ${vb.volPercent}% → bracket ±${vb.bracketPercent}%`);
+  }
 }
 
 // 进程内交易互斥:新闻交易(runCycle)与止损/止盈监控(checkStops)并发运行,
@@ -324,10 +344,10 @@ export async function handleSignal(article, analysisRow) {
   }
 
   if (decision.action === 'buy') {
-    // 固定止盈止损(代码强制):买入均价 ±config 百分比,触及即全仓卖出。
-    // LLM 的止损建议只留在决策回放快照(beginDecisionEpisode 已拷贝),成交一律用固定值
-    decision.stopLossPercent = config.stopLossPercent;
-    decision.takeProfitPercent = config.takeProfitPercent;
+    // 止盈止损(代码强制,LLM 建议只留在决策回放快照):默认固定 ±config 百分比;
+    // 波动自适应开关(023,管理页)开启时按 20 日波动缩放。无论开关,波动都会计算
+    // 并随成交落库(证据链),同时供 vol_bracket 影子变体做对照实验
+    await applyBracket(decision, symbol);
 
     // 仓位缩放链(按序叠加):LLM fraction → 档位/置信度/来源可信度缩放 → 风控官 scale → 硬性风控帽。
     // fraction 的基数是组合总值(受可用现金约束),而非可用现金本身——按现金比例下单
@@ -831,9 +851,8 @@ export async function executeCandidate(candidate, { macroContext = null, extraSc
     return { reject: `决策为${decision.action}: ${decision.reason}`.slice(0, 200), reason: 'llm_hold' };
   }
 
-  // 固定止盈止损(代码强制,与即时路径一致):LLM 建议只留在决策回放快照,成交用 ±config 百分比
-  decision.stopLossPercent = config.stopLossPercent;
-  decision.takeProfitPercent = config.takeProfitPercent;
+  // 止盈止损(代码强制,与即时路径一致):默认固定 ±config,波动自适应开关开启时按波动缩放
+  await applyBracket(decision, symbol);
 
   // 仓位缩放链(与即时路径同序):档位/置信度/来源 → 宏观环境(extraScale)→ 连亏 → 风控官
   const srcScore =
@@ -1036,6 +1055,8 @@ async function executeBuyStructured({ symbol, price, decision, analysisRow, arti
       fraction: decision.fraction,
       stopLossPercent: decision.stopLossPercent,
       takeProfitPercent: decision.takeProfitPercent,
+      bracketVol: decision.bracketVol ?? null,
+      volBracketPercent: decision.volBracketPercent ?? null,
       reason: decision.reason,
       newsId: article.id,
       analysisId: analysisRow.id,
@@ -1062,6 +1083,9 @@ export async function executeQueuedBuy({
   newsId = null,
   analysisId = null,
 }) {
+  // 波动快照在锁外计算(1h 缓存的取数,不占交易锁):实盘成交仍用挂单时持久化的
+  // 百分比(入队时刻的开关状态生效),这里只补证据链与 vol_bracket 影子变体的对照参数
+  const vb = await computeSymbolBracket(symbol);
   return withTradeLock(async () => {
     const quote = await getQuote(symbol, 5_000).catch(() => null);
     if (!quote) {
@@ -1081,6 +1105,8 @@ export async function executeQueuedBuy({
       fraction,
       stopLossPercent,
       takeProfitPercent,
+      bracketVol: vb.volPercent,
+      volBracketPercent: vb.bracketPercent,
       reason,
       newsId,
       analysisId,
@@ -1098,6 +1124,8 @@ async function settleBuyLocked({
   fraction,
   stopLossPercent,
   takeProfitPercent,
+  bracketVol = null,
+  volBracketPercent = null,
   reason,
   newsId,
   analysisId,
@@ -1304,9 +1332,12 @@ async function settleBuyLocked({
   }
 
   // 执行时间线:成交所用报价自带的时间戳 + 决策窗口/run_id(队列成交无 meta,仅报价时间戳)
-  // + 成交时宏观环境快照(014)+ 排队成本(016)
+  // + 成交时宏观环境快照(014)+ 排队成本(016)+ bracket 宽度/波动快照(023,跨票归一)
   const extras = {
     quote_timestamp: quoteTimestampOf(quote),
+    stop_loss_percent: stopLossPercent ?? null,
+    take_profit_percent: takeProfitPercent ?? null,
+    ...(bracketVol !== null ? { bracket_vol: bracketVol } : {}),
     ...(config.enableMacro ? { macro_regime: regime.regime } : {}),
     ...(poolMetrics
       ? {
@@ -1336,6 +1367,7 @@ async function settleBuyLocked({
       macroScale: shadowCtx?.macroScale ?? 1,
       stopLossPercent,
       takeProfitPercent,
+      volBracketPercent,
     });
 
   const { data, error } = await supabase().rpc('execute_trade', {

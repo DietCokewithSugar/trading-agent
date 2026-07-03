@@ -15,6 +15,7 @@ import { getBlackoutState, getUpcomingEvents } from '../services/macroCalendar.j
 import { countByStatus, listPoolPreview } from '../services/candidateStore.js';
 import { getShadowOverview, getShadowTrades } from '../services/shadowPortfolio.js';
 import { getBrokerMirrorOverview } from '../services/brokerMirror.js';
+import { isVolBracketEnabled } from '../services/volBracket.js';
 import { safeTokenEqual, createAuthRateLimiter } from '../services/authGuard.js';
 import { clusterAnalyses } from '../services/newsDedup.js';
 
@@ -213,11 +214,18 @@ async function getPoolOverview() {
   return {
     counts: counts || {},
     top: enriched,
-    // 系统离场口径(百分比):前端据此计算"若现在买入"的止损/止盈参考,
-    // 未来若改为波动率缩放的动态敞口,展示会自动跟随
+    // 系统离场口径:mode='vol'(波动自适应,023 管理页开关)时 bracket 是每票动态的,
+    // 前端按 max_percent 展示"最宽口径"参考;mode='fixed' 时沿用固定百分比。
+    // legacy 字段(stop/take percent)始终保留,旧前端按固定口径降级展示
     reference: {
+      mode: isVolBracketEnabled() ? 'vol' : 'fixed',
       stop_loss_percent: config.stopLossPercent,
       take_profit_percent: config.takeProfitPercent,
+      vol_bracket: {
+        k: config.bracketVolK,
+        min_percent: config.bracketMinPercent,
+        max_percent: config.bracketMaxPercent,
+      },
     },
   };
 }

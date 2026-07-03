@@ -69,6 +69,17 @@ test('applyBuy: 加仓为加权平均成本,不传止损时保留原值', () => 
   assert.equal(pos.take_profit, 120);
 });
 
+test('applyBuy: takeProfitPercent=null 不设止盈(trailing_only 变体,023)', () => {
+  // 开新仓:止盈留空,离场只靠移动止损棘轮/持有时限
+  const fresh = applyBuy(null, { quantity: 10, amount: 1000, stopLossPercent: 2, takeProfitPercent: null });
+  assert.equal(fresh.stop_loss, 98);
+  assert.equal(fresh.take_profit, null);
+  // 加仓:原本无止盈的持仓保持无止盈
+  const added = applyBuy(fresh, { quantity: 10, amount: 1200, stopLossPercent: 2, takeProfitPercent: null });
+  assert.equal(added.take_profit, null);
+  assert.equal(added.stop_loss, Math.round(110 * 0.98 * 10000) / 10000, '止损按新均价重设');
+});
+
 test('applySell: 部分卖出与盈亏', () => {
   const settle = applySell({ quantity: 20, avg_cost: 100 }, 0.5, 110);
   assert.equal(settle.quantity, 10);
