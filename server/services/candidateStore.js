@@ -223,15 +223,26 @@ export async function countByStatus() {
   return counts;
 }
 
-/** 候选池预览(宏观页):活跃候选按当前分倒序;不可用返回 null */
+/** 候选池预览(宏观页/交易页):活跃候选按当前分倒序;不可用返回 null */
 export async function listPoolPreview(limit = 10) {
   if (!isPoolAvailable()) return null;
-  const { data, error } = await supabase()
+  const baseColumns =
+    'id, symbol, tier, sentiment, confidence, final_confidence, sector, current_score, base_score, status, status_reason, macro_regime, created_at, expires_at';
+  // entry_price 为 016 可选列:老库缺列时剥离重试,预览不因迁移未执行而整体消失
+  let { data, error } = await supabase()
     .from('candidate_signals')
-    .select('id, symbol, tier, sentiment, confidence, final_confidence, sector, current_score, base_score, status, status_reason, macro_regime, created_at, expires_at')
+    .select(`${baseColumns}, entry_price`)
     .in('status', ACTIVE_STATUSES)
     .order('current_score', { ascending: false, nullsFirst: false })
     .limit(limit);
+  if (error && /entry_price/.test(error.message)) {
+    ({ data, error } = await supabase()
+      .from('candidate_signals')
+      .select(baseColumns)
+      .in('status', ACTIVE_STATUSES)
+      .order('current_score', { ascending: false, nullsFirst: false })
+      .limit(limit));
+  }
   if (error) {
     if (isMissingTable(error)) warnMissingOnce();
     return null;

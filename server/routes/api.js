@@ -4,7 +4,7 @@ import { config } from '../config.js';
 import { getValuation } from '../services/portfolio.js';
 import { runCycle, cycleStatus } from '../services/newsService.js';
 import { sseHandler, clientCount } from '../services/bus.js';
-import { getQuote } from '../services/fmp.js';
+import { getQuote, getQuotes } from '../services/fmp.js';
 import { getStats, getPerformance } from '../services/statsService.js';
 import { getSignalStats } from '../services/signalStats.js';
 import { listPendingOrders } from '../services/openQueue.js';
@@ -184,7 +184,33 @@ async function getPoolOverview() {
     listPoolPreview(10).catch(() => null),
   ]);
   if (counts === null && top === null) return null;
-  return { counts: counts || {}, top: top || [] };
+
+  // 现价富化(fail-open,报价失败仅缺 current_price 字段):
+  // "若现在买入"的止盈止损参考只能锚定现价——入池价是另一个问题的答案
+  // (反事实:系统若在入池瞬间买入,这笔仓位现在处于区间的什么位置)
+  let enriched = top || [];
+  if (enriched.length) {
+    try {
+      const quotes = await getQuotes([...new Set(enriched.map((c) => c.symbol))], 30_000);
+      enriched = enriched.map((c) => {
+        const q = quotes.get(c.symbol);
+        const price = q ? Number(q.effective_price ?? q.price) : null;
+        return { ...c, current_price: Number.isFinite(price) && price > 0 ? price : null };
+      });
+    } catch {
+      // 批量报价失败:候选照常返回,前端按缺价降级展示
+    }
+  }
+  return {
+    counts: counts || {},
+    top: enriched,
+    // 系统离场口径(百分比):前端据此计算"若现在买入"的止损/止盈参考,
+    // 未来若改为波动率缩放的动态敞口,展示会自动跟随
+    reference: {
+      stop_loss_percent: config.stopLossPercent,
+      take_profit_percent: config.takeProfitPercent,
+    },
+  };
 }
 
 /** 买入候选池概览(交易记录页):等待资金分配的利好信号;池不可用时 pool 为 null */
