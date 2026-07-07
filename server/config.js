@@ -56,6 +56,8 @@ export const config = {
   // marketable 限价单的穿价容忍(%):买 = 内部成交价 ×(1+N%),卖 = ×(1−N%);
   // 当日有效,收盘未成交自动过期并计入"未成交"偏差样本
   brokerMirrorLimitSlackPercent: num(process.env.BROKER_MIRROR_LIMIT_SLACK_PERCENT, 1),
+  // 券商净值对照快照间隔(秒,下限 10s;休市时段净值不动,自动降回 10 分钟一条)
+  brokerSnapshotSeconds: num(process.env.BROKER_SNAPSHOT_SECONDS, 30),
 
   // 新闻轮询间隔(秒)。兼容旧的 NEWS_POLL_MINUTES 配置
   newsPollSeconds: num(

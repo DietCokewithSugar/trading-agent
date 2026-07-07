@@ -29,6 +29,9 @@ services:
         value: "true"
       - key: BROKER_MIRROR_LIMIT_SLACK_PERCENT
         value: "1"
+      # 券商净值对照快照间隔(秒,下限 10;休市自动降回 10 分钟一条)
+      - key: BROKER_SNAPSHOT_SECONDS
+        value: "30"
       - key: DEEPSEEK_MODEL
         value: deepseek-chat
       - key: DEEPSEEK_BASE_URL
