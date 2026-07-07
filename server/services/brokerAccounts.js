@@ -262,20 +262,25 @@ export async function getBrokerAccountsOverview() {
     for (const s of snaps) {
       if (!latestSnap.has(s.account_id)) latestSnap.set(s.account_id, s);
     }
-    const rows = (accRes.data || []).map((a) => {
-      const own = orders.filter((o) => o.account_id === a.id);
-      const snap = latestSnap.get(a.id) || null;
-      return {
-        ...toPublicRow(a),
-        stats: summarizeMirror(own),
-        recent: own.slice(0, 5),
-        equity: snap ? Number(snap.equity) : null,
-        shadow_total_value: snap?.shadow_total_value !== null && snap?.shadow_total_value !== undefined
-          ? Number(snap.shadow_total_value)
-          : null,
-        snapshot_at: snap?.created_at || null,
-      };
-    });
+    const rows = await Promise.all(
+      (accRes.data || []).map(async (a) => {
+        const own = orders.filter((o) => o.account_id === a.id);
+        const snap = latestSnap.get(a.id) || null;
+        // 账户净值实时取数(5s TTL 缓存),失败回退最新快照——展示新鲜度与快照落库频率解耦
+        const live = a.enabled ? await liveEquity(a) : null;
+        return {
+          ...toPublicRow(a),
+          stats: summarizeMirror(own),
+          recent: own.slice(0, 5),
+          equity: live ? live.equity : snap ? Number(snap.equity) : null,
+          equity_live: Boolean(live),
+          shadow_total_value: snap?.shadow_total_value !== null && snap?.shadow_total_value !== undefined
+            ? Number(snap.shadow_total_value)
+            : null,
+          snapshot_at: snap?.created_at || null,
+        };
+      })
+    );
     return { available: true, accounts: rows };
   } catch (err) {
     console.warn(`[accounts] 账户总览失败: ${err.message}`);
@@ -426,7 +431,27 @@ export function onShadowTrade(trade) {
 
 let polling = false;
 const lastSnapshotByAccount = new Map();
-const SNAPSHOT_INTERVAL_MS = 10 * 60_000;
+// 快照落库节奏:60s 一条(对照曲线粒度);再快只会膨胀表——
+// 管理页展示的"账户净值"走下方的实时取数(5s TTL),新鲜度与落库频率解耦
+const SNAPSHOT_INTERVAL_MS = 60_000;
+
+// 实时净值缓存:账户 id -> { at, equity, cash };管理页总览用,短 TTL 护住券商限频
+const EQUITY_CACHE_MS = 5_000;
+const equityCache = new Map();
+
+/** 账户实时净值(5s TTL 缓存);失败返回 null 由调用方回退最新快照 */
+async function liveEquity(account) {
+  const cached = equityCache.get(account.id);
+  if (cached && Date.now() - cached.at < EQUITY_CACHE_MS) return cached;
+  try {
+    const brokerAccount = await clientFor(account).getAccount();
+    const value = { at: Date.now(), equity: Number(brokerAccount.equity), cash: Number(brokerAccount.cash) };
+    equityCache.set(account.id, value);
+    return value;
+  } catch {
+    return null;
+  }
+}
 
 /** 该变体的最新影子净值(快照对照列);失败/无快照返回 null */
 async function latestShadowValue(variant) {
@@ -445,7 +470,11 @@ async function latestShadowValue(variant) {
   }
 }
 
-/** 由调度器周期调用(60s):回填在途执行单的撮合结果 + 每账户限频净值快照 */
+/**
+ * 由调度器周期调用(5s):回填在途执行单的撮合结果 + 每账户限频(60s)净值快照。
+ * 无在途单的 tick 只查一次本地库、零券商请求——高频轮询不吃券商限频;
+ * marketable 限价单基本秒成,5s 内即可看到状态/成交价/偏差回填。
+ */
 export async function pollBrokerAccountOrders() {
   if (!isAccountsAvailable() || polling) return;
   polling = true;
@@ -498,6 +527,12 @@ export async function pollBrokerAccountOrders() {
       lastSnapshotByAccount.set(account.id, Date.now());
       try {
         const brokerAccount = await clientFor(account).getAccount();
+        // 顺手喂给实时净值缓存,管理页总览大概率直接命中
+        equityCache.set(account.id, {
+          at: Date.now(),
+          equity: Number(brokerAccount.equity),
+          cash: Number(brokerAccount.cash),
+        });
         await supabase().from('broker_account_snapshots').insert({
           account_id: account.id,
           variant: account.purpose,

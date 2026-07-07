@@ -116,9 +116,10 @@ export function startScheduler() {
     every(60_000, '券商对照轮询', pollMirrorOrders);
   }
 
-  // 多券商模拟账户(025):回填在途执行单 + 每账户限频净值快照。
+  // 多券商模拟账户(025):5s 回填在途执行单(marketable 限价单基本秒成)+
+  // 每账户 60s 限频净值快照。无在途单的 tick 只查本地库、零券商请求,不吃券商限频;
   // 账户在运行时由管理页增删,循环无条件注册(无账户/缺表时函数内零成本返回)
-  every(60_000, '券商账户轮询', pollBrokerAccountOrders);
+  every(5_000, '券商账户轮询', pollBrokerAccountOrders);
 
   if (config.enableMacro) {
     // 经济日历刷新(黑窗与 surprise 数据源;套餐不含端点时模块内部自动停用)

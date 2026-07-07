@@ -93,7 +93,9 @@ function BrokerAccountsCard({ token, onError, onMessage }) {
 
   useEffect(() => {
     load();
-    const timer = setInterval(load, 30000);
+    // 10s 自动刷新:账户净值为服务端实时取数(5s TTL),回填轮询 5s 一轮,
+    // 这里再快只是重复展示同一份缓存
+    const timer = setInterval(load, 10000);
     return () => clearInterval(timer);
   }, [load]);
 
