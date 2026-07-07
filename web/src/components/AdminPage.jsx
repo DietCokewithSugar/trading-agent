@@ -7,6 +7,7 @@ import {
   Descriptions,
   Form,
   Input,
+  Popconfirm,
   Row,
   Select,
   Space,
@@ -14,6 +15,7 @@ import {
   Switch,
   Table,
   Tag,
+  Tooltip,
   Typography,
 } from 'antd';
 import {
@@ -26,6 +28,7 @@ import {
   RUN_TRIGGER_LABELS,
   STRATEGY_LABELS,
   STRATEGY_DESCRIPTIONS,
+  SHADOW_VARIANT_LABELS,
 } from '../api.js';
 import { COLOR_DOWN } from '../theme.js';
 
@@ -73,6 +76,253 @@ const RUN_COLUMNS = [
     },
   },
 ];
+/**
+ * 多券商模拟账户(025):添加多个券商模拟账户 API key,并给每个账户指派一个消融变体——
+ * 该变体此后的每笔影子成交都以限价单发往对应账户,用真实盘口撮合复演消融实验。
+ * secret 只在新增时上送,接口永不返回;key_id 脱敏展示。
+ */
+function BrokerAccountsCard({ token, onError, onMessage }) {
+  const [data, setData] = useState(null);
+  const [addBusy, setAddBusy] = useState(false);
+  const [rowBusy, setRowBusy] = useState(null); // 正在操作的账户 id
+  const [form] = Form.useForm();
+
+  const load = useCallback(() => {
+    adminApi.brokerAccounts(token).then(setData).catch(() => {});
+  }, [token]);
+
+  useEffect(() => {
+    load();
+    const timer = setInterval(load, 30000);
+    return () => clearInterval(timer);
+  }, [load]);
+
+  const addAccount = async (values) => {
+    setAddBusy(true);
+    onError(null);
+    onMessage(null);
+    try {
+      const result = await adminApi.addBrokerAccount(token, {
+        name: values.name,
+        key_id: values.key_id,
+        secret_key: values.secret_key,
+        base_url: values.base_url || null,
+      });
+      onMessage(`券商模拟账户「${result.account.name}」已添加并通过连通性校验`);
+      form.resetFields();
+      load();
+    } catch (err) {
+      onError(err.message);
+    } finally {
+      setAddBusy(false);
+    }
+  };
+
+  const updateAccount = async (id, patch, successText) => {
+    setRowBusy(id);
+    onError(null);
+    onMessage(null);
+    try {
+      await adminApi.updateBrokerAccount(token, id, patch);
+      if (successText) onMessage(successText);
+      load();
+    } catch (err) {
+      onError(err.message);
+    } finally {
+      setRowBusy(null);
+    }
+  };
+
+  const removeAccount = async (id, name) => {
+    setRowBusy(id);
+    onError(null);
+    onMessage(null);
+    try {
+      await adminApi.deleteBrokerAccount(token, id);
+      onMessage(`券商模拟账户「${name}」已删除(券商侧未成交单已尽力撤销)`);
+      load();
+    } catch (err) {
+      onError(err.message);
+    } finally {
+      setRowBusy(null);
+    }
+  };
+
+  const purposeOptions = [
+    { value: '', label: '闲置(不执行)' },
+    ...(data?.purposes || []).map((p) => ({
+      value: p,
+      label: SHADOW_VARIANT_LABELS[p] || p,
+    })),
+  ];
+
+  const columns = [
+    { title: '名称', dataIndex: 'name', width: 120, ellipsis: true },
+    {
+      title: 'API Key',
+      dataIndex: 'key_id_masked',
+      width: 130,
+      render: (v) => <span className="mono">{v}</span>,
+    },
+    {
+      title: '用途(执行的消融变体)',
+      dataIndex: 'purpose',
+      width: 210,
+      render: (v, row) => (
+        <Select
+          size="small"
+          style={{ width: '100%' }}
+          value={v || ''}
+          disabled={rowBusy === row.id}
+          options={purposeOptions}
+          onChange={(next) =>
+            updateAccount(
+              row.id,
+              { purpose: next || null },
+              next
+                ? `「${row.name}」已指派用途:${SHADOW_VARIANT_LABELS[next] || next}(此后该变体的每笔影子成交都会发往该账户)`
+                : `「${row.name}」已设为闲置`
+            )
+          }
+        />
+      ),
+    },
+    {
+      title: '状态',
+      dataIndex: 'status',
+      width: 80,
+      render: (v, row) =>
+        v === 'ok' ? (
+          <Tag color="green">正常</Tag>
+        ) : v === 'error' ? (
+          <Tooltip title={row.last_error || ''}>
+            <Tag color="red">异常</Tag>
+          </Tooltip>
+        ) : (
+          <Tag>未校验</Tag>
+        ),
+    },
+    {
+      title: '账户净值',
+      dataIndex: 'equity',
+      width: 110,
+      align: 'right',
+      render: (v) => (v === null || v === undefined ? '—' : <span className="num">{fmtMoney(v)}</span>),
+    },
+    {
+      title: '影子净值',
+      dataIndex: 'shadow_total_value',
+      width: 110,
+      align: 'right',
+      render: (v) => (v === null || v === undefined ? '—' : <span className="num">{fmtMoney(v)}</span>),
+    },
+    {
+      title: '成交/总单',
+      key: 'stats',
+      width: 90,
+      align: 'right',
+      render: (_, row) => (
+        <span className="num">
+          {row.stats ? `${row.stats.filled}/${row.stats.orders}` : '—'}
+        </span>
+      ),
+    },
+    {
+      title: '启用',
+      dataIndex: 'enabled',
+      width: 70,
+      render: (v, row) => (
+        <Switch
+          size="small"
+          checked={v}
+          loading={rowBusy === row.id}
+          onChange={(next) =>
+            updateAccount(row.id, { enabled: next }, `「${row.name}」已${next ? '启用' : '停用'}`)
+          }
+        />
+      ),
+    },
+    {
+      title: '操作',
+      key: 'actions',
+      width: 80,
+      render: (_, row) => (
+        <Popconfirm
+          title={`删除账户「${row.name}」?`}
+          description="将尽力撤销该账户在券商侧的未成交单;历史执行单与快照一并删除。"
+          okText="删除"
+          cancelText="取消"
+          okButtonProps={{ danger: true }}
+          onConfirm={() => removeAccount(row.id, row.name)}
+        >
+          <Button size="small" danger loading={rowBusy === row.id}>
+            删除
+          </Button>
+        </Popconfirm>
+      ),
+    },
+  ];
+
+  return (
+    <Card title="券商模拟账户(消融实验真实撮合)">
+      <Typography.Paragraph type="secondary" style={{ fontSize: 12.5 }}>
+        可添加多个券商模拟账户(API key 加密通道上送,密钥只存服务端、永不回显)。
+        给账户指派一个消融变体后,该变体的每笔影子成交都会以「限价单」同步发往该账户,
+        用真实盘口撮合复演消融实验——账户净值与影子净值的偏离,就是该策略经真实撮合检验后的水分。
+        同一变体最多绑定一个账户;重新指派不会迁移或清空券商侧既有持仓(建议换用途前先在券商侧清仓)。
+      </Typography.Paragraph>
+
+      {data?.available === false ? (
+        <Alert
+          type="info"
+          showIcon
+          message="多券商模拟账户功能不可用:broker_accounts 表缺失,请在数据库执行 025 迁移"
+          style={{ marginBottom: 12 }}
+        />
+      ) : (
+        <>
+          <Table
+            size="small"
+            rowKey="id"
+            columns={columns}
+            dataSource={data?.accounts || []}
+            loading={!data}
+            pagination={false}
+            scroll={{ x: 900 }}
+            locale={{ emptyText: '尚未添加券商模拟账户' }}
+            style={{ marginBottom: 16 }}
+          />
+          <Typography.Text type="secondary" className="label-caps">
+            添加账户
+          </Typography.Text>
+          <Form
+            form={form}
+            layout="inline"
+            onFinish={addAccount}
+            style={{ marginTop: 8, rowGap: 8 }}
+          >
+            <Form.Item name="name" rules={[{ required: true, message: '请输入名称' }]}>
+              <Input placeholder="账户名称(如:即时腾位实验)" style={{ width: 200 }} />
+            </Form.Item>
+            <Form.Item name="key_id" rules={[{ required: true, message: '请输入 Key ID' }]}>
+              <Input placeholder="API Key ID" style={{ width: 180 }} autoComplete="off" />
+            </Form.Item>
+            <Form.Item name="secret_key" rules={[{ required: true, message: '请输入 Secret' }]}>
+              <Input.Password placeholder="API Secret" style={{ width: 200 }} autoComplete="new-password" />
+            </Form.Item>
+            <Form.Item name="base_url">
+              <Input placeholder="接口地址(可选,默认官方模拟盘)" style={{ width: 240 }} />
+            </Form.Item>
+            <Button type="primary" htmlType="submit" loading={addBusy}>
+              校验并添加
+            </Button>
+          </Form>
+        </>
+      )}
+    </Card>
+  );
+}
+
 export default function AdminPage() {
   const [token, setToken] = useState(() => sessionStorage.getItem('admin_token') || '');
   const [authed, setAuthed] = useState(false);
@@ -572,6 +822,8 @@ export default function AdminPage() {
                 )}
               </Space>
             </Card>
+
+            <BrokerAccountsCard token={token} onError={setError} onMessage={setMessage} />
 
             <Card title="危险区:初始化所有数据">
               <Alert

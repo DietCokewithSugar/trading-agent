@@ -12,6 +12,13 @@ import { isTradingHalted, setTradingHalt } from '../services/tradingHalt.js';
 import { getTradingStrategy, setTradingStrategy, STRATEGIES } from '../services/strategy.js';
 import { isBrokerLedgerPrimary, setBrokerLedgerPrimary } from '../services/primaryLedger.js';
 import { isBrokerEnabled } from '../services/alpacaBroker.js';
+import {
+  getBrokerAccountsOverview,
+  addBrokerAccount,
+  updateBrokerAccount,
+  deleteBrokerAccount,
+} from '../services/brokerAccounts.js';
+import { SHADOW_VARIANTS } from '../services/shadowPortfolio.js';
 import { getRiskControlState } from '../services/riskControls.js';
 import { listRecentDecisions } from '../services/decisionLog.js';
 import { getParameterAdvice } from '../services/parameterAdvisor.js';
@@ -113,6 +120,63 @@ router.post(
       `[admin] 展示主账本 → ${result.enabled ? '券商模拟账户' : '内部账本'}${result.persisted ? '' : '(未持久化)'}`
     );
     res.json(result);
+  })
+);
+
+// ── 多券商模拟账户(025):添加多个券商模拟账户,按消融变体指派用途 ──
+// 密钥只进不出:secret 永不返回,key_id 输出前脱敏;账户表 RLS 无公共读策略。
+// 可指派用途 = 影子变体(cash 不交易,排除)
+const ACCOUNT_PURPOSES = SHADOW_VARIANTS.filter((v) => v !== 'cash');
+
+/** 账户总览(脱敏)+ 可指派用途清单 */
+router.get(
+  '/broker-accounts',
+  asyncHandler(async (req, res) => {
+    const overview = await getBrokerAccountsOverview();
+    res.json({ ...overview, purposes: ACCOUNT_PURPOSES });
+  })
+);
+
+/** 新增账户:{ name, key_id, secret_key, base_url? };先向券商校验连通性,失败 400 不入库 */
+router.post(
+  '/broker-accounts',
+  asyncHandler(async (req, res) => {
+    const { name, key_id: keyId, secret_key: secretKey, base_url: baseUrl } = req.body || {};
+    const account = await addBrokerAccount({ name, keyId, secretKey, baseUrl: baseUrl || null });
+    res.json({ account });
+  })
+);
+
+/** 更新账户:{ name?, purpose?, enabled? };purpose 须为影子变体名或 null(闲置) */
+router.post(
+  '/broker-accounts/:id',
+  asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: '账户 id 非法' });
+    const patch = {};
+    if (req.body?.name !== undefined) patch.name = req.body.name;
+    if (req.body?.enabled !== undefined) patch.enabled = req.body.enabled;
+    if (req.body?.purpose !== undefined) {
+      const purpose = req.body.purpose || null;
+      if (purpose !== null && !ACCOUNT_PURPOSES.includes(purpose)) {
+        return res
+          .status(400)
+          .json({ error: `未知用途 ${purpose},可选: 闲置(null) / ${ACCOUNT_PURPOSES.join(' / ')}` });
+      }
+      patch.purpose = purpose;
+    }
+    const account = await updateBrokerAccount(id, patch);
+    res.json({ account });
+  })
+);
+
+/** 删除账户(先 best-effort 撤销券商侧未成交单;执行单/快照级联删除) */
+router.delete(
+  '/broker-accounts/:id',
+  asyncHandler(async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: '账户 id 非法' });
+    res.json(await deleteBrokerAccount(id));
   })
 );
 

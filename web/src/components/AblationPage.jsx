@@ -44,19 +44,26 @@ const RANGES = [
   { key: 'all', label: '一年', hours: 24 * 366 },
 ];
 
-// 各变体的识别色:实盘用单色主色,基准/现金用灰;8 个消融变体用克制的分类色
+// 各变体的识别色:实盘用单色主色,基准/现金用灰;消融变体用克制的分类色
 // (变体身份属"颜色编码数据"的正当用法,避免与盈亏绿/红撞色)。
+// 腾位对照组(025)沿用本体色相的更浅/更亮变化,曲线上以虚线区分本体。
 function buildVariantColors(mode, CHART) {
   return {
     actual: mode === 'light' ? ACCENT_PRIMARY.light : ACCENT_PRIMARY.dark,
     no_risk_officer: '#7C6FF0', // 紫
+    no_risk_officer_rotation: '#A79EF5',
     no_macro_filter: '#D4A843', // 琥珀
+    no_macro_filter_rotation: '#E3C67E',
     wide_bracket: '#C08552', // 赭
+    wide_bracket_rotation: '#D4A785',
     trailing_only: '#6B9AC4', // 钢蓝
+    trailing_only_rotation: '#96B8D6',
     vol_bracket: '#9B8AA6', // 灰紫
+    vol_bracket_rotation: '#B7AABF',
     immediate_trade: '#3FB7C4', // 青
-    immediate_rotation: '#8AA69B', // 灰绿
+    immediate_rotation: '#8AA69B', // 灰绿(024 既有的腾位对照)
     equal_weight: '#E0719B', // 玫红
+    equal_weight_rotation: '#EB9DBB',
     spy_benchmark: CHART.benchmark,
     cash: CHART.reference,
   };
@@ -65,16 +72,27 @@ function buildVariantColors(mode, CHART) {
 const VARIANT_ORDER = [
   'actual',
   'no_risk_officer',
+  'no_risk_officer_rotation',
   'no_macro_filter',
+  'no_macro_filter_rotation',
   'wide_bracket',
+  'wide_bracket_rotation',
   'trailing_only',
+  'trailing_only_rotation',
   'vol_bracket',
+  'vol_bracket_rotation',
   'immediate_trade',
   'immediate_rotation',
   'equal_weight',
+  'equal_weight_rotation',
   'spy_benchmark',
   'cash',
 ];
+
+/** 腾位对照组:曲线以短虚线区分本体(色相同源) */
+const ROTATION_VARIANTS = new Set(
+  VARIANT_ORDER.filter((v) => v === 'immediate_rotation' || v.endsWith('_rotation'))
+);
 
 const SHADOW_TRIGGER_LABELS = { ...TRIGGER_LABELS, benchmark: '基准建仓', news: '新闻信号' };
 
@@ -677,7 +695,11 @@ export default function AblationPage({ version = 0, onSymbolClick }) {
                   stroke={s.color}
                   strokeWidth={s.variant === 'actual' ? 2.5 : 1.5}
                   strokeDasharray={
-                    s.variant === 'spy_benchmark' || s.variant === 'cash' ? '5 4' : undefined
+                    s.variant === 'spy_benchmark' || s.variant === 'cash'
+                      ? '5 4'
+                      : ROTATION_VARIANTS.has(s.variant)
+                        ? '2 3'
+                        : undefined
                   }
                   dot={false}
                   isAnimationActive={false}
@@ -707,6 +729,8 @@ export default function AblationPage({ version = 0, onSymbolClick }) {
           每套影子组合与实盘并行记账、各自从初始资金起步,只关闭一层防线:若「无风控官」长期跑输实盘,
           说明风控官的否决在创造价值;若「无宏观过滤」跑赢,说明宏观层可能过度拦截;「信号即时成交」
           对比实盘可衡量候选池 + LLM 决策链的净价值;「信号等权买入」对比实盘可检验 LLM 仓位分配是否有效。
+          每个消融变体另配一个同源的「+腾位」对照组(图中虚线):唯一差异是现金不足时先全仓止盈
+          最接近止盈价的盈利持仓再重试买入,本体与腾位版的同窗差值即「止盈腾位」机制的净贡献。
           注意:影子组合没有走 LLM 的路径(宏观拦截重放/即时成交/等权)使用确定性仓位与默认止损止盈,
           是消融近似而非完整重放;结论应结合「信号质量」页的前瞻收益统计交叉验证,样本不足一个月时不要下结论。
         </Typography.Paragraph>

@@ -95,8 +95,15 @@ test('toRotationPositions: 影子持仓补齐腾位选仓字段,无报价的持�
     prices
   );
   assert.equal(rows.length, 2);
-  assert.deepEqual(rows[0], { symbol: 'AAPL', current_price: 210, take_profit: 212, unrealized_pnl: 100 });
+  assert.deepEqual(rows[0], {
+    symbol: 'AAPL',
+    current_price: 210,
+    take_profit: 212,
+    unrealized_pnl: 100,
+    unrealized_pnl_percent: 5,
+  });
   assert.equal(rows[1].unrealized_pnl, -50, '浮亏照算(由 pickRotationSell 过滤)');
+  assert.equal(rows[1].unrealized_pnl_percent, -10, '浮盈比例供无止盈线变体的退化选仓(025)');
   // take_profit null 原样透传(trailing 类持仓由 pickRotationSell 自然跳过)
   const nullTp = toRotationPositions([{ symbol: 'X', quantity: 1, avg_cost: 10, take_profit: null }], new Map([['X', 12]]));
   assert.equal(nullTp[0].take_profit, null);

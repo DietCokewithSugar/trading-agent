@@ -72,6 +72,14 @@ export const adminApi = {
   primaryLedger: (token, enabled) =>
     adminRequest('/primary-ledger', { method: 'POST', token, body: { enabled } }),
   runCycle: (token) => adminRequest('/run-cycle', { method: 'POST', token }),
+  // 多券商模拟账户(025):增删查改;secret 只在新增时上送,接口永不返回
+  brokerAccounts: (token) => adminRequest('/broker-accounts', { token }),
+  addBrokerAccount: (token, body) =>
+    adminRequest('/broker-accounts', { method: 'POST', token, body }),
+  updateBrokerAccount: (token, id, body) =>
+    adminRequest(`/broker-accounts/${id}`, { method: 'POST', token, body }),
+  deleteBrokerAccount: (token, id) =>
+    adminRequest(`/broker-accounts/${id}`, { method: 'DELETE', token }),
   reset: (token) =>
     adminRequest('/reset', { method: 'POST', token, body: { confirm: 'RESET' } }),
 };
@@ -186,27 +194,43 @@ export const STRATEGY_DESCRIPTIONS = {
 export const SHADOW_VARIANT_LABELS = {
   actual: '实盘组合',
   no_risk_officer: '无风控官',
+  no_risk_officer_rotation: '无风控官+腾位',
   no_macro_filter: '无宏观过滤',
+  no_macro_filter_rotation: '无宏观过滤+腾位',
   wide_bracket: '宽敞口离场',
+  wide_bracket_rotation: '宽敞口+腾位',
   trailing_only: '仅移动止损',
+  trailing_only_rotation: '移动止损+腾位',
   vol_bracket: '波动敞口',
+  vol_bracket_rotation: '波动敞口+腾位',
   immediate_trade: '信号即时成交',
   immediate_rotation: '即时腾位',
   equal_weight: '信号等权买入',
+  equal_weight_rotation: '等权+腾位',
   spy_benchmark: 'SPY 买入持有',
   cash: '纯现金',
 };
 
+// 腾位对照组(025)的统一说明后缀
+const ROTATION_NOTE =
+  ',且现金不足时先全仓止盈最接近止盈价的盈利持仓腾出资金再重试买入——与本体对比度量止盈腾位的净贡献';
+
 export const SHADOW_VARIANT_DESCRIPTIONS = {
   actual: '当前真实模拟组合(全部防线开启)',
   no_risk_officer: '跟随实盘,但风控官否决/缩仓的买入按否决前方案照样执行',
+  no_risk_officer_rotation: `同「无风控官」${ROTATION_NOTE}`,
   no_macro_filter: '跟随实盘,但被宏观层(环境过滤/冲击/黑窗/预算钳制)拦截的买入照样执行',
+  no_macro_filter_rotation: `同「无宏观过滤」${ROTATION_NOTE}`,
   wide_bracket: '1:1 跟随实盘买入,但止损/止盈放宽到 ±4%、持有上限 96 小时——检验固定 ±2%/48h 是否过窄(噪音扫损)',
+  wide_bracket_rotation: `同「宽敞口离场」${ROTATION_NOTE}`,
   trailing_only: '1:1 跟随实盘买入,初始止损同实盘距离但不设止盈上限,移动止损只升不降——检验固定止盈是否截断利润',
+  trailing_only_rotation: `同「仅移动止损」,且现金不足时先全仓止盈浮盈比例最高的盈利持仓(本组合无止盈线)腾出资金再重试买入——与本体对比度量止盈腾位的净贡献`,
   vol_bracket: '1:1 跟随实盘买入,止损/止盈按该股 20 日波动自适应(1.5%–4%)——实盘开关开启前的对照实验,跑赢则顾问提示在管理页开启',
+  vol_bracket_rotation: `同「波动敞口」${ROTATION_NOTE}`,
   immediate_trade: '独立组合:可交易利好信号到达即按确定性仓位买入(休市信号顺延至下一可交易时段),不经候选池与 LLM 决策',
   immediate_rotation: '独立组合:同「信号即时成交」,但现金不足时先全仓止盈最接近止盈价的盈利持仓腾出资金再买——与即时成交对比度量止盈腾位的净贡献',
   equal_weight: '独立组合:可交易信号一律按固定比例等权买入(休市信号顺延),检验 LLM 仓位是否有效',
+  equal_weight_rotation: `同「信号等权买入」${ROTATION_NOTE}`,
   spy_benchmark: '启用时一次性全仓买入 SPY 并持有',
   cash: '不做任何交易的现金基准',
 };

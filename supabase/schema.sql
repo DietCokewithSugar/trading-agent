@@ -725,3 +725,68 @@ alter table portfolio_state add column if not exists vol_bracket_enabled boolean
 -- 主账户交易策略 + 展示主账本切换(024):策略选择器取代 vol_bracket_enabled 布尔开关
 alter table portfolio_state add column if not exists trading_strategy text not null default 'default';
 alter table portfolio_state add column if not exists broker_ledger_primary boolean not null default false;
+
+-- 多券商模拟账户(025):管理员页添加多个券商模拟账户并按消融变体指派用途,
+-- 该变体的每笔影子成交以 marketable 限价单发往对应账户真实撮合。
+-- broker_accounts 存有 API 密钥:启用 RLS 且不建公共读策略(仅 service_role 可达)
+create table if not exists broker_accounts (
+  id bigint generated always as identity primary key,
+  name text not null,
+  key_id text not null,
+  secret_key text not null,
+  base_url text,                 -- 为空时用服务端默认(官方模拟盘端点)
+  purpose text,                  -- null = 闲置;影子变体名 = 该变体的真实券商执行
+  enabled boolean not null default true,
+  status text,                   -- 最近一次连通性校验结果:ok / error
+  last_error text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create unique index if not exists idx_broker_accounts_purpose_unique
+  on broker_accounts (purpose) where enabled and purpose is not null;
+
+create table if not exists broker_account_orders (
+  id bigint generated always as identity primary key,
+  account_id bigint not null references broker_accounts(id) on delete cascade,
+  shadow_trade_id bigint references shadow_trades(id) on delete set null,
+  variant text,
+  symbol text not null,
+  side text not null check (side in ('buy', 'sell')),
+  qty numeric not null,
+  limit_price numeric,
+  extended_hours boolean not null default false,
+  client_order_id text unique,       -- shadow-{shadow_trade_id},幂等防重复执行
+  broker_order_id text,
+  status text not null default 'submitted',
+  filled_qty numeric,
+  filled_avg_price numeric,
+  internal_price numeric not null,   -- 影子账本成交价(偏差基准)
+  diff_bps numeric,                  -- 带方向偏差,正值=对影子账本不利
+  note text,
+  submitted_at timestamptz not null default now(),
+  filled_at timestamptz,
+  updated_at timestamptz not null default now()
+);
+create index if not exists idx_broker_account_orders_open
+  on broker_account_orders (submitted_at)
+  where status in ('submitted', 'partially_filled');
+create index if not exists idx_broker_account_orders_account
+  on broker_account_orders (account_id, submitted_at desc);
+
+create table if not exists broker_account_snapshots (
+  id bigint generated always as identity primary key,
+  account_id bigint not null references broker_accounts(id) on delete cascade,
+  variant text,
+  equity numeric not null,
+  cash numeric not null,
+  shadow_total_value numeric,
+  created_at timestamptz not null default now()
+);
+create index if not exists idx_broker_account_snapshots_account
+  on broker_account_snapshots (account_id, created_at desc);
+
+alter table broker_accounts enable row level security;
+alter table broker_account_orders enable row level security;
+alter table broker_account_snapshots enable row level security;
+create policy "public read broker_account_orders" on broker_account_orders for select using (true);
+create policy "public read broker_account_snapshots" on broker_account_snapshots for select using (true);

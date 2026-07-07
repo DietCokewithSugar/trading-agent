@@ -19,6 +19,7 @@ import { getMarketSession } from './services/fmp.js';
 import { broadcast, clientCount } from './services/bus.js';
 import { pushLiveQuotes } from './services/quotesPush.js';
 import { pollMirrorOrders, getLatestBrokerSnapshot } from './services/brokerMirror.js';
+import { pollBrokerAccountOrders } from './services/brokerAccounts.js';
 import { isBrokerEnabled } from './services/alpacaBroker.js';
 import { getPrimaryValuation, isBrokerLedgerPrimary } from './services/primaryLedger.js';
 
@@ -114,6 +115,10 @@ export function startScheduler() {
   if (isBrokerEnabled()) {
     every(60_000, '券商对照轮询', pollMirrorOrders);
   }
+
+  // 多券商模拟账户(025):回填在途执行单 + 每账户限频净值快照。
+  // 账户在运行时由管理页增删,循环无条件注册(无账户/缺表时函数内零成本返回)
+  every(60_000, '券商账户轮询', pollBrokerAccountOrders);
 
   if (config.enableMacro) {
     // 经济日历刷新(黑窗与 surprise 数据源;套餐不含端点时模块内部自动停用)

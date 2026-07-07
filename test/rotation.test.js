@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { pickRotationSell } from '../server/services/rotation.js';
+import { pickRotationSell, pickRotationSellByPnl } from '../server/services/rotation.js';
 
 const pos = (symbol, currentPrice, takeProfit, pnl) => ({
   symbol,
@@ -42,4 +42,36 @@ test('无合格持仓返回 null', () => {
 
 test('零盈亏(pnl=0)不算盈利,不参与腾位', () => {
   assert.equal(pickRotationSell([pos('FLAT', 100, 102, 0)]), null);
+});
+
+// ── pickRotationSellByPnl:无止盈线组合(trailing_only 系,025)的退化选仓 ──
+
+const pnlPos = (symbol, currentPrice, pnl, pnlPercent) => ({
+  symbol,
+  current_price: currentPrice,
+  take_profit: null,
+  unrealized_pnl: pnl,
+  unrealized_pnl_percent: pnlPercent,
+});
+
+test('pickRotationSellByPnl:选浮盈比例最高的盈利持仓(不看止盈价)', () => {
+  const positions = [
+    pnlPos('AAA', 105, 50, 5),
+    pnlPos('BBB', 120, 30, 20), // 绝对盈利更低但比例最高
+    pnlPos('CCC', 95, -10, -5),
+  ];
+  assert.equal(pickRotationSellByPnl(positions).symbol, 'BBB');
+});
+
+test('pickRotationSellByPnl:亏损/零盈亏/缺比例字段的持仓不参与,支持 excludeSymbol', () => {
+  assert.equal(pickRotationSellByPnl([pnlPos('LOSS', 95, -10, -5)]), null);
+  assert.equal(pickRotationSellByPnl([pnlPos('FLAT', 100, 0, 0)]), null);
+  assert.equal(
+    pickRotationSellByPnl([{ symbol: 'NOPCT', current_price: 105, unrealized_pnl: 50 }]),
+    null,
+    '缺 unrealized_pnl_percent 的行不参与'
+  );
+  const positions = [pnlPos('AAA', 120, 30, 20), pnlPos('BBB', 105, 50, 5)];
+  assert.equal(pickRotationSellByPnl(positions, { excludeSymbol: 'AAA' }).symbol, 'BBB');
+  assert.equal(pickRotationSellByPnl(null), null);
 });

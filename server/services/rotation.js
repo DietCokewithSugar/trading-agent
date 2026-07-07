@@ -26,3 +26,25 @@ export function pickRotationSell(positions, { excludeSymbol = null } = {}) {
   }
   return best;
 }
+
+/**
+ * 无止盈线组合(trailing_only 系)的腾位选仓退化规则:没有止盈价可比时,
+ * 选浮盈比例(unrealized_pnl_percent)最高的盈利持仓——"离止盈最近"在
+ * 不设止盈的组合里的自然等价物。排除 excludeSymbol;无合格持仓返回 null。
+ */
+export function pickRotationSellByPnl(positions, { excludeSymbol = null } = {}) {
+  let best = null;
+  let bestPct = -Infinity;
+  for (const pos of positions || []) {
+    if (!pos || (excludeSymbol && pos.symbol === excludeSymbol)) continue;
+    const pnl = Number(pos.unrealized_pnl);
+    const pct = Number(pos.unrealized_pnl_percent);
+    const price = Number(pos.current_price);
+    if (!(pnl > 0) || !(price > 0) || !Number.isFinite(pct)) continue;
+    if (pct > bestPct) {
+      bestPct = pct;
+      best = pos;
+    }
+  }
+  return best;
+}
