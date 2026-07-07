@@ -118,6 +118,25 @@ export function pickTopBlocked(candidates, { max = 3, excludeAnalysisIds = new S
     .slice(0, Math.max(max, 0));
 }
 
+/**
+ * 影子持仓 → 止盈腾位选仓输入(纯函数,024):补齐 pickRotationSell 需要的
+ * unrealized_pnl/current_price 字段;无实时报价的持仓丢弃(不据不可信估值腾位)。
+ */
+export function toRotationPositions(positions, priceBySymbol) {
+  const out = [];
+  for (const p of positions || []) {
+    const price = Number(priceBySymbol?.get?.(p.symbol));
+    if (!(price > 0)) continue;
+    out.push({
+      symbol: p.symbol,
+      current_price: price,
+      take_profit: p.take_profit,
+      unrealized_pnl: round2((price - Number(p.avg_cost)) * Number(p.quantity)),
+    });
+  }
+  return out;
+}
+
 /** 用报价(缺失时退回平均成本)为影子持仓估值,返回 { positionsValue, totalValue } */
 export function valuePositions(positions, priceBySymbol, cash) {
   let positionsValue = 0;

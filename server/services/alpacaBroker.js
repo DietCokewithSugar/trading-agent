@@ -69,6 +69,11 @@ export function getPosition(symbol) {
   return alpacaRequest('GET', `/v2/positions/${encodeURIComponent(symbol)}`);
 }
 
+/** 全部持仓(展示主账本用;空仓返回 []) */
+export function getPositions() {
+  return alpacaRequest('GET', '/v2/positions');
+}
+
 /** 撤销全部未成交订单(管理重置用) */
 export function cancelOpenOrders() {
   return alpacaRequest('DELETE', '/v2/orders');

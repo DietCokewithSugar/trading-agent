@@ -15,7 +15,9 @@ import { getBlackoutState, getUpcomingEvents } from '../services/macroCalendar.j
 import { countByStatus, listPoolPreview } from '../services/candidateStore.js';
 import { getShadowOverview, getShadowTrades } from '../services/shadowPortfolio.js';
 import { getBrokerMirrorOverview } from '../services/brokerMirror.js';
-import { isVolBracketEnabled } from '../services/volBracket.js';
+import { isVolBracketEnabled, getTradingStrategy, strategyBracket } from '../services/strategy.js';
+import { getPrimaryValuation, isBrokerLedgerPrimary } from '../services/primaryLedger.js';
+import { getBrokerSnapshots } from '../services/brokerMirror.js';
 import { safeTokenEqual, createAuthRateLimiter } from '../services/authGuard.js';
 import { clusterAnalyses } from '../services/newsDedup.js';
 
@@ -34,11 +36,11 @@ router.get('/health', (req, res) => {
   res.json({ ok: true, time: new Date().toISOString() });
 });
 
-/** 组合概览:现金、总值、盈亏、持仓(含实时报价) */
+/** 组合概览:现金、总值、盈亏、持仓(含实时报价);主账本开关(024)决定数据源 */
 router.get(
   '/portfolio',
   asyncHandler(async (req, res) => {
-    const valuation = await getValuation();
+    const valuation = await getPrimaryValuation();
     res.json(valuation);
   })
 );
@@ -46,6 +48,7 @@ router.get(
 /**
  * 净值快照序列(盈亏折线图数据)。
  * ?hours=24 限定时间范围;数据库端均匀采样至 600 点(snapshots_sampled RPC)。
+ * 主账本为券商模拟(024)时改用券商净值快照序列(取数失败回退内部序列,fail-open)。
  */
 router.get(
   '/snapshots',
@@ -55,6 +58,14 @@ router.get(
       Number.isFinite(hours) && hours > 0
         ? new Date(Date.now() - hours * 3600_000).toISOString()
         : new Date(0).toISOString();
+
+    if (isBrokerLedgerPrimary()) {
+      try {
+        return res.json(await getBrokerSnapshots(since));
+      } catch (err) {
+        console.warn(`[api] 券商净值序列不可用,回退内部快照: ${err.message}`);
+      }
+    }
 
     const { data, error } = await supabase().rpc('snapshots_sampled', {
       since,
@@ -214,19 +225,24 @@ async function getPoolOverview() {
   return {
     counts: counts || {},
     top: enriched,
-    // 系统离场口径:mode='vol'(波动自适应,023 管理页开关)时 bracket 是每票动态的,
-    // 前端按 max_percent 展示"最宽口径"参考;mode='fixed' 时沿用固定百分比。
-    // legacy 字段(stop/take percent)始终保留,旧前端按固定口径降级展示
-    reference: {
-      mode: isVolBracketEnabled() ? 'vol' : 'fixed',
-      stop_loss_percent: config.stopLossPercent,
-      take_profit_percent: config.takeProfitPercent,
-      vol_bracket: {
-        k: config.bracketVolK,
-        min_percent: config.bracketMinPercent,
-        max_percent: config.bracketMaxPercent,
-      },
-    },
+    // 系统离场口径(024 起按当前策略):mode='vol' 时 bracket 是每票动态的,
+    // 前端按 max_percent 展示"最宽口径"参考;其余策略给出该策略的固定宽度
+    // (trailing_only 止盈为 null → 前端展示"无止盈")。legacy 字段始终保留
+    reference: (() => {
+      const strategy = getTradingStrategy();
+      const bracket = strategyBracket(strategy, { volBracketPercent: null, cfg: config });
+      return {
+        mode: isVolBracketEnabled() ? 'vol' : 'fixed',
+        strategy,
+        stop_loss_percent: bracket.stopLossPercent,
+        take_profit_percent: bracket.takeProfitPercent,
+        vol_bracket: {
+          k: config.bracketVolK,
+          min_percent: config.bracketMinPercent,
+          max_percent: config.bracketMaxPercent,
+        },
+      };
+    })(),
   };
 }
 

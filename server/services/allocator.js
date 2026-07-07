@@ -24,10 +24,10 @@ import {
   cancelSiblings,
   countByStatus,
 } from './candidateStore.js';
-import { executeCandidate, executeSellOrder } from './trader.js';
-import { getPortfolio, getValuation } from './portfolio.js';
+import { executeCandidate, executeSellOrder, rotateProfitablePosition } from './trader.js';
+import { getTradingStrategy, isEntryPathStrategy } from './strategy.js';
+import { getPortfolio } from './portfolio.js';
 import { onMacroFilteredCandidates } from './shadowPortfolio.js';
-import { pickRotationSell } from './rotation.js';
 
 export { tierScore };
 
@@ -145,6 +145,9 @@ const ROTATION_REASONS = new Set(['max_positions', 'cash_reserve', 'gross_exposu
  */
 export async function maybeRunAllocation() {
   if (!config.enableMacro || !isPoolAvailable()) return;
+  // 入场路径类策略(024):新信号绕过候选池,分配器暂停——否则只会把切换前的存量候选
+  // 继续送进 LLM 链,一套账本混两种入场纪律还白烧成本;存量候选按 24h 自然过期
+  if (isEntryPathStrategy(getTradingStrategy())) return;
   if (getMarketSession() === 'closed') return;
   const today = etDayKey();
   const firstRunOfDay = allocatorStatus.lastRunDay !== today;
@@ -488,43 +491,7 @@ export async function runAllocation({ trigger = 'manual' } = {}) {
   }
 }
 
-/**
- * 止盈腾位卖出:在未实现盈利且设有止盈价的持仓中,选 current_price/take_profit
- * 最大者(最接近止盈价)全仓止盈,为新候选腾出持仓容量/现金。
- * 排除候选自身同票(禁止卖 X 再买 X)。返回卖出 trade 或 null(无盈利持仓/失败)。
- */
-async function rotateProfitablePosition(excludeSymbol, constraintReason) {
-  let valuation;
-  try {
-    valuation = await getValuation();
-  } catch (err) {
-    console.warn(`[allocator] 止盈腾位前获取估值失败: ${err.message}`);
-    return null;
-  }
-  // 持仓报价缺失时估值不可信,不据此做腾位决策(与 settleBuyLocked 的约定一致)
-  if (valuation.missing_quotes) return null;
-  const pick = pickRotationSell(valuation.positions, { excludeSymbol });
-  if (!pick) {
-    console.log(`[allocator] 无盈利持仓可腾位(${constraintReason}),候选按资金受限留池`);
-    return null;
-  }
-  const reason = `止盈腾位(${constraintReason}):现价 $${pick.current_price} 最接近止盈价 $${pick.take_profit},为新候选腾出容量`;
-  console.log(`[allocator] ${pick.symbol} ${reason}`);
-  try {
-    const trade = await executeSellOrder({
-      symbol: pick.symbol,
-      price: pick.current_price,
-      fraction: 1,
-      reason,
-      trigger: 'rotation',
-    });
-    if (trade) broadcast('trade', trade);
-    return trade || null;
-  } catch (err) {
-    console.warn(`[allocator] ${pick.symbol} 止盈腾位卖出失败: ${err.message}`);
-    return null;
-  }
-}
+// 止盈腾位卖出已迁至 trader.js#rotateProfitablePosition(024,与即时策略共用),此处直接导入使用
 
 /**
  * 批量提交刷分写入:shouldWriteScore 过滤掉无意义的纯分数写,其余 20 个一批并发,

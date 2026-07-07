@@ -5,6 +5,9 @@ import {
   signedDiffBps,
   adjustSellQty,
   summarizeMirror,
+  mapBrokerPositions,
+  buildBrokerValuation,
+  mapBrokerSnapshotRow,
 } from '../server/services/brokerMirror.js';
 
 test('mirrorLimitPrice:买入向上穿价、卖出向下穿价,两位小数', () => {
@@ -77,4 +80,70 @@ test('summarizeMirror:空输入安全', () => {
   assert.equal(s.fill_rate, null);
   assert.equal(s.avg_bps, null);
   assert.equal(summarizeMirror(null).orders, 0);
+});
+
+test('mapBrokerPositions:字段映射为内部估值口径,非法行丢弃(024)', () => {
+  const rows = mapBrokerPositions([
+    {
+      symbol: 'AAPL',
+      qty: '10',
+      avg_entry_price: '200',
+      current_price: '210',
+      market_value: '2100',
+      unrealized_pl: '100',
+      unrealized_plpc: '0.05',
+    },
+    { symbol: 'BAD', qty: '0', current_price: '10' }, // 数量非法
+    { symbol: 'BAD2', qty: '5', current_price: null }, // 价格非法
+  ]);
+  assert.equal(rows.length, 1);
+  const p = rows[0];
+  assert.equal(p.symbol, 'AAPL');
+  assert.equal(p.quantity, 10);
+  assert.equal(p.avg_cost, 200);
+  assert.equal(p.current_price, 210);
+  assert.equal(p.market_value, 2100);
+  assert.equal(p.unrealized_pnl, 100);
+  assert.equal(p.unrealized_pnl_percent, 5, 'plpc 小数 → 百分比');
+  assert.equal(p.stop_loss, null);
+  assert.equal(p.take_profit, null);
+  assert.equal(mapBrokerPositions(null).length, 0);
+});
+
+test('buildBrokerValuation:getValuation 同形状 + 基线盈亏(024)', () => {
+  const v = buildBrokerValuation({
+    account: { equity: '105000', cash: '5000' },
+    positions: [{ symbol: 'AAPL', qty: '10', avg_entry_price: '200', current_price: '210' }],
+    baseline: 100000,
+    session: 'regular',
+  });
+  assert.equal(v.ledger, 'broker');
+  assert.equal(v.total_value, 105000);
+  assert.equal(v.cash, 5000);
+  assert.equal(v.positions_value, 100000);
+  assert.equal(v.initial_capital, 100000);
+  assert.equal(v.pnl, 5000);
+  assert.equal(v.pnl_percent, 5);
+  assert.equal(v.market_session, 'regular');
+  assert.equal(v.positions.length, 1);
+  assert.deepEqual(v.missing_quotes, []);
+  // 无基线:盈亏为 null(前端按 — 展示),总值照常
+  const noBase = buildBrokerValuation({ account: { equity: '105000', cash: '5000' }, positions: [] });
+  assert.equal(noBase.pnl, null);
+  assert.equal(noBase.pnl_percent, null);
+  assert.equal(noBase.initial_capital, null);
+});
+
+test('mapBrokerSnapshotRow:券商快照 → 内部快照形状(024)', () => {
+  const snap = mapBrokerSnapshotRow({ equity: '102000', cash: '2000', created_at: 't1' }, 100000);
+  assert.deepEqual(snap, {
+    total_value: 102000,
+    cash: 2000,
+    positions_value: 100000,
+    pnl: 2000,
+    pnl_percent: 2,
+    created_at: 't1',
+  });
+  assert.equal(mapBrokerSnapshotRow(null, 100000), null);
+  assert.equal(mapBrokerSnapshotRow({ equity: 'x' }, 100000), null, '净值非法返回 null');
 });

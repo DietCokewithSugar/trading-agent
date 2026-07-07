@@ -18,8 +18,9 @@ import { makeSingleton } from './services/singleton.js';
 import { getMarketSession } from './services/fmp.js';
 import { broadcast, clientCount } from './services/bus.js';
 import { pushLiveQuotes } from './services/quotesPush.js';
-import { pollMirrorOrders } from './services/brokerMirror.js';
+import { pollMirrorOrders, getLatestBrokerSnapshot } from './services/brokerMirror.js';
 import { isBrokerEnabled } from './services/alpacaBroker.js';
+import { getPrimaryValuation, isBrokerLedgerPrimary } from './services/primaryLedger.js';
 
 // 休市时段净值几乎不变,快照降频到每 30 分钟一条(保持折线图连续),
 // 同时避免对持仓报价的无谓 FMP 请求
@@ -51,20 +52,25 @@ export function startScheduler() {
     return runCycle({ fullFetch: tick % fullEvery === 0, trigger: 'scheduler' });
   });
 
-  // 实时报价推送:仅在有浏览器通过 SSE 在线时拉取报价,节省 API 配额
+  // 实时报价推送:仅在有浏览器通过 SSE 在线时拉取报价,节省 API 配额。
+  // 主账本开关(024)决定 portfolio 事件的数据源(券商模拟/内部,取数失败自动回退内部);
+  // quotes 事件始终基于内部估值(候选池/个股弹窗与账本视图无关)
   every(quoteSec * 1000, '报价推送', async () => {
     if (!clientCount()) return;
-    const valuation = await getValuation({
-      quoteMaxAgeMs: Math.max(quoteSec * 1000 - 1000, 1000),
-    });
-    broadcast('portfolio', valuation);
-    // 附带广播「持仓 + 候选池 top」的紧凑报价映射(SSE quotes 事件)。
+    const opts = { quoteMaxAgeMs: Math.max(quoteSec * 1000 - 1000, 1000) };
+    const internal = await getValuation(opts);
+    broadcast(
+      'portfolio',
+      isBrokerLedgerPrimary() ? await getPrimaryValuation(opts) : { ...internal, ledger: 'internal' }
+    );
     // 不 await:池符号报价慢(FMP 超时最长 20s)不能拖累 portfolio 推送节奏,
     // 模块内部有单飞旗标防重入,且 fail-open 永不 reject
-    pushLiveQuotes(valuation).catch(() => {});
+    pushLiveQuotes(internal).catch(() => {});
   });
 
-  // 净值快照(盈亏折线图数据点),休市时段降频;影子组合快照搭车(内部限频)
+  // 净值快照(盈亏折线图数据点),休市时段降频;影子组合快照搭车(内部限频)。
+  // 内部快照永远照常落库(引擎历史不断档);主账本为券商模拟时,
+  // snapshot 广播改发最新券商净值快照(10 分钟粒度,图表一致性优先)
   let lastClosedSnapshotAt = 0;
   every(snapSec * 1000, '净值快照', async () => {
     if (getMarketSession() === 'closed') {
@@ -72,7 +78,12 @@ export function startScheduler() {
       lastClosedSnapshotAt = Date.now();
     }
     const snap = await takeSnapshot();
-    broadcast('snapshot', snap);
+    if (isBrokerLedgerPrimary()) {
+      const brokerSnap = await getLatestBrokerSnapshot();
+      if (brokerSnap) broadcast('snapshot', brokerSnap);
+    } else {
+      broadcast('snapshot', snap);
+    }
     if (config.enableShadow) {
       await takeShadowSnapshots().catch((err) =>
         console.warn(`[shadow] 净值快照失败: ${err.message}`)

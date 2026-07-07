@@ -9,7 +9,9 @@ import { safeTokenEqual, createAuthRateLimiter } from '../services/authGuard.js'
 import { getTodayMetrics } from '../services/metrics.js';
 import { listRecentRuns, aggregateRejectReasons, isCycleRunsAvailable } from '../services/cycleRuns.js';
 import { isTradingHalted, setTradingHalt } from '../services/tradingHalt.js';
-import { isVolBracketEnabled, setVolBracketEnabled } from '../services/volBracket.js';
+import { getTradingStrategy, setTradingStrategy, STRATEGIES } from '../services/strategy.js';
+import { isBrokerLedgerPrimary, setBrokerLedgerPrimary } from '../services/primaryLedger.js';
+import { isBrokerEnabled } from '../services/alpacaBroker.js';
 import { getRiskControlState } from '../services/riskControls.js';
 import { listRecentDecisions } from '../services/decisionLog.js';
 import { getParameterAdvice } from '../services/parameterAdvisor.js';
@@ -52,7 +54,9 @@ router.get('/status', (req, res) => {
     ...cycleStatus,
     halted: isHalted(),
     tradingHalted: isTradingHalted(),
-    volBracketEnabled: isVolBracketEnabled(),
+    tradingStrategy: getTradingStrategy(),
+    brokerLedgerPrimary: isBrokerLedgerPrimary(),
+    brokerMirrorAvailable: isBrokerEnabled(),
     riskControls: getRiskControlState(),
     sseClients: clientCount(),
     pollSeconds: config.newsPollSeconds,
@@ -78,18 +82,35 @@ router.post(
 );
 
 /**
- * 波动自适应敞口运行时开关(023):开启后买入 bracket = clamp(k × 20日波动, min%, max%);
- * 关闭(默认)沿用固定 ±2%。持久化在 portfolio_state,缺列(未执行 023 迁移)开启时报 409
+ * 主账户交易策略选择(024,取代 023 的 vol-bracket 布尔开关):预设对应消融实验各变体。
+ * 入场路径类(immediate 类与等权)绕过候选池/LLM/风控官(锁内硬风控仍全部生效,
+ * 分配器暂停);非法预设 400,缺列(未执行 024 迁移)409
  */
 router.post(
-  '/vol-bracket',
+  '/strategy',
+  asyncHandler(async (req, res) => {
+    if (typeof req.body?.strategy !== 'string') {
+      return res.status(400).json({ error: `请求体需携带 {"strategy": "..."},可选: ${STRATEGIES.join(' / ')}` });
+    }
+    const result = await setTradingStrategy(req.body.strategy);
+    console.log(`[admin] 交易策略 → ${result.strategy}${result.persisted ? '' : '(未持久化)'}`);
+    res.json(result);
+  })
+);
+
+/**
+ * 展示主账本切换(024):开启后仪表盘主视图(净值/持仓/曲线)展示券商模拟账户实时数据;
+ * 内部引擎账本与交易链路不变。未配置券商 API / 缺列(未执行 024 迁移)开启时报 409
+ */
+router.post(
+  '/primary-ledger',
   asyncHandler(async (req, res) => {
     if (typeof req.body?.enabled !== 'boolean') {
       return res.status(400).json({ error: '请求体需携带 {"enabled": true|false}' });
     }
-    const result = await setVolBracketEnabled(req.body.enabled);
+    const result = await setBrokerLedgerPrimary(req.body.enabled);
     console.log(
-      `[admin] 波动自适应敞口 → ${result.enabled ? '开启' : '关闭'}${result.persisted ? '' : '(未持久化)'}`
+      `[admin] 展示主账本 → ${result.enabled ? '券商模拟账户' : '内部账本'}${result.persisted ? '' : '(未持久化)'}`
     );
     res.json(result);
   })

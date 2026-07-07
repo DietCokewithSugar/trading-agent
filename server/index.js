@@ -7,7 +7,8 @@ import apiRouter from './routes/api.js';
 import adminRouter from './routes/admin.js';
 import { startScheduler } from './scheduler.js';
 import { loadTradingHalt } from './services/tradingHalt.js';
-import { loadVolBracket } from './services/volBracket.js';
+import { loadTradingStrategy } from './services/strategy.js';
+import { loadPrimaryLedger } from './services/primaryLedger.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -39,9 +40,10 @@ if (fs.existsSync(dist)) {
 const missing = assertConfig();
 app.listen(config.port, () => {
   console.log(`[server] 服务已启动: http://localhost:${config.port}`);
-  // 人工交易暂停/波动敞口开关跨重启持久化,与调度是否启动无关;内部自行容错,绝不抛错
+  // 人工交易暂停/交易策略/主账本开关跨重启持久化,与调度是否启动无关;内部自行容错,绝不抛错
   loadTradingHalt().catch(() => {});
-  loadVolBracket().catch(() => {});
+  loadTradingStrategy().catch(() => {});
+  loadPrimaryLedger().catch(() => {});
   if (missing.length === 0) {
     startScheduler();
   } else {

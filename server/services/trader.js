@@ -46,7 +46,9 @@ import { beginDecisionEpisode, attachOfficer, finishDecision } from './decisionL
 import { bumpTakeProfit } from './holding.js';
 import { mirrorTrade } from './brokerMirror.js';
 import { computeSymbolBracket } from './volatility.js';
-import { isVolBracketEnabled } from './volBracket.js';
+import { getTradingStrategy, isEntryPathStrategy, strategyBracket } from './strategy.js';
+import { pickRotationSell } from './rotation.js';
+import { broadcast } from './bus.js';
 
 function round4(n) {
   return Math.round(n * 10000) / 10000;
@@ -56,20 +58,59 @@ function round2(n) {
 }
 
 /**
- * 买入 bracket 赋值(023):默认固定 ±config 百分比;波动自适应开关(管理页)开启且
- * 波动可算时,止损止盈改为 clamp(k × 20日波动, min%, max%) 的对称宽度。
- * 无论开关,波动与"应然 bracket"都记在 decision 上:成交后落 trades(证据链),
- * 并传给 vol_bracket 影子变体——开关关闭期间对照实验照常积累。
+ * 买入 bracket 赋值(023/024,按当前策略):default 与 immediate 类/等权策略固定 ±config;
+ * wide_bracket ±4%;trailing_only 止损同距、不设止盈;vol_bracket 按 20 日波动缩放
+ * (波动不可算回退固定值)。无论策略,波动与"应然 bracket"都记在 decision 上:
+ * 成交后落 trades(证据链),并传给 vol_bracket 影子变体——对照实验照常积累。
  */
 async function applyBracket(decision, symbol) {
   const vb = await computeSymbolBracket(symbol);
-  const useVol = isVolBracketEnabled() && vb.bracketPercent !== null;
-  decision.stopLossPercent = useVol ? vb.bracketPercent : config.stopLossPercent;
-  decision.takeProfitPercent = useVol ? vb.bracketPercent : config.takeProfitPercent;
+  const strategy = getTradingStrategy();
+  const bracket = strategyBracket(strategy, { volBracketPercent: vb.bracketPercent, cfg: config });
+  decision.stopLossPercent = bracket.stopLossPercent;
+  decision.takeProfitPercent = bracket.takeProfitPercent;
   decision.bracketVol = vb.volPercent;
   decision.volBracketPercent = vb.bracketPercent;
-  if (useVol) {
+  if (strategy === 'vol_bracket' && vb.bracketPercent !== null) {
     console.log(`[trader] ${symbol} 波动自适应敞口: 20日波动 ${vb.volPercent}% → bracket ±${vb.bracketPercent}%`);
+  }
+}
+
+/**
+ * 止盈腾位卖出(020,自 allocator 迁入以供即时策略共用):在未实现盈利且设有止盈价的
+ * 持仓中,选 current_price/take_profit 最大者(最接近止盈价)全仓止盈,为新买入腾出
+ * 持仓容量/现金。排除同票(禁止卖 X 再买 X)。返回卖出 trade 或 null(无盈利持仓/失败)。
+ */
+export async function rotateProfitablePosition(excludeSymbol, constraintReason) {
+  let valuation;
+  try {
+    valuation = await getValuation();
+  } catch (err) {
+    console.warn(`[trader] 止盈腾位前获取估值失败: ${err.message}`);
+    return null;
+  }
+  // 持仓报价缺失时估值不可信,不据此做腾位决策(与 settleBuyLocked 的约定一致)
+  if (valuation.missing_quotes) return null;
+  const pick = pickRotationSell(valuation.positions, { excludeSymbol });
+  if (!pick) {
+    console.log(`[trader] 无盈利持仓可腾位(${constraintReason})`);
+    return null;
+  }
+  const reason = `止盈腾位(${constraintReason}):现价 $${pick.current_price} 最接近止盈价 $${pick.take_profit},为新买入腾出容量`;
+  console.log(`[trader] ${pick.symbol} ${reason}`);
+  try {
+    const trade = await executeSellOrder({
+      symbol: pick.symbol,
+      price: pick.current_price,
+      fraction: 1,
+      reason,
+      trigger: 'rotation',
+    });
+    if (trade) broadcast('trade', trade);
+    return trade || null;
+  } catch (err) {
+    console.warn(`[trader] ${pick.symbol} 止盈腾位卖出失败: ${err.message}`);
+    return null;
   }
 }
 
@@ -84,6 +125,79 @@ export function withTradeLock(fn) {
     () => {}
   );
   return run;
+}
+
+// 即时腾位策略可通过卖出缓解的拒绝原因(比分配器多 below_min_amount:确定性基础仓位
+// ~10% 时 spend 被现金压到最小订单额之下,几乎只意味着现金耗尽,腾位正好解决;
+// 极小组合腾位后仍不足 $50 的边界由"每信号只重试一次"自然终止)
+const IMMEDIATE_ROTATION_REASONS = new Set(['max_positions', 'cash_reserve', 'gross_exposure', 'below_min_amount']);
+
+/**
+ * 入场路径类策略的确定性买入(024):不经候选池/LLM 决策/风控官/决策回放,
+ * 仓位 = 确定性公式(immediate_* 用 shadowBaseFraction × 档位/置信/来源缩放链,
+ * equal_weight 用固定比例),bracket 按当前策略(applyBracket)。
+ * 休市挂开盘队列;immediate_rotation 在容量/现金类拒绝时止盈腾位一次后重试一次。
+ * 返回与旧即时路径同约定:trade / { queued } / null(runCycle 零改动消费)。
+ */
+async function executeImmediateStrategyBuy({ article, analysisRow, profile, price }) {
+  const symbol = analysisRow.symbol;
+  const strategy = getTradingStrategy();
+  let fraction;
+  if (strategy === 'equal_weight') {
+    fraction = config.shadowEqualWeightFraction;
+  } else {
+    const srcScore =
+      article.source_score === null || article.source_score === undefined
+        ? null
+        : Number(article.source_score);
+    fraction = scaleFraction({
+      fraction: config.shadowBaseFraction,
+      tier: analysisRow.tier,
+      confidence: analysisRow.confidence,
+      sourceScore: srcScore,
+    }).sized;
+  }
+  const decision = {
+    action: 'buy',
+    fraction,
+    reason: `策略「${strategy}」:信号即时成交(确定性仓位 ${fraction},不经 LLM 决策)`,
+  };
+  await applyBracket(decision, symbol);
+  console.log(`[trader] ${symbol} ${decision.reason}`);
+
+  // 休市:与旧即时路径一致挂开盘队列(按单持久化 bracket,入队时刻的策略生效)
+  if (getMarketSession() === 'closed') {
+    const pending = await enqueuePendingOrder({
+      symbol,
+      side: 'buy',
+      fraction: decision.fraction,
+      ref_price: round4(price),
+      stop_loss_percent: decision.stopLossPercent,
+      take_profit_percent: decision.takeProfitPercent,
+      reason: decision.reason,
+      news_id: article.id,
+      analysis_id: analysisRow.id,
+    });
+    if (pending) return { queued: true, pending };
+  }
+
+  const meta = { run_id: currentRunId() };
+  let result = await executeBuyStructured({ symbol, price, decision, analysisRow, article, meta });
+  // 即时腾位:容量/现金类拒绝 → 全仓止盈最接近止盈价的盈利持仓,重试一次
+  if (
+    strategy === 'immediate_rotation' &&
+    !result?.trade &&
+    IMMEDIATE_ROTATION_REASONS.has(result?.reason)
+  ) {
+    const sellTrade = await rotateProfitablePosition(symbol, result.reason);
+    if (sellTrade) {
+      result = await executeBuyStructured({ symbol, price, decision, analysisRow, article, meta });
+    }
+  }
+  if (result?.trade) return result.trade;
+  console.log(`[trader] ${symbol} 即时策略买入跳过: ${result?.reject || result?.reason || '未知'}`);
+  recordReject(result?.reason || 'immediate_strategy_reject');
+  return null;
 }
 
 /** 风控官的组合级上下文:持仓/行业权重 + 最近卖出盈亏(在交易锁外构建) */
@@ -226,9 +340,15 @@ export async function handleSignal(article, analysisRow) {
       return null;
     }
 
-    // 影子组合(017,fire-and-forget):信号即时成交/等权买入两套独立变体在此记账,
+    // 影子组合(017,fire-and-forget):信号即时成交/等权买入等独立变体在此记账,
     // 与实盘走不走候选池无关——它们消融的正是候选池+LLM 决策链本身
     onBullishSignal({ article, analysisRow, quote, profile, price });
+
+    // 入场路径类策略(024,管理页切换):信号到达即确定性建仓,绕过同票刷新/候选池/
+    // LLM 决策/风控官——但 settleBuyLocked 的全部锁内硬风控照常生效(安全线永不绕过)
+    if (isEntryPathStrategy(getTradingStrategy())) {
+      return executeImmediateStrategyBuy({ article, analysisRow, profile, price });
+    }
 
     // 同票新利好刷新(020):已持有该票时不再入池加仓,确定性刷新持有时钟并上抬止盈线。
     // 上游已保证一/二档(TRADE_TIER_THRESHOLD)、置信度 ≥0.5、事件级去重(同一事件的
@@ -611,12 +731,19 @@ async function refreshHeldPositionOnBullish({ symbol, analysisRow }) {
   }
   if (!position) return false;
 
-  const newTakeProfit = bumpTakeProfit({
-    takeProfit: position.take_profit,
-    avgCost: position.avg_cost,
-    stepPercent: config.takeProfitStepPercent,
-    defaultTakeProfitPercent: config.takeProfitPercent,
-  });
+  // trailing_only 策略(024)下无止盈的持仓不重建止盈线(bumpTakeProfit 对 null 会
+  // 从成本价初始化一条,破坏"只靠棘轮离场"的不变量);切换前带止盈的存量持仓照常上抬
+  const skipBump =
+    getTradingStrategy() === 'trailing_only' &&
+    (position.take_profit === null || position.take_profit === undefined);
+  const newTakeProfit = skipBump
+    ? null
+    : bumpTakeProfit({
+        takeProfit: position.take_profit,
+        avgCost: position.avg_cost,
+        stepPercent: config.takeProfitStepPercent,
+        defaultTakeProfitPercent: config.takeProfitPercent,
+      });
   const patch = { updated_at: new Date().toISOString() };
   if (!holdColumnUnavailable) patch.hold_refreshed_at = new Date().toISOString();
   if (newTakeProfit !== null && newTakeProfit !== position.take_profit) {

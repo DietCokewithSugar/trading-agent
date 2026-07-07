@@ -6,7 +6,7 @@ import { queueStatus } from './openQueue.js';
 import { withTradeLock } from './trader.js';
 import { clearCaches } from './fmp.js';
 import { clearQuotesPushState } from './quotesPush.js';
-import { getValuation } from './portfolio.js';
+import { getPrimaryValuation } from './primaryLedger.js';
 import { broadcast } from './bus.js';
 import { isHalted, setHalted } from './halt.js';
 import { resetMetrics } from './metrics.js';
@@ -192,7 +192,7 @@ export async function resetAllData() {
   const resetAt = new Date().toISOString();
   broadcast('reset', { at: resetAt });
   try {
-    broadcast('portfolio', await getValuation());
+    broadcast('portfolio', await getPrimaryValuation());
   } catch (err) {
     console.warn(`[admin] 重置后推送组合估值失败: ${err.message}`);
   }
