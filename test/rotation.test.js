@@ -43,3 +43,17 @@ test('无合格持仓返回 null', () => {
 test('零盈亏(pnl=0)不算盈利,不参与腾位', () => {
   assert.equal(pickRotationSell([pos('FLAT', 100, 102, 0)]), null);
 });
+
+test('pickTopProfit:浮盈比例最高的盈利持仓(trailing 系腾位,025)', async () => {
+  const { pickTopProfit } = await import('../server/services/rotation.js');
+  const positions = [
+    { symbol: 'A', unrealized_pnl: 50, current_price: 110, avg_cost: 100 }, // +10%
+    { symbol: 'B', unrealized_pnl: 30, current_price: 60, avg_cost: 50 }, // +20% ← 最高
+    { symbol: 'C', unrealized_pnl: -5, current_price: 90, avg_cost: 100 }, // 亏损跳过
+    { symbol: 'D', unrealized_pnl: 99, current_price: 130, avg_cost: 100 }, // +30% 但被排除
+  ];
+  const { default: assert } = await import('node:assert/strict');
+  assert.equal(pickTopProfit(positions, { excludeSymbol: 'D' })?.symbol, 'B');
+  assert.equal(pickTopProfit([{ symbol: 'X', unrealized_pnl: -1, current_price: 9, avg_cost: 10 }]), null);
+  assert.equal(pickTopProfit(null), null);
+});

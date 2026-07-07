@@ -71,6 +71,13 @@ export const adminApi = {
     adminRequest('/strategy', { method: 'POST', token, body: { strategy } }),
   primaryLedger: (token, enabled) =>
     adminRequest('/primary-ledger', { method: 'POST', token, body: { enabled } }),
+  brokerAccounts: (token) => adminRequest('/broker-accounts', { token }),
+  addBrokerAccount: (token, body) =>
+    adminRequest('/broker-accounts', { method: 'POST', token, body }),
+  updateBrokerAccount: (token, id, body) =>
+    adminRequest(`/broker-accounts/${id}`, { method: 'POST', token, body }),
+  deleteBrokerAccount: (token, id) =>
+    adminRequest(`/broker-accounts/${id}`, { method: 'DELETE', token }),
   runCycle: (token) => adminRequest('/run-cycle', { method: 'POST', token }),
   reset: (token) =>
     adminRequest('/reset', { method: 'POST', token, body: { confirm: 'RESET' } }),
@@ -186,16 +193,26 @@ export const STRATEGY_DESCRIPTIONS = {
 export const SHADOW_VARIANT_LABELS = {
   actual: '实盘组合',
   no_risk_officer: '无风控官',
+  no_risk_officer_rotation: '无风控官+腾位',
   no_macro_filter: '无宏观过滤',
+  no_macro_filter_rotation: '无宏观过滤+腾位',
   wide_bracket: '宽敞口离场',
+  wide_bracket_rotation: '宽敞口+腾位',
   trailing_only: '仅移动止损',
+  trailing_only_rotation: '移动止损+腾位',
   vol_bracket: '波动敞口',
+  vol_bracket_rotation: '波动敞口+腾位',
   immediate_trade: '信号即时成交',
   immediate_rotation: '即时腾位',
   equal_weight: '信号等权买入',
+  equal_weight_rotation: '等权+腾位',
   spy_benchmark: 'SPY 买入持有',
   cash: '纯现金',
 };
+
+// 腾位孪生(025)的统一说明:与基础变体逐项相同,唯一差异是现金/容量不足时
+// 先全仓止盈腾位选仓(trailing 系按浮盈比例最高,其余按最接近止盈价)再重试买入
+const ROTATION_TWIN_NOTE = '与基础变体完全相同,仅在现金不足时先卖出腾位选仓再重试买入——与基础变体对比隔离止盈腾位机制的净贡献';
 
 export const SHADOW_VARIANT_DESCRIPTIONS = {
   actual: '当前真实模拟组合(全部防线开启)',
@@ -209,6 +226,12 @@ export const SHADOW_VARIANT_DESCRIPTIONS = {
   equal_weight: '独立组合:可交易信号一律按固定比例等权买入(休市信号顺延),检验 LLM 仓位是否有效',
   spy_benchmark: '启用时一次性全仓买入 SPY 并持有',
   cash: '不做任何交易的现金基准',
+  no_risk_officer_rotation: `「无风控官」的腾位孪生:${ROTATION_TWIN_NOTE}`,
+  no_macro_filter_rotation: `「无宏观过滤」的腾位孪生:${ROTATION_TWIN_NOTE}`,
+  wide_bracket_rotation: `「宽敞口离场」的腾位孪生:${ROTATION_TWIN_NOTE}`,
+  trailing_only_rotation: `「仅移动止损」的腾位孪生(无止盈价,腾位按浮盈比例最高选仓):${ROTATION_TWIN_NOTE}`,
+  vol_bracket_rotation: `「波动敞口」的腾位孪生:${ROTATION_TWIN_NOTE}`,
+  equal_weight_rotation: `「信号等权买入」的腾位孪生:${ROTATION_TWIN_NOTE}`,
 };
 
 export const MACRO_EVENT_TYPE_LABELS = {

@@ -12,7 +12,7 @@
 import { config } from '../config.js';
 import { supabase } from '../db.js';
 import { loadSignalRows, wilsonInterval } from './signalStats.js';
-import { getShadowOverview } from './shadowPortfolio.js';
+import { getShadowOverview, ROTATION_TWINS } from './shadowPortfolio.js';
 import { isVolBracketEnabled } from './strategy.js';
 
 function round(n, digits = 2) {
@@ -379,6 +379,16 @@ export function evaluateShadowRules({ variants, actualReturnPct, now = Date.now(
       ok: '即时成交+止盈腾位显著跑输实盘,候选池+LLM 决策链正在创造净收益,维持现状。',
     },
   };
+  // 腾位孪生(025):其余变体的「+止盈腾位」对照组,统一生成文案——
+  // 判定腾位机制价值的正确对照是「孪生 vs 基础变体」,跑赢实盘只是入口信号
+  for (const [baseVariant, twin] of Object.entries(ROTATION_TWINS)) {
+    if (ablation[twin]) continue; // immediate_rotation 已有专门文案
+    ablation[twin] = {
+      title: `消融对照:${twin}(= ${baseVariant} + 止盈腾位)`,
+      adjust: `${twin} 显著跑赢实盘——先与基础变体 ${baseVariant} 同窗对比:若也跑赢基础变体,说明止盈腾位机制在该策略下于满仓期贡献超额收益。`,
+      ok: `${twin} 显著跑输实盘——与基础变体 ${baseVariant} 同窗对比确认腾位是否为拖累项(过早止盈截断趋势),维持现状。`,
+    };
+  }
   for (const [variant, copy] of Object.entries(ablation)) {
     const v = variants.find((x) => x.variant === variant);
     const title = copy.title;

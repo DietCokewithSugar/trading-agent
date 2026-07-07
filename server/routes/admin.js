@@ -12,6 +12,13 @@ import { isTradingHalted, setTradingHalt } from '../services/tradingHalt.js';
 import { getTradingStrategy, setTradingStrategy, STRATEGIES } from '../services/strategy.js';
 import { isBrokerLedgerPrimary, setBrokerLedgerPrimary } from '../services/primaryLedger.js';
 import { isBrokerEnabled } from '../services/alpacaBroker.js';
+import {
+  listAccountsMasked,
+  addBrokerAccount,
+  updateBrokerAccount,
+  deleteBrokerAccount,
+  validPurposes,
+} from '../services/brokerAccounts.js';
 import { getRiskControlState } from '../services/riskControls.js';
 import { listRecentDecisions } from '../services/decisionLog.js';
 import { getParameterAdvice } from '../services/parameterAdvisor.js';
@@ -113,6 +120,45 @@ router.post(
       `[admin] 展示主账本 → ${result.enabled ? '券商模拟账户' : '内部账本'}${result.persisted ? '' : '(未持久化)'}`
     );
     res.json(result);
+  })
+);
+
+/**
+ * 多券商模拟账户管理(025):列表(脱敏)/新增(先校验凭据)/更新用途/删除。
+ * secret 永不回传;表缺失(未执行 025 迁移)统一 409
+ */
+router.get(
+  '/broker-accounts',
+  asyncHandler(async (req, res) => {
+    res.json({
+      accounts: listAccountsMasked(),
+      env_account: isBrokerEnabled(),
+      purposes: validPurposes(),
+    });
+  })
+);
+
+router.post(
+  '/broker-accounts',
+  asyncHandler(async (req, res) => {
+    const { label, keyId, secretKey, purpose } = req.body || {};
+    const result = await addBrokerAccount({ label, keyId, secretKey, purpose });
+    res.json(result);
+  })
+);
+
+router.post(
+  '/broker-accounts/:id',
+  asyncHandler(async (req, res) => {
+    const { label, purpose, enabled } = req.body || {};
+    res.json(await updateBrokerAccount(Number(req.params.id), { label, purpose, enabled }));
+  })
+);
+
+router.delete(
+  '/broker-accounts/:id',
+  asyncHandler(async (req, res) => {
+    res.json(await deleteBrokerAccount(Number(req.params.id)));
   })
 );
 

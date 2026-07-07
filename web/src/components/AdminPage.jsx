@@ -26,7 +26,15 @@ import {
   RUN_TRIGGER_LABELS,
   STRATEGY_LABELS,
   STRATEGY_DESCRIPTIONS,
+  SHADOW_VARIANT_LABELS,
 } from '../api.js';
+
+// 券商账户用途 → 中文标签(mirror_actual/unassigned 之外都是影子变体名)
+function purposeLabel(purpose) {
+  if (purpose === 'mirror_actual') return '实盘镜像';
+  if (purpose === 'unassigned') return '闲置';
+  return `${SHADOW_VARIANT_LABELS[purpose] || purpose}(变体镜像)`;
+}
 import { COLOR_DOWN } from '../theme.js';
 
 /**
@@ -84,6 +92,9 @@ export default function AdminPage() {
   const [haltBusy, setHaltBusy] = useState(false);
   const [strategyBusy, setStrategyBusy] = useState(false);
   const [ledgerBusy, setLedgerBusy] = useState(false);
+  const [brokerAccounts, setBrokerAccounts] = useState(null);
+  const [acctForm, setAcctForm] = useState({ label: '', keyId: '', secretKey: '', purpose: 'unassigned' });
+  const [acctBusy, setAcctBusy] = useState(false);
   const [confirmText, setConfirmText] = useState('');
   const [message, setMessage] = useState(null);
 
@@ -130,6 +141,66 @@ export default function AdminPage() {
     adminApi.advisor(token).then(setAdvisor).catch(() => {});
     return undefined;
   }, [authed, token]);
+
+  // 券商模拟账户列表(025):登录时拉一次,CRUD 后手动刷新;未迁移(409)时保持 null 隐藏卡片内容
+  const loadBrokerAccounts = useCallback(() => {
+    adminApi
+      .brokerAccounts(token)
+      .then(setBrokerAccounts)
+      .catch((err) => setBrokerAccounts({ error: err.message }));
+  }, [token]);
+  useEffect(() => {
+    if (!authed) return undefined;
+    loadBrokerAccounts();
+    return undefined;
+  }, [authed, loadBrokerAccounts]);
+
+  const submitBrokerAccount = async () => {
+    if (!acctForm.label || !acctForm.keyId || !acctForm.secretKey) {
+      setError('账户名 / Key ID / Secret 均为必填');
+      return;
+    }
+    setAcctBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      await adminApi.addBrokerAccount(token, acctForm);
+      setAcctForm({ label: '', keyId: '', secretKey: '', purpose: 'unassigned' });
+      setMessage('券商模拟账户已添加(凭据已通过校验)');
+      loadBrokerAccounts();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setAcctBusy(false);
+    }
+  };
+
+  const patchBrokerAccount = async (id, patch) => {
+    setAcctBusy(true);
+    setError(null);
+    try {
+      await adminApi.updateBrokerAccount(token, id, patch);
+      loadBrokerAccounts();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setAcctBusy(false);
+    }
+  };
+
+  const removeBrokerAccount = async (id) => {
+    setAcctBusy(true);
+    setError(null);
+    try {
+      await adminApi.deleteBrokerAccount(token, id);
+      setMessage(`账户 #${id} 已删除(历史对照单保留)`);
+      loadBrokerAccounts();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setAcctBusy(false);
+    }
+  };
 
   const login = async ({ token: input }) => {
     if (!input?.trim()) return;
@@ -571,6 +642,113 @@ export default function AdminPage() {
                   <Alert type="info" showIcon message="主视图数据源:内部模拟账本(默认)" style={{ marginBottom: 0 }} />
                 )}
               </Space>
+            </Card>
+
+            <Card title="券商模拟账户管理">
+              <Typography.Paragraph type="secondary" style={{ fontSize: 12.5 }}>
+                可添加多个券商模拟账户(添加时先校验凭据),每个账户可配置用途:
+                「实盘镜像」= 实盘每笔成交同步下真实对照单;绑定某个消融变体 =
+                该变体的影子买卖以 marketable 限价单在该账户真实盘口(NBBO)撮合。
+                Secret 仅保存在服务端,永不回传;删除账户保留历史对照单。
+              </Typography.Paragraph>
+              {brokerAccounts?.error ? (
+                <Alert type="warning" showIcon message={brokerAccounts.error} />
+              ) : !brokerAccounts ? (
+                <Typography.Text type="secondary">加载中…</Typography.Text>
+              ) : (
+                <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                  {brokerAccounts.env_account && (
+                    <Alert
+                      type="info"
+                      showIcon
+                      message="默认账户(环境变量配置):实盘镜像 + 展示主账本数据源"
+                      style={{ marginBottom: 0 }}
+                    />
+                  )}
+                  <Table
+                    rowKey="id"
+                    size="small"
+                    pagination={false}
+                    dataSource={brokerAccounts.accounts || []}
+                    locale={{ emptyText: '尚未添加账户' }}
+                    columns={[
+                      { title: '名称', dataIndex: 'label', width: 140, ellipsis: true },
+                      { title: 'Key', dataIndex: 'key_id_masked', width: 110, render: (v) => <span className="mono">{v}</span> },
+                      {
+                        title: '用途',
+                        dataIndex: 'purpose',
+                        width: 220,
+                        render: (v, row) => (
+                          <Select
+                            size="small"
+                            style={{ width: '100%' }}
+                            value={v}
+                            disabled={acctBusy}
+                            onChange={(purpose) => patchBrokerAccount(row.id, { purpose })}
+                            options={(brokerAccounts.purposes || []).map((p) => ({ value: p, label: purposeLabel(p) }))}
+                          />
+                        ),
+                      },
+                      {
+                        title: '启用',
+                        dataIndex: 'enabled',
+                        width: 80,
+                        render: (v, row) => (
+                          <Switch
+                            size="small"
+                            checked={v}
+                            disabled={acctBusy}
+                            onChange={(enabled) => patchBrokerAccount(row.id, { enabled })}
+                          />
+                        ),
+                      },
+                      {
+                        title: '',
+                        dataIndex: 'id',
+                        width: 70,
+                        render: (id) => (
+                          <Button size="small" danger disabled={acctBusy} onClick={() => removeBrokerAccount(id)}>
+                            删除
+                          </Button>
+                        ),
+                      },
+                    ]}
+                  />
+                  <Space wrap size={8}>
+                    <Input
+                      size="small"
+                      placeholder="账户名称"
+                      style={{ width: 130 }}
+                      value={acctForm.label}
+                      onChange={(e) => setAcctForm((f) => ({ ...f, label: e.target.value }))}
+                    />
+                    <Input
+                      size="small"
+                      placeholder="API Key ID"
+                      style={{ width: 180 }}
+                      value={acctForm.keyId}
+                      onChange={(e) => setAcctForm((f) => ({ ...f, keyId: e.target.value }))}
+                    />
+                    <Input.Password
+                      size="small"
+                      placeholder="API Secret"
+                      style={{ width: 200 }}
+                      value={acctForm.secretKey}
+                      onChange={(e) => setAcctForm((f) => ({ ...f, secretKey: e.target.value }))}
+                    />
+                    <Select
+                      size="small"
+                      style={{ width: 200 }}
+                      value={acctForm.purpose}
+                      onChange={(purpose) => setAcctForm((f) => ({ ...f, purpose }))}
+                      options={(brokerAccounts.purposes || ['unassigned']).map((p) => ({ value: p, label: purposeLabel(p) }))}
+                    />
+                    <Button size="small" type="primary" loading={acctBusy} onClick={submitBrokerAccount}>
+                      添加账户
+                    </Button>
+                  </Space>
+                </Space>
+              )}
             </Card>
 
             <Card title="危险区:初始化所有数据">

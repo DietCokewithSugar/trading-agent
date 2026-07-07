@@ -131,6 +131,7 @@ export function toRotationPositions(positions, priceBySymbol) {
       symbol: p.symbol,
       current_price: price,
       take_profit: p.take_profit,
+      avg_cost: Number(p.avg_cost),
       unrealized_pnl: round2((price - Number(p.avg_cost)) * Number(p.quantity)),
     });
   }

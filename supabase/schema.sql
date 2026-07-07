@@ -725,3 +725,20 @@ alter table portfolio_state add column if not exists vol_bracket_enabled boolean
 -- 主账户交易策略 + 展示主账本切换(024):策略选择器取代 vol_bracket_enabled 布尔开关
 alter table portfolio_state add column if not exists trading_strategy text not null default 'default';
 alter table portfolio_state add column if not exists broker_ledger_primary boolean not null default false;
+
+-- 多券商模拟账户(025):RLS 开启且不建公开读策略(存 API secret);
+-- 对照单/快照带 account_id(null=env 默认账户)与 source_variant(null=实盘)
+create table if not exists broker_accounts (
+  id bigint generated always as identity primary key,
+  label text not null,
+  key_id text not null,
+  secret_key text not null,
+  purpose text not null default 'unassigned',
+  enabled boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+alter table broker_accounts enable row level security;
+alter table broker_mirror_orders add column if not exists account_id bigint references broker_accounts(id) on delete set null;
+alter table broker_mirror_orders add column if not exists source_variant text;
+alter table broker_mirror_snapshots add column if not exists account_id bigint references broker_accounts(id) on delete set null;
