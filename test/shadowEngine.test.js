@@ -9,6 +9,7 @@ import {
   pickTopBlocked,
   valuePositions,
   prunePendingSignals,
+  toRotationPositions,
 } from '../server/services/shadowEngine.js';
 
 const caps = { maxBuyCashFraction: 0.2, maxPositionFraction: 0.25, minOrderAmount: 50 };
@@ -78,6 +79,28 @@ test('applyBuy: takeProfitPercent=null 不设止盈(trailing_only 变体,023)', 
   const added = applyBuy(fresh, { quantity: 10, amount: 1200, stopLossPercent: 2, takeProfitPercent: null });
   assert.equal(added.take_profit, null);
   assert.equal(added.stop_loss, Math.round(110 * 0.98 * 10000) / 10000, '止损按新均价重设');
+});
+
+test('toRotationPositions: 影子持仓补齐腾位选仓字段,无报价的持仓丢弃(024)', () => {
+  const prices = new Map([
+    ['AAPL', 210],
+    ['TSLA', 90],
+  ]);
+  const rows = toRotationPositions(
+    [
+      { symbol: 'AAPL', quantity: 10, avg_cost: 200, take_profit: 212 },
+      { symbol: 'TSLA', quantity: 5, avg_cost: 100, take_profit: 104 },
+      { symbol: 'NOPX', quantity: 3, avg_cost: 50, take_profit: 52 }, // 无报价 → 丢弃
+    ],
+    prices
+  );
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows[0], { symbol: 'AAPL', current_price: 210, take_profit: 212, unrealized_pnl: 100 });
+  assert.equal(rows[1].unrealized_pnl, -50, '浮亏照算(由 pickRotationSell 过滤)');
+  // take_profit null 原样透传(trailing 类持仓由 pickRotationSell 自然跳过)
+  const nullTp = toRotationPositions([{ symbol: 'X', quantity: 1, avg_cost: 10, take_profit: null }], new Map([['X', 12]]));
+  assert.equal(nullTp[0].take_profit, null);
+  assert.equal(toRotationPositions(null, prices).length, 0);
 });
 
 test('applySell: 部分卖出与盈亏', () => {

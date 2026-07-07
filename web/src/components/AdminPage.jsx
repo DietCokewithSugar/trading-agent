@@ -8,6 +8,7 @@ import {
   Form,
   Input,
   Row,
+  Select,
   Space,
   Statistic,
   Switch,
@@ -23,6 +24,8 @@ import {
   LLM_PURPOSE_LABELS,
   REJECT_LABELS,
   RUN_TRIGGER_LABELS,
+  STRATEGY_LABELS,
+  STRATEGY_DESCRIPTIONS,
 } from '../api.js';
 import { COLOR_DOWN } from '../theme.js';
 
@@ -79,7 +82,8 @@ export default function AdminPage() {
   const [advisor, setAdvisor] = useState(null);
   const [busy, setBusy] = useState(false);
   const [haltBusy, setHaltBusy] = useState(false);
-  const [volBracketBusy, setVolBracketBusy] = useState(false);
+  const [strategyBusy, setStrategyBusy] = useState(false);
+  const [ledgerBusy, setLedgerBusy] = useState(false);
   const [confirmText, setConfirmText] = useState('');
   const [message, setMessage] = useState(null);
 
@@ -175,20 +179,35 @@ export default function AdminPage() {
     }
   };
 
-  const toggleVolBracket = async (enabled) => {
-    setVolBracketBusy(true);
+  const changeStrategy = async (strategy) => {
+    setStrategyBusy(true);
     setError(null);
     setMessage(null);
     try {
-      const result = await adminApi.volBracket(token, enabled);
+      const result = await adminApi.setStrategy(token, strategy);
+      setMessage(`主账户交易策略已切换为「${STRATEGY_LABELS[result.strategy] || result.strategy}」`);
+      adminApi.status(token).then(setStatus).catch(() => {});
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setStrategyBusy(false);
+    }
+  };
+
+  const togglePrimaryLedger = async (enabled) => {
+    setLedgerBusy(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await adminApi.primaryLedger(token, enabled);
       setMessage(
-        `波动自适应敞口已${result.enabled ? '开启:买入止损止盈按 20 日波动缩放' : '关闭:恢复固定 ±2% 敞口'}`
+        `展示主账本已切换为${result.enabled ? '券商模拟账户:仪表盘主视图展示真实撮合数据' : '内部模拟账本'}`
       );
       adminApi.status(token).then(setStatus).catch(() => {});
     } catch (err) {
       setError(err.message);
     } finally {
-      setVolBracketBusy(false);
+      setLedgerBusy(false);
     }
   };
 
@@ -489,30 +508,67 @@ export default function AdminPage() {
               )}
             </Card>
 
-            <Card title="波动自适应敞口">
+            <Card title="主账户交易策略">
               <Typography.Paragraph type="secondary" style={{ fontSize: 12.5 }}>
-                开启后每笔买入的止损/止盈敞口按该股 20 日已实现波动缩放(1.5%–4% 区间,
-                波动取数失败的单笔自动回退固定 ±2%);关闭(默认)沿用固定 ±2%。
-                状态跨重启保留。关闭期间「波动敞口」影子变体持续积累对照证据,
-                跑赢实盘时参数顾问会在下方建议开启。
+                策略预设与「消融实验」中的影子变体一一对应:先看实验里哪个变体持续跑赢,
+                再在这里切换实盘策略。出场类只改止损/止盈/时限;入场类(即时成交/腾位/等权)
+                绕过候选池、LLM 决策与风控官——锁内硬风控(暂停开关/亏损熔断/仓位帽/
+                行业集中度等)对所有策略始终生效。状态跨重启保留。
+              </Typography.Paragraph>
+              <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                <Select
+                  style={{ minWidth: 280 }}
+                  value={status?.tradingStrategy || 'default'}
+                  loading={strategyBusy}
+                  disabled={strategyBusy}
+                  onChange={changeStrategy}
+                  options={Object.entries(STRATEGY_LABELS).map(([value, label]) => ({ value, label }))}
+                />
+                <Alert
+                  type={
+                    !status?.tradingStrategy || status.tradingStrategy === 'default' ? 'info' : 'warning'
+                  }
+                  showIcon
+                  message={
+                    STRATEGY_DESCRIPTIONS[status?.tradingStrategy || 'default'] ||
+                    STRATEGY_DESCRIPTIONS.default
+                  }
+                  style={{ marginBottom: 0 }}
+                />
+              </Space>
+            </Card>
+
+            <Card title="展示主账本">
+              <Typography.Paragraph type="secondary" style={{ fontSize: 12.5 }}>
+                开启后仪表盘主视图(净值/持仓/净值曲线)切换为券商模拟账户的真实撮合数据
+                (盈亏基线为最早一条对照快照的净值);交易引擎、绩效统计与决策仍完全基于
+                内部模拟账本,券商取数失败时主视图自动回退内部账本。状态跨重启保留。
               </Typography.Paragraph>
               <Space align="center" size={16}>
                 <Switch
-                  checked={status?.volBracketEnabled === true}
-                  loading={volBracketBusy}
-                  onChange={toggleVolBracket}
-                  checkedChildren="已开启"
-                  unCheckedChildren="关闭"
+                  checked={status?.brokerLedgerPrimary === true}
+                  loading={ledgerBusy}
+                  disabled={!status?.brokerMirrorAvailable && status?.brokerLedgerPrimary !== true}
+                  onChange={togglePrimaryLedger}
+                  checkedChildren="券商模拟"
+                  unCheckedChildren="内部账本"
                 />
-                {status?.volBracketEnabled ? (
+                {!status?.brokerMirrorAvailable ? (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    message="券商模拟账户未配置(缺少 API key),无法设为主账本"
+                    style={{ marginBottom: 0 }}
+                  />
+                ) : status?.brokerLedgerPrimary ? (
                   <Alert
                     type="info"
                     showIcon
-                    message="波动自适应敞口已开启:买入 bracket = clamp(k × 20日波动, 1.5%, 4%)"
+                    message="主视图数据源:券商模拟账户(真实撮合价);内部账本降为对照"
                     style={{ marginBottom: 0 }}
                   />
                 ) : (
-                  <Alert type="info" showIcon message="固定 ±2% 敞口(波动自适应关闭)" style={{ marginBottom: 0 }} />
+                  <Alert type="info" showIcon message="主视图数据源:内部模拟账本(默认)" style={{ marginBottom: 0 }} />
                 )}
               </Space>
             </Card>

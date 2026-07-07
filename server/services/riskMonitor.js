@@ -7,6 +7,7 @@ import { broadcast } from './bus.js';
 import { isHalted } from './halt.js';
 import { holdAnchor, isHoldExpired } from './holding.js';
 import { computeTrailedStop } from './trailing.js';
+import { getTradingStrategy, strategyMaxHoldHours } from './strategy.js';
 
 let running = false;
 
@@ -24,7 +25,9 @@ let trailingUnavailable = false;
  */
 async function maybeTrailStop(pos, price) {
   const stop = Number(pos.stop_loss);
-  if (trailingUnavailable || !config.enableTrailingStop || !(stop > 0)) return stop;
+  // trailing_only 策略(024)下棘轮强制生效(该策略的定义就是棘轮),否则看全局开关
+  const trailingOn = config.enableTrailingStop || getTradingStrategy() === 'trailing_only';
+  if (trailingUnavailable || !trailingOn || !(stop > 0)) return stop;
 
   const trailed = computeTrailedStop({
     price,
@@ -75,13 +78,15 @@ export async function checkStops() {
       const takeProfit =
         pos.take_profit !== null && pos.take_profit !== undefined ? Number(pos.take_profit) : null;
 
-      // 持有时限(020):锚点缺失说明迁移未执行,警告一次后自动停用(绝不误平仓)
+      // 持有时限(020;024 起按策略取值,wide_bracket 96h):锚点缺失说明迁移未执行,
+      // 警告一次后自动停用(绝不误平仓)
+      const maxHoldHours = strategyMaxHoldHours(getTradingStrategy(), config);
       const anchor = holdAnchor(pos);
-      if (config.maxHoldHours > 0 && anchor === null && !holdLimitUnavailable) {
+      if (maxHoldHours > 0 && anchor === null && !holdLimitUnavailable) {
         holdLimitUnavailable = true;
         console.warn('[risk] positions 缺少 opened_at/hold_refreshed_at 列,持有时限停用(请执行 020 迁移)');
       }
-      const expired = isHoldExpired(pos, { maxHoldHours: config.maxHoldHours });
+      const expired = isHoldExpired(pos, { maxHoldHours });
       if (!expired && stopLoss === null && takeProfit === null) continue;
 
       const quote = await getQuote(pos.symbol, 25_000);
@@ -93,7 +98,7 @@ export async function checkStops() {
         const cost = Number(pos.avg_cost);
         const pnlPercent = (((price - cost) / cost) * 100).toFixed(1);
         const heldHours = Math.round((Date.now() - anchor) / 3600_000);
-        const reason = `持有超时强制平仓:已持有约 ${heldHours} 小时(上限 ${config.maxHoldHours} 小时,${pnlPercent}%)`;
+        const reason = `持有超时强制平仓:已持有约 ${heldHours} 小时(上限 ${maxHoldHours} 小时,${pnlPercent}%)`;
         console.log(`[risk] ${pos.symbol} ${reason}`);
         const trade = await executeSellOrder({
           symbol: pos.symbol,

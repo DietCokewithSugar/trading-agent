@@ -17,6 +17,7 @@ import {
   getOrderByClientId,
   getAccount,
   getPosition,
+  getPositions,
   cancelOpenOrders,
   closeAllPositions,
 } from './alpacaBroker.js';
@@ -92,12 +93,162 @@ export function summarizeMirror(orders) {
   };
 }
 
+/**
+ * 纯函数:券商持仓行 → 内部估值持仓形状(展示主账本用,024)。
+ * 字段名映射为 getValuation 口径;止损/止盈/盘外字段为 null(券商侧无此概念);
+ * 数量/价格非法的行丢弃。载荷不含供应商字段名。
+ */
+export function mapBrokerPositions(rawPositions) {
+  const out = [];
+  for (const p of rawPositions || []) {
+    const quantity = Number(p?.qty);
+    const avgCost = Number(p?.avg_entry_price);
+    const price = Number(p?.current_price);
+    if (!Number.isFinite(quantity) || quantity <= 0 || !Number.isFinite(price) || price <= 0) continue;
+    const plpc = Number(p.unrealized_plpc);
+    out.push({
+      symbol: p.symbol,
+      quantity,
+      avg_cost: Number.isFinite(avgCost) ? avgCost : null,
+      current_price: price,
+      market_value: Number.isFinite(Number(p.market_value)) ? Number(p.market_value) : round2(quantity * price),
+      unrealized_pnl: Number.isFinite(Number(p.unrealized_pl)) ? Number(p.unrealized_pl) : null,
+      unrealized_pnl_percent: Number.isFinite(plpc) ? Math.round(plpc * 100 * 100) / 100 : null,
+      stop_loss: null,
+      take_profit: null,
+      change_percent: null,
+      session: null,
+      extended_price: null,
+      extended_change_percent: null,
+    });
+  }
+  return out;
+}
+
+/**
+ * 纯函数:券商账户 + 持仓 → getValuation 同形状载荷(前端零改动直接渲染)。
+ * 盈亏基线 = 最早一条对照快照的净值(baseline);无基线时盈亏为 null。
+ * 带 ledger:'broker' 标记供前端展示「券商模拟账本」标签。
+ */
+export function buildBrokerValuation({ account, positions, baseline = null, session = null } = {}) {
+  const equity = Number(account?.equity);
+  const cash = Number(account?.cash);
+  const base = Number(baseline);
+  const hasBase = Number.isFinite(base) && base > 0;
+  return {
+    ledger: 'broker',
+    cash: Number.isFinite(cash) ? cash : null,
+    initial_capital: hasBase ? base : null,
+    positions_value: Number.isFinite(equity) && Number.isFinite(cash) ? round2(equity - cash) : null,
+    total_value: Number.isFinite(equity) ? equity : null,
+    pnl: hasBase && Number.isFinite(equity) ? round2(equity - base) : null,
+    pnl_percent: hasBase && Number.isFinite(equity) ? Math.round(((equity - base) / base) * 10000) / 100 : null,
+    market_session: session,
+    positions: mapBrokerPositions(positions),
+    missing_quotes: [],
+  };
+}
+
 // ── 编排(fail-open)──
 
 let tableMissing = false;
 let polling = false;
 let lastSnapshotAt = 0;
 const SNAPSHOT_INTERVAL_MS = 10 * 60_000;
+
+// 展示主账本(024):账户+持仓短 TTL 缓存(报价推送循环每几秒一轮,护住券商限频);
+// 盈亏基线 = 最早一条对照快照净值,取一次后常驻(重置时清除)
+const VALUATION_CACHE_MS = 15_000;
+let valuationCache = { at: 0, value: null };
+let equityBaseline = undefined; // undefined=未取过, null=无快照
+
+async function loadEquityBaseline() {
+  if (equityBaseline !== undefined) return equityBaseline;
+  try {
+    const { data, error } = await supabase()
+      .from('broker_mirror_snapshots')
+      .select('equity')
+      .order('created_at', { ascending: true })
+      .limit(1);
+    if (error) throw new Error(error.message);
+    equityBaseline = data?.length ? Number(data[0].equity) : null;
+  } catch {
+    equityBaseline = null;
+  }
+  return equityBaseline;
+}
+
+/**
+ * 券商模拟账户实时估值(展示主账本,024):账户+全部持仓映射为 getValuation 形状。
+ * 15s TTL 缓存;取数失败向上抛,由 primaryLedger 兜底回退内部账本(fail-open)。
+ */
+export async function getBrokerValuation() {
+  if (!isBrokerEnabled()) throw new Error('券商模拟账户未配置');
+  if (valuationCache.value && Date.now() - valuationCache.at < VALUATION_CACHE_MS) {
+    return valuationCache.value;
+  }
+  const [account, positions, baseline] = await Promise.all([
+    getAccount(),
+    getPositions(),
+    loadEquityBaseline(),
+  ]);
+  const value = buildBrokerValuation({
+    account,
+    positions,
+    baseline,
+    session: getMarketSession(),
+  });
+  valuationCache = { at: Date.now(), value };
+  return value;
+}
+
+/** 最新一条券商净值快照映射为内部快照形状(展示主账本的 snapshot 广播/序列用);无则 null */
+export function mapBrokerSnapshotRow(row, baseline = null) {
+  if (!row) return null;
+  const equity = Number(row.equity);
+  const cash = Number(row.cash);
+  const base = Number(baseline);
+  const hasBase = Number.isFinite(base) && base > 0;
+  if (!Number.isFinite(equity)) return null;
+  return {
+    total_value: equity,
+    cash: Number.isFinite(cash) ? cash : null,
+    positions_value: Number.isFinite(cash) ? round2(equity - cash) : null,
+    pnl: hasBase ? round2(equity - base) : null,
+    pnl_percent: hasBase ? Math.round(((equity - base) / base) * 10000) / 100 : null,
+    created_at: row.created_at,
+  };
+}
+
+/** 券商净值时间序列(展示主账本的净值曲线):broker_mirror_snapshots 升序;失败抛错由调用方回退 */
+export async function getBrokerSnapshots(sinceIso) {
+  const baseline = await loadEquityBaseline();
+  let query = supabase()
+    .from('broker_mirror_snapshots')
+    .select('equity, cash, created_at')
+    .order('created_at', { ascending: true })
+    .limit(1000);
+  if (sinceIso) query = query.gte('created_at', sinceIso);
+  const { data, error } = await query;
+  if (error) throw new Error(error.message);
+  return (data || []).map((row) => mapBrokerSnapshotRow(row, baseline)).filter(Boolean);
+}
+
+/** 最新券商快照(snapshot SSE 广播用);无数据/失败返回 null */
+export async function getLatestBrokerSnapshot() {
+  try {
+    const baseline = await loadEquityBaseline();
+    const { data, error } = await supabase()
+      .from('broker_mirror_snapshots')
+      .select('equity, cash, created_at')
+      .order('created_at', { ascending: false })
+      .limit(1);
+    if (error) throw new Error(error.message);
+    return mapBrokerSnapshotRow(data?.[0], baseline);
+  } catch {
+    return null;
+  }
+}
 
 // 进程内串行队列:镜像请求逐个执行,避免一轮多笔成交并发打爆券商限频
 let chain = Promise.resolve();
@@ -358,8 +509,10 @@ export async function getBrokerMirrorOverview() {
   }
 }
 
-/** 管理重置:撤单+清仓(券商侧)并清空对照表,全部 best-effort */
+/** 管理重置:撤单+清仓(券商侧)并清空对照表,全部 best-effort;展示主账本缓存/基线一并清除 */
 export async function resetBrokerMirror() {
+  valuationCache = { at: 0, value: null };
+  equityBaseline = undefined;
   if (isBrokerEnabled()) {
     await cancelOpenOrders().catch((err) => console.warn(`[broker] 重置撤单失败: ${err.message}`));
     await closeAllPositions().catch((err) => console.warn(`[broker] 重置清仓失败: ${err.message}`));

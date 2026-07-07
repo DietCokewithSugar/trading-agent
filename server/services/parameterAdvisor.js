@@ -13,7 +13,7 @@ import { config } from '../config.js';
 import { supabase } from '../db.js';
 import { loadSignalRows, wilsonInterval } from './signalStats.js';
 import { getShadowOverview } from './shadowPortfolio.js';
-import { isVolBracketEnabled } from './volBracket.js';
+import { isVolBracketEnabled } from './strategy.js';
 
 function round(n, digits = 2) {
   const f = 10 ** digits;
@@ -369,8 +369,14 @@ export function evaluateShadowRules({ variants, actualReturnPct, now = Date.now(
     vol_bracket: {
       title: '消融对照:波动自适应敞口(vol_bracket)',
       adjust:
-        '波动自适应敞口镜像显著跑赢实盘——建议在管理员页开启「波动自适应敞口」运行时开关(无需改环境变量);开启后实盘与本变体趋同,该建议将自然消失。',
-      ok: '波动自适应敞口镜像显著跑输实盘,固定 ±2% 敞口更优,维持关闭。',
+        '波动自适应敞口镜像显著跑赢实盘——建议在管理员页「交易策略」选择器切换为 vol_bracket(无需改环境变量);切换后实盘与本变体趋同,该建议将自然消失。',
+      ok: '波动自适应敞口镜像显著跑输实盘,固定 ±2% 敞口更优,维持默认策略。',
+    },
+    immediate_rotation: {
+      title: '消融对照:即时成交+止盈腾位(immediate_rotation)',
+      adjust:
+        '即时成交+止盈腾位显著跑赢实盘——先与「信号即时成交」变体同窗对比:若也跑赢 immediate_trade,说明止盈腾位机制在满仓期贡献超额收益;确认后可在管理员页「交易策略」选择器切换为 immediate_rotation(绕过候选池/LLM 决策,锁内硬风控仍全部生效)。',
+      ok: '即时成交+止盈腾位显著跑输实盘,候选池+LLM 决策链正在创造净收益,维持现状。',
     },
   };
   for (const [variant, copy] of Object.entries(ablation)) {

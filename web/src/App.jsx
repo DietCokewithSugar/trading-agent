@@ -227,6 +227,11 @@ function MainApp() {
             <Typography.Link href="#/strategy" style={{ fontSize: 13 }}>
               投资策略说明
             </Typography.Link>
+            {portfolio?.ledger === 'broker' && (
+              <Tag bordered style={{ marginRight: 0 }} className="label-caps">
+                券商模拟账本
+              </Tag>
+            )}
             {session && (
               <Tag bordered style={{ marginRight: 0 }} className="label-caps">
                 {SESSION_LABELS[session]}

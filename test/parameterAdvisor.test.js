@@ -239,10 +239,26 @@ test('出场消融变体对照(023):三个变体各有方向性建议,vol_bracke
   const vol = evaluateShadowRules({ variants: mk('vol_bracket', 8), actualReturnPct: 3, now });
   const volAdj = vol.suggestions.find((s) => s.id === 'shadow_vol_bracket');
   assert.equal(volAdj?.level, 'adjust');
-  assert.ok(/管理员页/.test(volAdj.suggestion), 'vol_bracket 建议指向管理员页运行时开关');
+  assert.ok(/管理员页.*交易策略/.test(volAdj.suggestion), 'vol_bracket 建议指向管理员页策略选择器');
 
   const volLose = evaluateShadowRules({ variants: mk('vol_bracket', -2), actualReturnPct: 3, now });
   assert.equal(volLose.suggestions.find((s) => s.id === 'shadow_vol_bracket')?.level, 'ok');
+});
+
+test('即时腾位变体对照(024):跑赢建议先与 immediate_trade 对比,指向策略选择器', () => {
+  const now = Date.now();
+  const started = new Date(now - 30 * 86400_000).toISOString();
+  const mk = (winPct) => [
+    { variant: 'immediate_rotation', started_at: started, window_return_pct: winPct },
+  ];
+  const win = evaluateShadowRules({ variants: mk(8), actualReturnPct: 3, now });
+  const adj = win.suggestions.find((s) => s.id === 'shadow_immediate_rotation');
+  assert.equal(adj?.level, 'adjust');
+  assert.ok(/immediate_trade/.test(adj.suggestion), '建议要求与即时成交变体对比确认腾位净贡献');
+  assert.ok(/交易策略/.test(adj.suggestion), '建议指向管理员页策略选择器');
+
+  const lose = evaluateShadowRules({ variants: mk(-2), actualReturnPct: 3, now });
+  assert.equal(lose.suggestions.find((s) => s.id === 'shadow_immediate_rotation')?.level, 'ok');
 });
 
 test('实盘兑现规则:波动自适应模式下止损占比建议改指 BRACKET_* 参数', () => {

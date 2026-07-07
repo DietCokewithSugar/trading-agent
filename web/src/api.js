@@ -67,8 +67,10 @@ export const adminApi = {
   advisor: (token) => adminRequest('/advisor', { token }),
   tradingHalt: (token, halted) =>
     adminRequest('/trading-halt', { method: 'POST', token, body: { halted } }),
-  volBracket: (token, enabled) =>
-    adminRequest('/vol-bracket', { method: 'POST', token, body: { enabled } }),
+  setStrategy: (token, strategy) =>
+    adminRequest('/strategy', { method: 'POST', token, body: { strategy } }),
+  primaryLedger: (token, enabled) =>
+    adminRequest('/primary-ledger', { method: 'POST', token, body: { enabled } }),
   runCycle: (token) => adminRequest('/run-cycle', { method: 'POST', token }),
   reset: (token) =>
     adminRequest('/reset', { method: 'POST', token, body: { confirm: 'RESET' } }),
@@ -157,6 +159,28 @@ export const CANDIDATE_STATUS_LABELS = {
   cancelled: '已取消',
 };
 
+// ===== 主账户交易策略(024)的标签映射 =====
+
+export const STRATEGY_LABELS = {
+  default: '默认(候选池 + LLM 决策)',
+  wide_bracket: '宽敞口(±4% / 96 小时)',
+  trailing_only: '仅移动止损(不设止盈)',
+  vol_bracket: '波动自适应敞口',
+  immediate_trade: '信号即时成交',
+  immediate_rotation: '即时成交 + 止盈腾位',
+  equal_weight: '信号等权买入',
+};
+
+export const STRATEGY_DESCRIPTIONS = {
+  default: '完整决策链:利好信号入候选池,资金分配器按分数排序后经 LLM 决策与风控官审批成交;固定 ±2%/48 小时出场。',
+  wide_bracket: '入场链路不变,出场敞口放宽到 ±4%、持有上限 96 小时——检验固定窄敞口是否被噪声扫损。',
+  trailing_only: '入场链路不变,新买入只设 −2% 初始止损、不设止盈,创新高后移动止损只升不降——让利润奔跑。',
+  vol_bracket: '入场链路不变,出场敞口按该股 20 日已实现波动缩放(1.5%–4% 对称);波动取数失败的单笔回退固定 ±2%。',
+  immediate_trade: '信号到达即按确定性仓位(基础 10% × 档位/置信/来源缩放)买入,绕过候选池、LLM 决策与风控官;锁内硬风控(暂停开关/熔断/仓位帽等)仍全部生效,资金分配器暂停。',
+  immediate_rotation: '同「信号即时成交」,但现金/容量不足时先全仓止盈最接近止盈价的盈利持仓腾出资金,再重试买入一次。',
+  equal_weight: '信号到达即按固定 5% 等权买入,绕过候选池、LLM 决策与风控官;锁内硬风控仍全部生效,资金分配器暂停。',
+};
+
 // ===== 影子组合 / 消融实验(017)的标签映射 =====
 
 export const SHADOW_VARIANT_LABELS = {
@@ -167,6 +191,7 @@ export const SHADOW_VARIANT_LABELS = {
   trailing_only: '仅移动止损',
   vol_bracket: '波动敞口',
   immediate_trade: '信号即时成交',
+  immediate_rotation: '即时腾位',
   equal_weight: '信号等权买入',
   spy_benchmark: 'SPY 买入持有',
   cash: '纯现金',
@@ -180,6 +205,7 @@ export const SHADOW_VARIANT_DESCRIPTIONS = {
   trailing_only: '1:1 跟随实盘买入,初始止损同实盘距离但不设止盈上限,移动止损只升不降——检验固定止盈是否截断利润',
   vol_bracket: '1:1 跟随实盘买入,止损/止盈按该股 20 日波动自适应(1.5%–4%)——实盘开关开启前的对照实验,跑赢则顾问提示在管理页开启',
   immediate_trade: '独立组合:可交易利好信号到达即按确定性仓位买入(休市信号顺延至下一可交易时段),不经候选池与 LLM 决策',
+  immediate_rotation: '独立组合:同「信号即时成交」,但现金不足时先全仓止盈最接近止盈价的盈利持仓腾出资金再买——与即时成交对比度量止盈腾位的净贡献',
   equal_weight: '独立组合:可交易信号一律按固定比例等权买入(休市信号顺延),检验 LLM 仓位是否有效',
   spy_benchmark: '启用时一次性全仓买入 SPY 并持有',
   cash: '不做任何交易的现金基准',

@@ -36,8 +36,10 @@ import {
   pickTopBlocked,
   valuePositions,
   prunePendingSignals,
+  toRotationPositions,
 } from './shadowEngine.js';
 import { computeTrailedStop } from './trailing.js';
+import { pickRotationSell } from './rotation.js';
 
 export const SHADOW_VARIANTS = [
   'no_risk_officer',
@@ -46,6 +48,7 @@ export const SHADOW_VARIANTS = [
   'trailing_only',
   'vol_bracket',
   'immediate_trade',
+  'immediate_rotation',
   'equal_weight',
   'spy_benchmark',
   'cash',
@@ -63,8 +66,8 @@ const MIRROR_VARIANTS = ['no_risk_officer', 'no_macro_filter'];
 const EXIT_MIRROR_VARIANTS = ['wide_bracket', 'trailing_only', 'vol_bracket'];
 /** bracket 驱动的实盘卖出触发器:不镜像进出场消融变体(它们有自己的出场规则) */
 const BRACKET_TRIGGERS = new Set(['stop_loss', 'take_profit', 'max_hold']);
-/** 独立信号驱动的变体(自己的买卖逻辑,不跟随实盘) */
-const SIGNAL_VARIANTS = ['immediate_trade', 'equal_weight'];
+/** 独立信号驱动的变体(自己的买卖逻辑,不跟随实盘);immediate_rotation = 即时成交+止盈腾位(024) */
+const SIGNAL_VARIANTS = ['immediate_trade', 'immediate_rotation', 'equal_weight'];
 
 function round4(n) {
   return Math.round(n * 10000) / 10000;
@@ -223,11 +226,12 @@ async function shadowBuy(
     benchmark = false,
   }
 ) {
-  if (!(Number(refPrice) > 0)) return;
-  if (analysisId && (await hasBoughtAnalysis(variant, analysisId))) return;
+  // 返回值仅供进程内调用方分支(如 immediate_rotation 的"缺钱→腾位→重试"),不落库
+  if (!(Number(refPrice) > 0)) return { skipped: 'bad_price' };
+  if (analysisId && (await hasBoughtAnalysis(variant, analysisId))) return { skipped: 'dedup' };
 
   const valuation = await shadowValuation(variant);
-  if (!valuation) return;
+  if (!valuation) return { skipped: 'no_valuation' };
   const existing = valuation.positions.find((p) => p.symbol === symbol);
   const existingValue = existing
     ? Number(valuation.priceBySymbol.get(symbol) ?? existing.avg_cost) * Number(existing.quantity)
@@ -239,7 +243,7 @@ async function shadowBuy(
     positionValue: existingValue,
     benchmark,
   });
-  if (!spend) return;
+  if (!spend) return { skipped: 'no_spend' };
 
   // 成交价:镜像直接用实盘成交价(同滑点);影子独立买入按报价模型施加滑点;基准按参考价
   let price = Number(fillPrice);
@@ -275,7 +279,7 @@ async function shadowBuy(
   });
   // 唯一索引(019)挡下的重复买入:进程内先查后插的兜底防线生效,静默跳过
   if (insRes.error && (insRes.error.code === '23505' || /duplicate key/i.test(insRes.error.message))) {
-    return;
+    return { skipped: 'dup_key' };
   }
   unwrap(insRes, `影子买入记录 ${variant}/${symbol}`);
   const next = applyBuy(existing || null, { quantity, amount, stopLossPercent, takeProfitPercent });
@@ -299,6 +303,7 @@ async function shadowBuy(
     `影子现金更新 ${variant}`
   );
   console.log(`[shadow] ${variant} 买入 ${symbol} ${quantity} 股 @ $${price}($${amount})`);
+  return { bought: true };
 }
 
 /** 影子卖出(须在 enqueue 链内调用):未持有时静默跳过 */
@@ -461,6 +466,36 @@ function executeBullishSignal({ article, analysisRow, quote, profile, price }) {
       reason: `信号即时成交(消融:无候选池/LLM 决策,确定性仓位 ${sized})`,
     })
   );
+  // 即时成交+止盈腾位(024):与 immediate_trade 同仓位同出场,唯一差异是
+  // 现金/容量不足时先全仓止盈"最接近止盈价的盈利持仓"腾出资金再重试一次——
+  // 与 immediate_trade 同窗对比即可量化腾位机制在满仓期的净贡献。
+  // 多步操作在同一个 enqueue 任务内串行执行(进程内串行链保证不与其它影子操作交错)
+  enqueue('即时腾位买入', async () => {
+    const params = {
+      ...base,
+      fraction: sized,
+      reason: `信号即时成交+止盈腾位(消融:确定性仓位 ${sized},缺钱先腾位)`,
+    };
+    const result = await shadowBuy('immediate_rotation', params);
+    if (result?.skipped !== 'no_spend') return;
+    const valuation = await shadowValuation('immediate_rotation');
+    if (!valuation) return;
+    const pick = pickRotationSell(toRotationPositions(valuation.positions, valuation.priceBySymbol), {
+      excludeSymbol: base.symbol,
+    });
+    if (!pick) return;
+    const pickQuote = await getQuote(pick.symbol, 25_000).catch(() => null);
+    console.log(`[shadow] immediate_rotation 腾位: 卖出 ${pick.symbol}(最接近止盈)让位 ${base.symbol}`);
+    await shadowSell('immediate_rotation', {
+      symbol: pick.symbol,
+      refPrice: pick.current_price,
+      quote: pickQuote,
+      fraction: 1,
+      trigger: 'rotation',
+      reason: `止盈腾位:现价 $${pick.current_price} 最接近止盈价 $${pick.take_profit},为 ${base.symbol} 腾出资金`,
+    });
+    await shadowBuy('immediate_rotation', params); // 重试一次(去重键未消耗:首次未成交)
+  });
   enqueue('等权买入', () =>
     shadowBuy('equal_weight', {
       ...base,

@@ -156,6 +156,8 @@ export const config = {
   // 出场消融影子变体(代码常量):wide_bracket 的固定宽度与每变体持有时限覆盖
   shadowWideBracketPercent: 4,
   shadowVariantMaxHoldHours: { wide_bracket: 96 },
+  // 主账户策略的持有时限覆盖(024,与影子变体同值但独立可调——实盘与实验不共享调参面)
+  strategyMaxHoldHours: { wide_bracket: 96 },
   // 每日持仓复查:每个交易日由 DeepSeek 整体评估一次持仓(论点是否失效、是否收紧止损)
   enablePositionReview: process.env.ENABLE_POSITION_REVIEW !== 'false',
   // 持仓复查的触发时间(美东 24 小时制,盘中该小时之后执行,每天一次)

@@ -721,3 +721,7 @@ alter table trades add column if not exists stop_loss_percent numeric;
 alter table trades add column if not exists take_profit_percent numeric;
 alter table trades add column if not exists bracket_vol numeric;
 alter table portfolio_state add column if not exists vol_bracket_enabled boolean not null default false;
+
+-- 主账户交易策略 + 展示主账本切换(024):策略选择器取代 vol_bracket_enabled 布尔开关
+alter table portfolio_state add column if not exists trading_strategy text not null default 'default';
+alter table portfolio_state add column if not exists broker_ledger_primary boolean not null default false;
