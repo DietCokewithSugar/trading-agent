@@ -29,6 +29,9 @@ services:
         value: "true"
       - key: BROKER_MIRROR_LIMIT_SLACK_PERCENT
         value: "1"
+      # 券商净值对照快照间隔(秒,下限 10;休市自动降回 10 分钟一条)
+      - key: BROKER_SNAPSHOT_SECONDS
+        value: "30"
       - key: DEEPSEEK_MODEL
         value: deepseek-chat
       - key: DEEPSEEK_BASE_URL
@@ -37,14 +40,16 @@ services:
         value: "0.56"
       - key: DEEPSEEK_COST_PER_1M_OUTPUT
         value: "1.68"
+      # 提速档(评估后调优):发现延迟减半;LLM 成本由新闻量决定,轮询更快只是更快清积压
       - key: NEWS_POLL_SECONDS
-        value: "20"
+        value: "10"
       - key: QUOTE_PUSH_SECONDS
         value: "5"
       - key: SNAPSHOT_SECONDS
         value: "60"
+      # 提速档:止损/止盈反应减半(报价缓存 10s,低于 15s 无增益)
       - key: RISK_CHECK_SECONDS
-        value: "30"
+        value: "15"
       - key: MAX_ANALYZE_PER_CYCLE
         value: "8"
       - key: INITIAL_CAPITAL
@@ -136,8 +141,9 @@ services:
         value: "30"
       - key: BLACKOUT_AFTER_MINUTES
         value: "30"
+      # 提速档:新闻→成交延迟 ≤5 分钟(空池轮零 LLM 成本,资金闸门防重复烧)
       - key: ALLOCATION_INTERVAL_MINUTES
-        value: "15"
+        value: "5"
       - key: MAX_ALLOCATIONS_PER_RUN
         value: "3"
       - key: CANDIDATE_MAX_AGE_HOURS

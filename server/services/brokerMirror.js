@@ -155,7 +155,11 @@ export function buildBrokerValuation({ account, positions, baseline = null, sess
 let tableMissing = false;
 let polling = false;
 let lastSnapshotAt = 0;
-const SNAPSHOT_INTERVAL_MS = 10 * 60_000;
+// 快照节奏(BROKER_SNAPSHOT_SECONDS,默认 30s、下限 10s):休市时段净值不动,自动降回 10 分钟
+function snapshotIntervalMs() {
+  const base = Math.max(config.brokerSnapshotSeconds, 10) * 1000;
+  return getMarketSession() === 'closed' ? Math.max(base, 10 * 60_000) : base;
+}
 
 // 展示主账本(024):账户+持仓短 TTL 缓存(报价推送循环每几秒一轮,护住券商限频);
 // 盈亏基线 = 最早一条对照快照净值,取一次后常驻(重置时清除)
@@ -244,7 +248,7 @@ export async function getBrokerSnapshots(sinceIso) {
     .select('equity, cash, created_at')
     .is('account_id', null)
     .order('created_at', { ascending: true })
-    .limit(1000);
+    .limit(5000);
   if (sinceIso) query = query.gte('created_at', sinceIso);
   let { data, error } = await query;
   if (error && /account_id/.test(error.message)) {
@@ -252,12 +256,18 @@ export async function getBrokerSnapshots(sinceIso) {
       .from('broker_mirror_snapshots')
       .select('equity, cash, created_at')
       .order('created_at', { ascending: true })
-      .limit(1000);
+      .limit(5000);
     if (sinceIso) fallback = fallback.gte('created_at', sinceIso);
     ({ data, error } = await fallback);
   }
   if (error) throw new Error(error.message);
-  return (data || []).map((row) => mapBrokerSnapshotRow(row, baseline)).filter(Boolean);
+  // 30s 快照粒度下行数远超图表可用点数:均匀降采样到 ≤600 点(保首尾)
+  let rows = data || [];
+  if (rows.length > 600) {
+    const step = (rows.length - 1) / 599;
+    rows = Array.from({ length: 600 }, (_, i) => rows[Math.round(i * step)]);
+  }
+  return rows.map((row) => mapBrokerSnapshotRow(row, baseline)).filter(Boolean);
 }
 
 /** 最新券商快照(snapshot SSE 广播用,env 默认账户);无数据/失败返回 null */
@@ -447,6 +457,42 @@ export function mirrorShadowTrade(variant, trade) {
   }
 }
 
+/**
+ * 净值对照快照(限频在内,双入口安全):env 默认账户 + 各附加账户逐个落快照。
+ * 由独立调度循环(BROKER_SNAPSHOT_SECONDS)与对照轮询共同驱动,先到先写。
+ */
+export async function takeBrokerSnapshots() {
+  if (tableMissing) return;
+  if (Date.now() - lastSnapshotAt < snapshotIntervalMs()) return;
+  lastSnapshotAt = Date.now();
+  if (isBrokerEnabled()) {
+    try {
+      const account = await getAccount();
+      const valuation = await getValuation().catch(() => null);
+      await supabase().from('broker_mirror_snapshots').insert({
+        equity: Number(account.equity),
+        cash: Number(account.cash),
+        internal_total_value: valuation?.total_value ?? null,
+      });
+    } catch (err) {
+      console.warn(`[broker] 净值对照快照失败: ${err.message}`);
+    }
+  }
+  for (const acc of enabledAccounts()) {
+    try {
+      const account = await getAccount(credsOf(acc));
+      await supabase().from('broker_mirror_snapshots').insert({
+        equity: Number(account.equity),
+        cash: Number(account.cash),
+        internal_total_value: null,
+        account_id: acc.id,
+      });
+    } catch (err) {
+      console.warn(`[broker] 账户 ${acc.label} 净值快照失败: ${err.message}`);
+    }
+  }
+}
+
 /** 由调度器周期调用(60s):回填在途对照单的撮合结果,并限频写净值对照快照 */
 export async function pollMirrorOrders() {
   // env 账户未配置但存在附加账户时照常轮询(025 多账户)
@@ -509,36 +555,7 @@ export async function pollMirrorOrders() {
       }
     }
 
-    // 净值对照快照(10 分钟限频):env 默认账户 + 各附加账户逐个落快照
-    if (Date.now() - lastSnapshotAt >= SNAPSHOT_INTERVAL_MS) {
-      lastSnapshotAt = Date.now();
-      if (isBrokerEnabled()) {
-        try {
-          const account = await getAccount();
-          const valuation = await getValuation().catch(() => null);
-          await supabase().from('broker_mirror_snapshots').insert({
-            equity: Number(account.equity),
-            cash: Number(account.cash),
-            internal_total_value: valuation?.total_value ?? null,
-          });
-        } catch (err) {
-          console.warn(`[broker] 净值对照快照失败: ${err.message}`);
-        }
-      }
-      for (const acc of enabledAccounts()) {
-        try {
-          const account = await getAccount(credsOf(acc));
-          await supabase().from('broker_mirror_snapshots').insert({
-            equity: Number(account.equity),
-            cash: Number(account.cash),
-            internal_total_value: null,
-            account_id: acc.id,
-          });
-        } catch (err) {
-          console.warn(`[broker] 账户 ${acc.label} 净值快照失败: ${err.message}`);
-        }
-      }
-    }
+    await takeBrokerSnapshots();
     if (updated) console.log(`[broker] 对照单回填 ${updated} 条`);
   } finally {
     polling = false;

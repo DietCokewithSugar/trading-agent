@@ -18,8 +18,7 @@ import { makeSingleton } from './services/singleton.js';
 import { getMarketSession } from './services/fmp.js';
 import { broadcast, clientCount } from './services/bus.js';
 import { pushLiveQuotes } from './services/quotesPush.js';
-import { pollMirrorOrders, getLatestBrokerSnapshot } from './services/brokerMirror.js';
-import { isBrokerEnabled } from './services/alpacaBroker.js';
+import { pollMirrorOrders, takeBrokerSnapshots, getLatestBrokerSnapshot } from './services/brokerMirror.js';
 import { getPrimaryValuation, isBrokerLedgerPrimary } from './services/primaryLedger.js';
 
 // 休市时段净值几乎不变,快照降频到每 30 分钟一条(保持折线图连续),
@@ -70,7 +69,7 @@ export function startScheduler() {
 
   // 净值快照(盈亏折线图数据点),休市时段降频;影子组合快照搭车(内部限频)。
   // 内部快照永远照常落库(引擎历史不断档);主账本为券商模拟时,
-  // snapshot 广播改发最新券商净值快照(10 分钟粒度,图表一致性优先)
+  // snapshot 广播改发最新券商净值快照(BROKER_SNAPSHOT_SECONDS 粒度,图表一致性优先)
   let lastClosedSnapshotAt = 0;
   every(snapSec * 1000, '净值快照', async () => {
     if (getMarketSession() === 'closed') {
@@ -109,11 +108,14 @@ export function startScheduler() {
   // 信号前瞻收益回填(评估层):每 10 分钟一批,到期的信号补 1h/1d/5d 前瞻收益
   every(10 * 60_000, '信号前瞻收益回填', backfillForwardReturns);
 
-  // 券商模拟对照账本(021):回填在途对照单的真实撮合结果 + 限频净值对照快照
-  //(未配置券商 key 时函数内直接跳过)
-  if (isBrokerEnabled()) {
-    every(60_000, '券商对照轮询', pollMirrorOrders);
-  }
+  // 券商模拟对照账本(021):回填在途对照单的真实撮合结果。
+  // 无条件注册:函数内部自守卫(env key 与附加账户都缺席时直接返回),
+  // 且附加账户(025)在启动后异步加载,启动时刻的 isBrokerEnabled 门会漏掉"仅附加账户"部署
+  every(60_000, '券商对照轮询', pollMirrorOrders);
+
+  // 券商净值对照快照:独立节奏(BROKER_SNAPSHOT_SECONDS,默认 30s;
+  // 休市自动降回 10 分钟),限频在 takeBrokerSnapshots 内部,与对照轮询双入口先到先写
+  every(Math.max(config.brokerSnapshotSeconds, 10) * 1000, '券商净值快照', takeBrokerSnapshots);
 
   if (config.enableMacro) {
     // 经济日历刷新(黑窗与 surprise 数据源;套餐不含端点时模块内部自动停用)
