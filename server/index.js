@@ -9,6 +9,7 @@ import { startScheduler } from './scheduler.js';
 import { loadTradingHalt } from './services/tradingHalt.js';
 import { loadTradingStrategy } from './services/strategy.js';
 import { loadPrimaryLedger } from './services/primaryLedger.js';
+import { loadBrokerAccounts } from './services/brokerAccounts.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -44,6 +45,7 @@ app.listen(config.port, () => {
   loadTradingHalt().catch(() => {});
   loadTradingStrategy().catch(() => {});
   loadPrimaryLedger().catch(() => {});
+  loadBrokerAccounts().catch(() => {});
   if (missing.length === 0) {
     startScheduler();
   } else {

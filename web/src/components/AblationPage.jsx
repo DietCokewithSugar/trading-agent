@@ -50,13 +50,19 @@ function buildVariantColors(mode, CHART) {
   return {
     actual: mode === 'light' ? ACCENT_PRIMARY.light : ACCENT_PRIMARY.dark,
     no_risk_officer: '#7C6FF0', // 紫
+    no_risk_officer_rotation: '#A79EF5', // 紫(浅,腾位孪生)
     no_macro_filter: '#D4A843', // 琥珀
+    no_macro_filter_rotation: '#E2C47E', // 琥珀(浅)
     wide_bracket: '#C08552', // 赭
+    wide_bracket_rotation: '#D4A784', // 赭(浅)
     trailing_only: '#6B9AC4', // 钢蓝
+    trailing_only_rotation: '#97B8D6', // 钢蓝(浅)
     vol_bracket: '#9B8AA6', // 灰紫
+    vol_bracket_rotation: '#B8ACC1', // 灰紫(浅)
     immediate_trade: '#3FB7C4', // 青
     immediate_rotation: '#8AA69B', // 灰绿
     equal_weight: '#E0719B', // 玫红
+    equal_weight_rotation: '#EB9DBB', // 玫红(浅)
     spy_benchmark: CHART.benchmark,
     cash: CHART.reference,
   };
@@ -65,13 +71,19 @@ function buildVariantColors(mode, CHART) {
 const VARIANT_ORDER = [
   'actual',
   'no_risk_officer',
+  'no_risk_officer_rotation',
   'no_macro_filter',
+  'no_macro_filter_rotation',
   'wide_bracket',
+  'wide_bracket_rotation',
   'trailing_only',
+  'trailing_only_rotation',
   'vol_bracket',
+  'vol_bracket_rotation',
   'immediate_trade',
   'immediate_rotation',
   'equal_weight',
+  'equal_weight_rotation',
   'spy_benchmark',
   'cash',
 ];

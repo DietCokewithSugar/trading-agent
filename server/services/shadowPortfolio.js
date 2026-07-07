@@ -39,35 +39,69 @@ import {
   toRotationPositions,
 } from './shadowEngine.js';
 import { computeTrailedStop } from './trailing.js';
-import { pickRotationSell } from './rotation.js';
+import { pickRotationSell, pickTopProfit } from './rotation.js';
+import { mirrorShadowTrade } from './brokerMirror.js';
+
+/**
+ * 腾位孪生(025):每个可交易变体都有一个「+止盈腾位」对照组——与基础变体逐项相同,
+ * 唯一差异是买入因现金/容量不足被跳过(no_spend)时,先全仓卖出腾位选仓再重试一次。
+ * 孪生 vs 基础变体的同窗差 = 腾位机制在该策略下的净贡献。
+ * immediate_trade 的孪生沿用 024 的既有名字 immediate_rotation。
+ * trailing 系持仓无止盈价,「最接近止盈」无定义 → 腾位选仓退化为「浮盈比例最高」。
+ */
+export const ROTATION_TWINS = {
+  no_risk_officer: 'no_risk_officer_rotation',
+  no_macro_filter: 'no_macro_filter_rotation',
+  wide_bracket: 'wide_bracket_rotation',
+  trailing_only: 'trailing_only_rotation',
+  vol_bracket: 'vol_bracket_rotation',
+  immediate_trade: 'immediate_rotation',
+  equal_weight: 'equal_weight_rotation',
+};
 
 export const SHADOW_VARIANTS = [
   'no_risk_officer',
+  'no_risk_officer_rotation',
   'no_macro_filter',
+  'no_macro_filter_rotation',
   'wide_bracket',
+  'wide_bracket_rotation',
   'trailing_only',
+  'trailing_only_rotation',
   'vol_bracket',
+  'vol_bracket_rotation',
   'immediate_trade',
   'immediate_rotation',
   'equal_weight',
+  'equal_weight_rotation',
   'spy_benchmark',
   'cash',
 ];
 
-/** 跟随实盘成交镜像记账的变体(独立策略变体与基准不镜像) */
-const MIRROR_VARIANTS = ['no_risk_officer', 'no_macro_filter'];
+/** 跟随实盘成交镜像记账的变体(独立策略变体与基准不镜像);含腾位孪生 */
+const MIRROR_VARIANTS = ['no_risk_officer', 'no_risk_officer_rotation', 'no_macro_filter', 'no_macro_filter_rotation'];
 /**
  * 出场消融镜像变体(023):1:1 跟随实盘买入(不做任何比例还原),只改出场规则——
- * 出场规则是全系统唯一没被消融的层,这三个变体度量 ±2%/48h 本身:
+ * 出场规则是全系统唯一没被消融的层,这三对变体度量 ±2%/48h 本身:
  *   wide_bracket   固定 ±4%/96h(bracket 是否过窄、噪音扫损)
  *   trailing_only  初始止损同实盘距离、不设止盈、移动止损棘轮(固定止盈是否截断利润)
  *   vol_bracket    按 20 日波动缩放的对称 bracket(实盘开关开启前的对照实验)
  */
-const EXIT_MIRROR_VARIANTS = ['wide_bracket', 'trailing_only', 'vol_bracket'];
+const EXIT_MIRROR_VARIANTS = [
+  'wide_bracket',
+  'wide_bracket_rotation',
+  'trailing_only',
+  'trailing_only_rotation',
+  'vol_bracket',
+  'vol_bracket_rotation',
+];
 /** bracket 驱动的实盘卖出触发器:不镜像进出场消融变体(它们有自己的出场规则) */
 const BRACKET_TRIGGERS = new Set(['stop_loss', 'take_profit', 'max_hold']);
-/** 独立信号驱动的变体(自己的买卖逻辑,不跟随实盘);immediate_rotation = 即时成交+止盈腾位(024) */
-const SIGNAL_VARIANTS = ['immediate_trade', 'immediate_rotation', 'equal_weight'];
+/** 独立信号驱动的变体(自己的买卖逻辑,不跟随实盘);*_rotation = +止盈腾位孪生 */
+const SIGNAL_VARIANTS = ['immediate_trade', 'immediate_rotation', 'equal_weight', 'equal_weight_rotation'];
+/** 腾位孪生集合(反向索引)与 trailing 系(棘轮生效、腾位按浮盈选仓) */
+const ROTATION_VARIANTS = new Set(Object.values(ROTATION_TWINS));
+const TRAILING_VARIANTS = new Set(['trailing_only', 'trailing_only_rotation']);
 
 function round4(n) {
   return Math.round(n * 10000) / 10000;
@@ -264,24 +298,30 @@ async function shadowBuy(
   const amount = round2(quantity * price);
 
   // 写入顺序:先记成交(去重依赖它),再改持仓与现金;非事务 best-effort,模拟盘可接受
-  const insRes = await supabase().from('shadow_trades').insert({
-    variant,
-    symbol,
-    side: 'buy',
-    quantity,
-    price,
-    amount,
-    reason: reason ? sanitizeProviderText(String(reason).slice(0, 300)) : null,
-    trigger,
-    news_id: newsId,
-    analysis_id: analysisId,
-    mirror_trade_id: mirrorTradeId,
-  });
+  const insRes = await supabase()
+    .from('shadow_trades')
+    .insert({
+      variant,
+      symbol,
+      side: 'buy',
+      quantity,
+      price,
+      amount,
+      reason: reason ? sanitizeProviderText(String(reason).slice(0, 300)) : null,
+      trigger,
+      news_id: newsId,
+      analysis_id: analysisId,
+      mirror_trade_id: mirrorTradeId,
+    })
+    .select('id')
+    .single();
   // 唯一索引(019)挡下的重复买入:进程内先查后插的兜底防线生效,静默跳过
   if (insRes.error && (insRes.error.code === '23505' || /duplicate key/i.test(insRes.error.message))) {
     return { skipped: 'dup_key' };
   }
   unwrap(insRes, `影子买入记录 ${variant}/${symbol}`);
+  // 账户镜像(025,fire-and-forget):该变体若有绑定的券商模拟账户,同步下真实对照单
+  mirrorShadowTrade(variant, { id: insRes.data?.id, symbol, side: 'buy', quantity, price });
   const next = applyBuy(existing || null, { quantity, amount, stopLossPercent, takeProfitPercent });
   unwrap(
     await supabase()
@@ -340,8 +380,9 @@ async function shadowSell(
   if (!(price > 0)) return;
 
   const settle = applySell(position, fraction, price);
-  unwrap(
-    await supabase().from('shadow_trades').insert({
+  const sellRes = await supabase()
+    .from('shadow_trades')
+    .insert({
       variant,
       symbol,
       side: 'sell',
@@ -352,9 +393,12 @@ async function shadowSell(
       trigger,
       realized_pnl: settle.realizedPnl,
       mirror_trade_id: mirrorTradeId,
-    }),
-    `影子卖出记录 ${variant}/${symbol}`
-  );
+    })
+    .select('id')
+    .single();
+  unwrap(sellRes, `影子卖出记录 ${variant}/${symbol}`);
+  // 账户镜像(025):卖出同样下真实对照单(以账户侧真实持仓校正数量)
+  mirrorShadowTrade(variant, { id: sellRes.data?.id, symbol, side: 'sell', quantity: settle.quantity, price });
   if (settle.remaining === 0) {
     unwrap(
       await supabase().from('shadow_positions').delete().eq('variant', variant).eq('symbol', symbol),
@@ -466,36 +510,13 @@ function executeBullishSignal({ article, analysisRow, quote, profile, price }) {
       reason: `信号即时成交(消融:无候选池/LLM 决策,确定性仓位 ${sized})`,
     })
   );
-  // 即时成交+止盈腾位(024):与 immediate_trade 同仓位同出场,唯一差异是
-  // 现金/容量不足时先全仓止盈"最接近止盈价的盈利持仓"腾出资金再重试一次——
-  // 与 immediate_trade 同窗对比即可量化腾位机制在满仓期的净贡献。
-  // 多步操作在同一个 enqueue 任务内串行执行(进程内串行链保证不与其它影子操作交错)
-  enqueue('即时腾位买入', async () => {
-    const params = {
+  enqueue('即时腾位买入', () =>
+    shadowBuyWithRotation('immediate_rotation', {
       ...base,
       fraction: sized,
       reason: `信号即时成交+止盈腾位(消融:确定性仓位 ${sized},缺钱先腾位)`,
-    };
-    const result = await shadowBuy('immediate_rotation', params);
-    if (result?.skipped !== 'no_spend') return;
-    const valuation = await shadowValuation('immediate_rotation');
-    if (!valuation) return;
-    const pick = pickRotationSell(toRotationPositions(valuation.positions, valuation.priceBySymbol), {
-      excludeSymbol: base.symbol,
-    });
-    if (!pick) return;
-    const pickQuote = await getQuote(pick.symbol, 25_000).catch(() => null);
-    console.log(`[shadow] immediate_rotation 腾位: 卖出 ${pick.symbol}(最接近止盈)让位 ${base.symbol}`);
-    await shadowSell('immediate_rotation', {
-      symbol: pick.symbol,
-      refPrice: pick.current_price,
-      quote: pickQuote,
-      fraction: 1,
-      trigger: 'rotation',
-      reason: `止盈腾位:现价 $${pick.current_price} 最接近止盈价 $${pick.take_profit},为 ${base.symbol} 腾出资金`,
-    });
-    await shadowBuy('immediate_rotation', params); // 重试一次(去重键未消耗:首次未成交)
-  });
+    })
+  );
   enqueue('等权买入', () =>
     shadowBuy('equal_weight', {
       ...base,
@@ -503,6 +524,43 @@ function executeBullishSignal({ article, analysisRow, quote, profile, price }) {
       reason: `信号等权买入(消融:固定比例 ${config.shadowEqualWeightFraction})`,
     })
   );
+  enqueue('等权腾位买入', () =>
+    shadowBuyWithRotation('equal_weight_rotation', {
+      ...base,
+      fraction: config.shadowEqualWeightFraction,
+      reason: `信号等权买入+止盈腾位(消融:固定比例 ${config.shadowEqualWeightFraction},缺钱先腾位)`,
+    })
+  );
+}
+
+/**
+ * 带止盈腾位的影子买入(025,须在 enqueue 链内调用):先照常买;因现金/容量不足
+ * 被跳过(no_spend)时,卖出腾位选仓(trailing 系无止盈价 → 浮盈比例最高,
+ * 其余 → 最接近止盈价的盈利持仓)后重试一次。去重键首次未成交不消耗,重试干净。
+ */
+async function shadowBuyWithRotation(variant, params) {
+  const result = await shadowBuy(variant, params);
+  if (result?.skipped !== 'no_spend') return result;
+  const valuation = await shadowValuation(variant);
+  if (!valuation) return result;
+  const rotatable = toRotationPositions(valuation.positions, valuation.priceBySymbol);
+  const pick = TRAILING_VARIANTS.has(variant)
+    ? pickTopProfit(rotatable, { excludeSymbol: params.symbol })
+    : pickRotationSell(rotatable, { excludeSymbol: params.symbol });
+  if (!pick) return result;
+  const pickQuote = await getQuote(pick.symbol, 25_000).catch(() => null);
+  console.log(`[shadow] ${variant} 腾位: 卖出 ${pick.symbol} 让位 ${params.symbol}`);
+  await shadowSell(variant, {
+    symbol: pick.symbol,
+    refPrice: pick.current_price,
+    quote: pickQuote,
+    fraction: 1,
+    trigger: 'rotation',
+    reason: TRAILING_VARIANTS.has(variant)
+      ? `止盈腾位:浮盈比例最高,为 ${params.symbol} 腾出资金`
+      : `止盈腾位:现价 $${pick.current_price} 最接近止盈价 $${pick.take_profit},为 ${params.symbol} 腾出资金`,
+  });
+  return shadowBuy(variant, params);
 }
 
 /** 利空信号的实际执行(独立变体清仓同票) */
@@ -560,20 +618,20 @@ export function onOfficerVeto({
   analysisRow,
 }) {
   if (!isShadowAvailable()) return;
-  enqueue('风控官否决重放', () =>
-    shadowBuy('no_risk_officer', {
-      symbol,
-      refPrice: price,
-      quote,
-      profile,
-      fraction,
-      stopLossPercent,
-      takeProfitPercent,
-      newsId: article?.id ?? null,
-      analysisId: analysisRow?.id ?? null,
-      reason: `风控官否决但本组合无风控官:${vetoReason || ''}`,
-    })
-  );
+  const params = {
+    symbol,
+    refPrice: price,
+    quote,
+    profile,
+    fraction,
+    stopLossPercent,
+    takeProfitPercent,
+    newsId: article?.id ?? null,
+    analysisId: analysisRow?.id ?? null,
+    reason: `风控官否决但本组合无风控官:${vetoReason || ''}`,
+  };
+  enqueue('风控官否决重放', () => shadowBuy('no_risk_officer', params));
+  enqueue('风控官否决重放(腾位)', () => shadowBuyWithRotation('no_risk_officer_rotation', params));
 }
 
 /** 锁内宏观硬风控拒绝(macro_shock/开仓配额/三重钳制):no_macro_filter 照样买入 */
@@ -588,19 +646,19 @@ export function onMacroClampedBuy({
   analysisId,
 }) {
   if (!isShadowAvailable()) return;
-  enqueue('宏观钳制重放', () =>
-    shadowBuy('no_macro_filter', {
-      symbol,
-      refPrice: quote ? (quote.effective_price ?? quote.price) : null,
-      quote,
-      fraction,
-      stopLossPercent,
-      takeProfitPercent,
-      newsId,
-      analysisId,
-      reason: `宏观硬风控拦截(${reason})但本组合无宏观过滤`,
-    })
-  );
+  const params = {
+    symbol,
+    refPrice: quote ? (quote.effective_price ?? quote.price) : null,
+    quote,
+    fraction,
+    stopLossPercent,
+    takeProfitPercent,
+    newsId,
+    analysisId,
+    reason: `宏观硬风控拦截(${reason})但本组合无宏观过滤`,
+  };
+  enqueue('宏观钳制重放', () => shadowBuy('no_macro_filter', params));
+  enqueue('宏观钳制重放(腾位)', () => shadowBuyWithRotation('no_macro_filter_rotation', params));
 }
 
 /**
@@ -610,41 +668,46 @@ export function onMacroClampedBuy({
  */
 export function onMacroFilteredCandidates(candidates, note) {
   if (!isShadowAvailable() || !candidates?.length) return;
+  // 基础变体与腾位孪生各自去重、各自重放(孪生的去重键独立,共用一次报价)
   enqueue('宏观过滤重放', async () => {
     const ids = candidates.map((c) => c.analysis_id).filter(Boolean);
-    let bought = new Set();
-    if (ids.length) {
-      const res = await supabase()
-        .from('shadow_trades')
-        .select('analysis_id')
-        .eq('variant', 'no_macro_filter')
-        .eq('side', 'buy')
-        .in('analysis_id', ids);
-      bought = new Set((unwrap(res, '宏观过滤重放去重查询') || []).map((r) => r.analysis_id));
-    }
-    const picked = pickTopBlocked(candidates, {
-      max: config.maxAllocationsPerRun,
-      excludeAnalysisIds: bought,
-    });
-    for (const candidate of picked) {
-      const quote = await getQuote(candidate.symbol).catch(() => null);
-      if (!quote) continue;
-      const { sized } = scaleFraction({
-        fraction: config.shadowBaseFraction,
-        tier: candidate.tier,
-        confidence: candidate.confidence,
-        sourceScore: candidate.source_score ?? null,
+    for (const variant of ['no_macro_filter', 'no_macro_filter_rotation']) {
+      let bought = new Set();
+      if (ids.length) {
+        const res = await supabase()
+          .from('shadow_trades')
+          .select('analysis_id')
+          .eq('variant', variant)
+          .eq('side', 'buy')
+          .in('analysis_id', ids);
+        bought = new Set((unwrap(res, '宏观过滤重放去重查询') || []).map((r) => r.analysis_id));
+      }
+      const picked = pickTopBlocked(candidates, {
+        max: config.maxAllocationsPerRun,
+        excludeAnalysisIds: bought,
       });
-      await shadowBuy('no_macro_filter', {
-        symbol: candidate.symbol,
-        refPrice: quote.effective_price ?? quote.price,
-        quote,
-        fraction: sized,
-        ...config.shadowDefaultStops,
-        newsId: candidate.news_id ?? null,
-        analysisId: candidate.analysis_id ?? null,
-        reason: `${note}但本组合无宏观过滤(确定性仓位 ${sized})`,
-      });
+      for (const candidate of picked) {
+        const quote = await getQuote(candidate.symbol, 25_000).catch(() => null);
+        if (!quote) continue;
+        const { sized } = scaleFraction({
+          fraction: config.shadowBaseFraction,
+          tier: candidate.tier,
+          confidence: candidate.confidence,
+          sourceScore: candidate.source_score ?? null,
+        });
+        const params = {
+          symbol: candidate.symbol,
+          refPrice: quote.effective_price ?? quote.price,
+          quote,
+          fraction: sized,
+          ...config.shadowDefaultStops,
+          newsId: candidate.news_id ?? null,
+          analysisId: candidate.analysis_id ?? null,
+          reason: `${note}但本组合无宏观过滤(确定性仓位 ${sized})`,
+        };
+        if (variant === 'no_macro_filter') await shadowBuy(variant, params);
+        else await shadowBuyWithRotation(variant, params);
+      }
     }
   });
 }
@@ -687,21 +750,23 @@ export function mirrorBuy(trade, { effectiveFraction, requestFraction, officerSc
   for (const plan of plans) {
     if (!(plan.fraction > 0)) continue;
     const stops = plan.stops ?? { stopLossPercent, takeProfitPercent };
-    enqueue(`${plan.variant} 镜像买入`, () =>
-      shadowBuy(plan.variant, {
-        symbol: trade.symbol,
-        refPrice: trade.price,
-        fillPrice: trade.price,
-        fraction: plan.fraction,
-        stopLossPercent: stops.stopLossPercent,
-        takeProfitPercent: stops.takeProfitPercent,
-        trigger: trade.trigger || 'news',
-        newsId: trade.news_id ?? null,
-        analysisId: trade.analysis_id ?? null,
-        mirrorTradeId: trade.id,
-        reason: trade.reason ?? null,
-      })
-    );
+    const params = {
+      symbol: trade.symbol,
+      refPrice: trade.price,
+      fillPrice: trade.price,
+      fraction: plan.fraction,
+      stopLossPercent: stops.stopLossPercent,
+      takeProfitPercent: stops.takeProfitPercent,
+      trigger: trade.trigger || 'news',
+      newsId: trade.news_id ?? null,
+      analysisId: trade.analysis_id ?? null,
+      mirrorTradeId: trade.id,
+      reason: trade.reason ?? null,
+    };
+    enqueue(`${plan.variant} 镜像买入`, () => shadowBuy(plan.variant, params));
+    // 腾位孪生(025):同参数镜像,唯一差异是缺钱时先腾位再重试
+    const twin = ROTATION_TWINS[plan.variant];
+    if (twin) enqueue(`${twin} 镜像买入`, () => shadowBuyWithRotation(twin, params));
   }
 }
 
@@ -803,8 +868,8 @@ export async function checkShadowStops() {
       let stop = pos.stop_loss !== null && pos.stop_loss !== undefined ? Number(pos.stop_loss) : null;
       const take = pos.take_profit !== null && pos.take_profit !== undefined ? Number(pos.take_profit) : null;
 
-      // trailing_only:止损比较前先跑棘轮(创新高上抬止损,只升不降)
-      if (pos.variant === 'trailing_only' && stop !== null) {
+      // trailing 系(含腾位孪生):止损比较前先跑棘轮(创新高上抬止损,只升不降)
+      if (TRAILING_VARIANTS.has(pos.variant) && stop !== null) {
         stop = await maybeTrailShadowStop(pos, price);
       }
       // 每变体持有时限:wide_bracket 96h,其余沿用全局 48h

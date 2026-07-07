@@ -26,3 +26,26 @@ export function pickRotationSell(positions, { excludeSymbol = null } = {}) {
   }
   return best;
 }
+
+/**
+ * 无止盈价账本(trailing 系,025)的腾位选取:盈利持仓中浮盈比例
+ * ((price − avg_cost) / avg_cost)最高者——「最接近止盈」对无止盈价无定义,
+ * 退化为同一精神的「卖出最赚钱的仓位」。需要 avg_cost 字段;排除 excludeSymbol。
+ */
+export function pickTopProfit(positions, { excludeSymbol = null } = {}) {
+  let best = null;
+  let bestPct = -Infinity;
+  for (const pos of positions || []) {
+    if (!pos || (excludeSymbol && pos.symbol === excludeSymbol)) continue;
+    const pnl = Number(pos.unrealized_pnl);
+    const price = Number(pos.current_price);
+    const cost = Number(pos.avg_cost);
+    if (!(pnl > 0) || !(price > 0) || !(cost > 0)) continue;
+    const pct = (price - cost) / cost;
+    if (pct > bestPct) {
+      bestPct = pct;
+      best = pos;
+    }
+  }
+  return best;
+}
