@@ -12,6 +12,7 @@ import { isTradingHalted, setTradingHalt } from '../services/tradingHalt.js';
 import { getTradingStrategy, setTradingStrategy, STRATEGIES } from '../services/strategy.js';
 import { isBrokerLedgerPrimary, setBrokerLedgerPrimary } from '../services/primaryLedger.js';
 import { isBrokerEnabled } from '../services/alpacaBroker.js';
+import { listBrokerAccountsLive } from '../services/brokerMirror.js';
 import {
   listAccountsMasked,
   addBrokerAccount,
@@ -135,6 +136,18 @@ router.get(
       env_account: isBrokerEnabled(),
       purposes: validPurposes(),
     });
+  })
+);
+
+/**
+ * 全部券商模拟账户的实时仓位(env 默认账户 + 各附加账户):
+ * 直连券商接口取账户净值/现金/全部持仓,单账户失败只标注 error。
+ * 明确无缓存——管理页「实时仓位」面板轮询专用,勿接入高频路径
+ */
+router.get(
+  '/broker-accounts/positions',
+  asyncHandler(async (req, res) => {
+    res.json(await listBrokerAccountsLive());
   })
 );
 

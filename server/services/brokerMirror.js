@@ -222,6 +222,41 @@ export async function getBrokerValuation() {
   return value;
 }
 
+/**
+ * 全部券商模拟账户的实时账户+持仓(管理页「实时仓位」用,token 门内):
+ * env 默认账户 + 每个启用的附加账户(025)并发取数,单账户失败只标注 error 不影响其余。
+ * 持仓经 mapBrokerPositions 映射为内部口径;无任何账户时返回空列表。
+ */
+export async function listBrokerAccountsLive() {
+  const targets = [];
+  if (isBrokerEnabled()) {
+    targets.push({ id: null, label: '默认账户(环境变量)', purpose: 'mirror_actual', creds: null });
+  }
+  for (const acc of enabledAccounts()) {
+    targets.push({ id: acc.id, label: acc.label, purpose: acc.purpose, creds: credsOf(acc) });
+  }
+  const accounts = await Promise.all(
+    targets.map(async (t) => {
+      const base = { id: t.id, label: t.label, purpose: t.purpose };
+      try {
+        const [account, positions] = await Promise.all([getAccount(t.creds), getPositions(t.creds)]);
+        const equity = Number(account.equity);
+        const cash = Number(account.cash);
+        return {
+          ...base,
+          equity: Number.isFinite(equity) ? equity : null,
+          cash: Number.isFinite(cash) ? cash : null,
+          positions_value: Number.isFinite(equity) && Number.isFinite(cash) ? round2(equity - cash) : null,
+          positions: mapBrokerPositions(positions),
+        };
+      } catch (err) {
+        return { ...base, error: err.message, positions: [] };
+      }
+    })
+  );
+  return { accounts, market_session: getMarketSession() };
+}
+
 /** 最新一条券商净值快照映射为内部快照形状(展示主账本的 snapshot 广播/序列用);无则 null */
 export function mapBrokerSnapshotRow(row, baseline = null) {
   if (!row) return null;

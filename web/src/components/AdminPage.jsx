@@ -20,6 +20,7 @@ import {
   adminApi,
   fmtMoney,
   fmtNum,
+  fmtPercent,
   fmtTime,
   LLM_PURPOSE_LABELS,
   REJECT_LABELS,
@@ -81,6 +82,29 @@ const RUN_COLUMNS = [
     },
   },
 ];
+// 实时仓位表列(券商侧持仓,已映射为内部口径;数量可能为碎股)
+const LIVE_POSITION_COLUMNS = [
+  { title: '代码', dataIndex: 'symbol', width: 90, render: (v) => <span className="mono">{v}</span> },
+  { title: '数量', dataIndex: 'quantity', width: 90, align: 'right', render: (v) => fmtNum(v, 4) },
+  { title: '成本', dataIndex: 'avg_cost', width: 100, align: 'right', render: (v) => fmtMoney(v) },
+  { title: '现价', dataIndex: 'current_price', width: 100, align: 'right', render: (v) => fmtMoney(v) },
+  { title: '市值', dataIndex: 'market_value', width: 110, align: 'right', render: (v) => fmtMoney(v) },
+  {
+    title: '浮动盈亏',
+    dataIndex: 'unrealized_pnl',
+    width: 150,
+    align: 'right',
+    render: (v, row) =>
+      v === null || v === undefined ? (
+        '—'
+      ) : (
+        <span className={Number(v) >= 0 ? 'up' : 'down'}>
+          {fmtMoney(v)}({fmtPercent(row.unrealized_pnl_percent)})
+        </span>
+      ),
+  },
+];
+
 export default function AdminPage() {
   const [token, setToken] = useState(() => sessionStorage.getItem('admin_token') || '');
   const [authed, setAuthed] = useState(false);
@@ -95,6 +119,8 @@ export default function AdminPage() {
   const [brokerAccounts, setBrokerAccounts] = useState(null);
   const [acctForm, setAcctForm] = useState({ label: '', keyId: '', secretKey: '', purpose: 'unassigned' });
   const [acctBusy, setAcctBusy] = useState(false);
+  const [liveOpen, setLiveOpen] = useState(false);
+  const [livePositions, setLivePositions] = useState(null); // { accounts, market_session } | { error }
   const [confirmText, setConfirmText] = useState('');
   const [message, setMessage] = useState(null);
 
@@ -154,6 +180,28 @@ export default function AdminPage() {
     loadBrokerAccounts();
     return undefined;
   }, [authed, loadBrokerAccounts]);
+
+  // 实时仓位面板(展开期间每 15s 直连券商刷新;收起即停,不做后台轮询)
+  useEffect(() => {
+    if (!authed || !liveOpen) return undefined;
+    let stale = false;
+    const load = () => {
+      adminApi
+        .brokerPositions(token)
+        .then((data) => {
+          if (!stale) setLivePositions(data);
+        })
+        .catch((err) => {
+          if (!stale) setLivePositions({ error: err.message });
+        });
+    };
+    load();
+    const timer = setInterval(load, 15_000);
+    return () => {
+      stale = true;
+      clearInterval(timer);
+    };
+  }, [authed, liveOpen, token]);
 
   const submitBrokerAccount = async () => {
     if (!acctForm.label || !acctForm.keyId || !acctForm.secretKey) {
@@ -747,6 +795,59 @@ export default function AdminPage() {
                       添加账户
                     </Button>
                   </Space>
+
+                  <Space size={8}>
+                    <Switch size="small" checked={liveOpen} onChange={setLiveOpen} />
+                    <Typography.Text>实时仓位(全部账户,展开期间每 15 秒直连券商刷新)</Typography.Text>
+                  </Space>
+                  {liveOpen &&
+                    (livePositions?.error ? (
+                      <Alert type="warning" showIcon message={livePositions.error} />
+                    ) : !livePositions ? (
+                      <Typography.Text type="secondary">正在向券商拉取账户数据…</Typography.Text>
+                    ) : !livePositions.accounts?.length ? (
+                      <Alert
+                        type="info"
+                        showIcon
+                        message="没有可查询的账户(默认账户未配置,且没有启用中的附加账户)"
+                      />
+                    ) : (
+                      livePositions.accounts.map((acc) => (
+                        <Card
+                          key={acc.id ?? 'env'}
+                          size="small"
+                          type="inner"
+                          title={
+                            <Space size={8}>
+                              <span>{acc.label}</span>
+                              <Tag>{purposeLabel(acc.purpose)}</Tag>
+                            </Space>
+                          }
+                          extra={
+                            acc.error ? null : (
+                              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                                净值 {fmtMoney(acc.equity)} · 现金 {fmtMoney(acc.cash)} · 持仓{' '}
+                                {fmtMoney(acc.positions_value)}
+                              </Typography.Text>
+                            )
+                          }
+                        >
+                          {acc.error ? (
+                            <Alert type="warning" showIcon message={`取数失败:${acc.error}`} />
+                          ) : (
+                            <Table
+                              rowKey="symbol"
+                              size="small"
+                              pagination={false}
+                              dataSource={acc.positions || []}
+                              locale={{ emptyText: '空仓' }}
+                              scroll={{ x: 620 }}
+                              columns={LIVE_POSITION_COLUMNS}
+                            />
+                          )}
+                        </Card>
+                      ))
+                    ))}
                 </Space>
               )}
             </Card>

@@ -72,6 +72,7 @@ export const adminApi = {
   primaryLedger: (token, enabled) =>
     adminRequest('/primary-ledger', { method: 'POST', token, body: { enabled } }),
   brokerAccounts: (token) => adminRequest('/broker-accounts', { token }),
+  brokerPositions: (token) => adminRequest('/broker-accounts/positions', { token }),
   addBrokerAccount: (token, body) =>
     adminRequest('/broker-accounts', { method: 'POST', token, body }),
   updateBrokerAccount: (token, id, body) =>
