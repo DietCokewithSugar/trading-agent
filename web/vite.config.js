@@ -15,6 +15,7 @@ export default defineConfig({
         manualChunks: {
           antd: ['antd'],
           recharts: ['recharts'],
+          charts: ['lightweight-charts'],
         },
       },
     },

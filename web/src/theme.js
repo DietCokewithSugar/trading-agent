@@ -1,5 +1,6 @@
-// 全站配色与主题 token 的唯一来源(现为明暗双主题)。
-// 设计语言:Nothing —— 单色为底、排版驱动、工业精密、颜色只编码数据。
+// 全站配色与主题 token 的唯一来源(明暗双主题)。
+// 设计语言:Claude 风格的暖炭交易终端 —— 暖近黑底、陶土色(clay)交互点缀、
+// 大圆角卡片、数据密度优先;颜色只编码数据,亮色点缀只给交互件。
 // 美股市场惯例:绿涨红跌(绿=涨/利好/买入/盈利,红=跌/利空/卖出/亏损)。
 // 盈亏着色一律引用这里的 getPnl(mode) / COLOR_UP / COLOR_DOWN 或 .up/.down 工具类,
 // 不要在组件里散写色值。
@@ -8,33 +9,34 @@
 
 import { theme as antdTheme } from 'antd';
 
-// ---- Nothing 双调色板 ----
+// ---- 暖炭双调色板 ----
 export const DARK = Object.freeze({
-  black: '#000000',
-  surface: '#111111',
-  surfaceRaised: '#1A1A1A',
-  border: '#222222',
-  borderVisible: '#333333',
-  textDisabled: '#666666',
-  textSecondary: '#999999',
-  textPrimary: '#E8E8E8',
-  textDisplay: '#FFFFFF',
+  black: '#141413', // 页面底色:暖近黑(非蓝调、非纯黑)
+  surface: '#1C1C1A',
+  surfaceRaised: '#262624',
+  border: '#2A2A27',
+  borderVisible: '#3B3B36',
+  textDisabled: '#6B6862',
+  textSecondary: '#A29F98',
+  textPrimary: '#E8E6E1',
+  textDisplay: '#F5F4F0',
 });
 
 export const LIGHT = Object.freeze({
-  black: '#F5F5F5', // 浅色模式下的"页面底色"
+  black: '#FAF9F5', // 浅色模式下的"页面底色":暖米白
   surface: '#FFFFFF',
-  surfaceRaised: '#F0F0F0',
-  border: '#E8E8E8',
-  borderVisible: '#CCCCCC',
-  textDisabled: '#999999',
-  textSecondary: '#666666',
-  textPrimary: '#1A1A1A',
-  textDisplay: '#000000',
+  surfaceRaised: '#F0EEE7',
+  border: '#E8E6DE',
+  borderVisible: '#D1CEC3',
+  textDisabled: '#A29F96',
+  textSecondary: '#6E6B63',
+  textPrimary: '#21201C',
+  textDisplay: '#131210',
 });
 
 // ---- 盈亏色(按背景分别调校以保证对比度)----
-// 深色底用更亮更饱和的绿/红(antd green-7/red-7 在 #000 上会发灰);浅色沿用经典值。
+// 深色底用更亮更饱和的绿/红;浅色沿用经典值。盈亏符号(+/-)始终随色值一起出现,
+// 保证红绿色弱用户仍可通过符号读出方向。
 export const PNL = Object.freeze({
   dark: { up: '#3DD68C', down: '#FF5C5C' },
   light: { up: '#389e0d', down: '#cf1322' },
@@ -49,50 +51,51 @@ export const COLOR_UP = PNL.dark.up;
 export const COLOR_DOWN = PNL.dark.down;
 
 // ---- 交互主色与警示色 ----
-// 主色单色化:深色用白、浅色用黑(不再用 antd 蓝)。
-export const ACCENT_PRIMARY = Object.freeze({ dark: '#FFFFFF', light: '#000000' });
+// 交互主色:陶土色(clay),只用于交互件(按钮/链接/选中态),绝不编码涨跌数据
+// (与盈亏红可区分:陶土偏橙、低饱和;数据红更冷更亮)。
+export const ACCENT_PRIMARY = Object.freeze({ dark: '#D97757', light: '#C15F3C' });
 // 警示用去饱和琥珀 + 边框,绝不复用盈亏红(避免与"红=跌"冲突)。
 export const ALERT = Object.freeze({ dark: '#D4A843', light: '#B7791F' });
 
-// ---- Recharts 主题色(按模式)----
+// ---- 图表主题色(recharts 与 lightweight-charts 共用,按模式)----
 export function getChart(mode) {
   if (mode === 'light') {
     return {
-      grid: '#e8e8e8',
-      axis: '#8c8c8c',
-      reference: '#bfbfbf',
-      benchmark: '#8c8c8c',
-      benchmarkGold: '#d4a017',
-      tooltipBg: '#ffffff',
-      tooltipBorder: '#d9d9d9',
-      tooltipShadow: 'none', // Nothing 禁用阴影,改用 1px 边框
-      markerStroke: '#ffffff',
+      grid: '#ECEAE2',
+      axis: '#94918A',
+      reference: '#C4C1B6',
+      benchmark: '#94918A',
+      benchmarkGold: '#C29B26',
+      tooltipBg: '#FFFFFF',
+      tooltipBorder: '#D1CEC3',
+      tooltipShadow: 'none', // 阴影禁用,统一 1px 边框
+      markerStroke: '#FFFFFF',
     };
   }
   return {
-    grid: '#222222',
-    axis: '#777777',
-    reference: '#333333',
-    benchmark: '#999999',
-    benchmarkGold: '#d4a017',
-    tooltipBg: '#1a1a1a',
-    tooltipBorder: '#333333',
+    grid: '#242422',
+    axis: '#84817A',
+    reference: '#3B3B36',
+    benchmark: '#A29F98',
+    benchmarkGold: '#D4A843',
+    tooltipBg: '#262624',
+    tooltipBorder: '#3B3B36',
     tooltipShadow: 'none',
-    markerStroke: '#000000', // 深色净值线上买卖点描边用黑色才能读出
+    markerStroke: '#141413',
   };
 }
 
 // 兼容旧导出:默认深色图表色板。
 export const CHART = getChart('dark');
 
-// ---- 资产配置/多系列调色板:单色阶梯灰度(权重是序数,亮度阶梯比彩虹更诚实)----
+// ---- 资产配置/多系列调色板:暖灰阶梯(权重是序数,亮度阶梯比彩虹更诚实)----
 const PIE_DARK = [
-  '#FFFFFF', '#D9D9D9', '#B0B0B0', '#8A8A8A', '#6E6E6E',
-  '#565656', '#444444', '#373737', '#2C2C2C',
+  '#E8E6E1', '#C9C6BF', '#ABA79F', '#8E8B83', '#737068',
+  '#5C5952', '#48453F', '#37352F', '#2A2822',
 ];
 const PIE_LIGHT = [
-  '#000000', '#333333', '#555555', '#777777', '#999999',
-  '#B0B0B0', '#C4C4C4', '#D6D6D6', '#E2E2E2',
+  '#21201C', '#3B3934', '#55524B', '#6E6B63', '#88857C',
+  '#A29F96', '#BCB9AF', '#D3D0C6', '#E5E2D9',
 ];
 
 export function getPieColors(mode) {
@@ -108,13 +111,15 @@ export function buildThemeConfig(mode) {
   const p = isDark ? DARK : LIGHT;
   const primary = isDark ? ACCENT_PRIMARY.dark : ACCENT_PRIMARY.light;
   const bodyFont =
-    "'Space Grotesk', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', system-ui, sans-serif";
-  const monoFont = "'Space Mono', 'JetBrains Mono', 'SF Mono', monospace";
+    "'Archivo Variable', 'Archivo', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', system-ui, sans-serif";
+  const monoFont = "'JetBrains Mono', 'SF Mono', 'Menlo', monospace";
 
   return {
     algorithm: isDark ? antdTheme.darkAlgorithm : antdTheme.defaultAlgorithm,
     token: {
       colorPrimary: primary,
+      colorInfo: primary,
+      colorLink: primary,
       colorBgBase: p.black,
       colorBgLayout: p.black,
       colorBgContainer: p.surface,
@@ -126,11 +131,11 @@ export function buildThemeConfig(mode) {
       colorTextTertiary: p.textDisabled,
       colorTextQuaternary: p.textDisabled,
       colorTextDescription: p.textSecondary,
-      borderRadius: 8,
+      borderRadius: 10,
       fontSize: 14,
       fontFamily: bodyFont,
       fontFamilyCode: monoFont,
-      // Nothing 禁用阴影:全部抹平
+      // 终端质感不用漂浮阴影:全部抹平,层级靠边框与底色
       boxShadow: 'none',
       boxShadowSecondary: 'none',
       boxShadowTertiary: 'none',
@@ -140,20 +145,23 @@ export function buildThemeConfig(mode) {
       Card: {
         boxShadowTertiary: 'none',
         colorBgContainer: p.surface,
-        borderRadiusLG: 12,
+        borderRadiusLG: 14,
+        headerFontSize: 14,
       },
       Table: {
-        headerBg: p.surfaceRaised,
+        headerBg: 'transparent',
         headerColor: p.textSecondary,
+        headerSplitColor: 'transparent',
         borderColor: p.border,
         rowHoverBg: p.surfaceRaised,
-        colorBgContainer: p.surface,
+        colorBgContainer: 'transparent',
+        cellPaddingBlockSM: 10,
       },
       Tag: {
         // 边框等宽方角药丸:透明底 + 1px 边框
         defaultBg: 'transparent',
         defaultColor: p.textSecondary,
-        borderRadiusSM: 4,
+        borderRadiusSM: 5,
         colorBorder: p.borderVisible,
       },
       Tabs: {
@@ -161,18 +169,16 @@ export function buildThemeConfig(mode) {
         itemColor: p.textSecondary,
         itemSelectedColor: p.textDisplay,
         itemHoverColor: p.textPrimary,
-        horizontalItemGutter: 24,
+        horizontalItemGutter: 22,
       },
       Segmented: {
-        itemSelectedBg: p.surfaceRaised,
+        itemSelectedBg: isDark ? '#33332F' : '#FFFFFF',
         itemSelectedColor: p.textDisplay,
         itemColor: p.textSecondary,
-        trackBg: p.surface,
-        borderRadius: 6,
+        trackBg: isDark ? '#111110' : '#ECEAE2',
+        borderRadius: 8,
       },
       Button: {
-        // 主按钮:深色=白底黑字,浅色=黑底白字
-        colorTextLightSolid: isDark ? p.black : '#FFFFFF',
         primaryShadow: 'none',
         defaultShadow: 'none',
         borderColorDisabled: p.border,
@@ -189,6 +195,16 @@ export function buildThemeConfig(mode) {
         colorBgContainer: p.surface,
         activeBorderColor: primary,
         hoverBorderColor: p.textSecondary,
+      },
+      Select: {
+        colorBgContainer: p.surface,
+      },
+      DatePicker: {
+        colorBgContainer: p.surface,
+      },
+      Collapse: {
+        headerBg: 'transparent',
+        contentBg: 'transparent',
       },
       Badge: {
         colorBorderBg: p.surface,
