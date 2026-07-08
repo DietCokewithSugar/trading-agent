@@ -13,17 +13,6 @@ import {
   Typography,
 } from 'antd';
 import {
-  ResponsiveContainer,
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  Tooltip,
-  ReferenceLine,
-  CartesianGrid,
-  Legend,
-} from 'recharts';
-import {
   api,
   fmtMoney,
   fmtNum,
@@ -33,9 +22,10 @@ import {
   SHADOW_VARIANT_DESCRIPTIONS,
   TRIGGER_LABELS,
 } from '../api.js';
-import { getChart, getPnl, ACCENT_PRIMARY } from '../theme.js';
+import { getChart, ACCENT_PRIMARY } from '../theme.js';
 import { useThemeMode } from '../theme-context.jsx';
 import FlashOnChange from './FlashOnChange.jsx';
+import ComparisonChart from './ComparisonChart.jsx';
 
 const RANGES = [
   { key: '1d', label: '1天', hours: 24 },
@@ -87,6 +77,10 @@ const VARIANT_ORDER = [
   'spy_benchmark',
   'cash',
 ];
+
+// 腾位孪生(025):与基础变体唯一差异是现金/容量不足时先止盈腾位再重试买入。
+// 对比图按「普通组 / 腾位组」分开展示,实盘曲线在两组都出现作为参照。
+const isRotationVariant = (v) => v === 'immediate_rotation' || v.endsWith('_rotation');
 
 const SHADOW_TRIGGER_LABELS = { ...TRIGGER_LABELS, benchmark: '基准建仓', news: '新闻信号' };
 
@@ -214,7 +208,6 @@ function BrokerMirrorCard({ version = 0 }) {
 export default function AblationPage({ version = 0, onSymbolClick }) {
   const { mode } = useThemeMode();
   const CHART = getChart(mode);
-  const PNL = getPnl(mode);
   const VARIANT_COLORS = useMemo(() => buildVariantColors(mode, CHART), [mode]); // eslint-disable-line react-hooks/exhaustive-deps
   const [rangeKey, setRangeKey] = useState('1w');
   const [data, setData] = useState(null);
@@ -291,6 +284,8 @@ export default function AblationPage({ version = 0, onSymbolClick }) {
         variant,
         name: SHADOW_VARIANT_LABELS[variant] || variant,
         color: VARIANT_COLORS[variant] || CHART.axis,
+        emphasis: variant === 'actual',
+        dashed: variant === 'spy_benchmark' || variant === 'cash',
         rows: rows.map((p) => ({
           time: new Date(p.t).getTime(),
           pct: base > 0 ? ((Number(p.total_value) - base) / base) * 100 : 0,
@@ -298,6 +293,16 @@ export default function AblationPage({ version = 0, onSymbolClick }) {
       };
     });
   }, [data, VARIANT_COLORS]);
+
+  // 普通组:实盘 + 基础变体 + SPY/现金基准;腾位组:实盘(参照) + 全部腾位孪生
+  const normalSeries = useMemo(
+    () => chartSeries.filter((s) => !isRotationVariant(s.variant)),
+    [chartSeries]
+  );
+  const rotationSeries = useMemo(
+    () => chartSeries.filter((s) => s.variant === 'actual' || isRotationVariant(s.variant)),
+    [chartSeries]
+  );
 
   const tableRows = useMemo(() => {
     if (!data?.available) return [];
@@ -617,7 +622,7 @@ export default function AblationPage({ version = 0, onSymbolClick }) {
     <Space direction="vertical" size={16} style={{ width: '100%' }}>
       <Card
         size="small"
-        title="净值对比(窗口起点归一为 0%)"
+        title="净值对比 · 普通组(窗口起点归一为 0%)"
         extra={
           <Space>
             <Segmented
@@ -632,73 +637,14 @@ export default function AblationPage({ version = 0, onSymbolClick }) {
           </Space>
         }
       >
-        {!chartSeries.length ? (
-          <Typography.Text type="secondary">
-            该时间范围内暂无足够的净值快照(影子组合每 10 分钟记一次净值,启用后会逐渐积累)。
-          </Typography.Text>
-        ) : (
-          <ResponsiveContainer width="100%" height={360}>
-            <LineChart margin={{ top: 10, right: 8, bottom: 0, left: 4 }}>
-              <CartesianGrid stroke={CHART.grid} strokeDasharray="3 3" />
-              <XAxis
-                dataKey="time"
-                type="number"
-                domain={['dataMin', 'dataMax']}
-                tickFormatter={(t) =>
-                  new Date(t).toLocaleString('zh-CN', {
-                    month: '2-digit',
-                    day: '2-digit',
-                    hour: '2-digit',
-                    minute: '2-digit',
-                  })
-                }
-                stroke={CHART.axis}
-                fontSize={12}
-                allowDuplicatedCategory={false}
-              />
-              <YAxis
-                tickFormatter={(v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)}%`}
-                stroke={CHART.axis}
-                fontSize={12}
-                width={62}
-              />
-              <Tooltip
-                contentStyle={{
-                  background: CHART.tooltipBg,
-                  border: `1px solid ${CHART.tooltipBorder}`,
-                  borderRadius: 8,
-                  boxShadow: CHART.tooltipShadow,
-                }}
-                labelFormatter={(t) => new Date(t).toLocaleString('zh-CN')}
-                formatter={(value, name) => [
-                  <span key="v" style={{ color: value >= 0 ? PNL.up : PNL.down }}>
-                    {fmtPercent(value)}
-                  </span>,
-                  name,
-                ]}
-              />
-              <Legend />
-              <ReferenceLine y={0} stroke={CHART.reference} strokeDasharray="4 4" />
-              {chartSeries.map((s) => (
-                <Line
-                  key={s.variant}
-                  data={s.rows}
-                  name={s.name}
-                  dataKey="pct"
-                  type="monotone"
-                  stroke={s.color}
-                  strokeWidth={s.variant === 'actual' ? 2.5 : 1.5}
-                  strokeDasharray={
-                    s.variant === 'spy_benchmark' || s.variant === 'cash' ? '5 4' : undefined
-                  }
-                  dot={false}
-                  isAnimationActive={false}
-                />
-              ))}
-            </LineChart>
-          </ResponsiveContainer>
-        )}
+        <ComparisonChart series={normalSeries} />
       </Card>
+
+      {rotationSeries.some((s) => s.variant !== 'actual') && (
+        <Card size="small" title="净值对比 · 腾位组(各变体的止盈腾位孪生,实盘曲线为参照)">
+          <ComparisonChart series={rotationSeries} />
+        </Card>
+      )}
 
       <Card size="small" title="组合对比(点击行展开:说明 / 胜率 / 持仓 / 成交)">
         <Table
