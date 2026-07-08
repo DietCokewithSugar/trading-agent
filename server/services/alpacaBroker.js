@@ -36,10 +36,12 @@ async function alpacaRequest(method, path, body = null, creds = null) {
 }
 
 /**
- * 提交限价单(day 有效)。qty 支持碎股字符串;盘前盘后须 extended_hours=true。
+ * 提交订单(day 有效,默认限价单)。qty 支持碎股字符串;盘前盘后须 extended_hours=true。
+ * type='market' 时不带 limit_price 且调用方必须传 extendedHours=false(券商拒绝
+ * market+extended_hours);休市/盘外提交的市价单自动排队到下一常规时段(同 closeAllPositions)。
  * client_order_id 为幂等键:重复提交同一 id 时券商返回 422,由调用方按"已提交"处理。
  */
-export function submitOrder({ symbol, qty, side, limitPrice, extendedHours = false, clientOrderId }, creds = null) {
+export function submitOrder({ symbol, qty, side, type = 'limit', limitPrice, extendedHours = false, clientOrderId }, creds = null) {
   return alpacaRequest(
     'POST',
     '/v2/orders',
@@ -47,9 +49,9 @@ export function submitOrder({ symbol, qty, side, limitPrice, extendedHours = fal
       symbol,
       qty: String(qty),
       side,
-      type: 'limit',
+      type,
       time_in_force: 'day',
-      limit_price: String(limitPrice),
+      ...(type === 'limit' ? { limit_price: String(limitPrice) } : {}),
       extended_hours: extendedHours,
       client_order_id: clientOrderId,
     },

@@ -95,6 +95,8 @@ const MIRROR_STATUS_LABELS = {
   canceled: '已撤销',
   expired: '已过期',
   rejected: '被拒绝',
+  deferred: '待开盘',
+  abandoned: '已放弃',
   skipped: '跳过',
   error: '出错',
 };
@@ -143,7 +145,21 @@ function BrokerMirrorCard({ version = 0 }) {
     { title: '内部价', dataIndex: 'internal_price', width: 90, align: 'right', render: (v) => <span className="num">{fmtMoney(v)}</span> },
     { title: '券商价', dataIndex: 'filled_avg_price', width: 90, align: 'right', render: (v) => (v ? <span className="num">{fmtMoney(v)}</span> : '—') },
     { title: '偏差(bps)', dataIndex: 'diff_bps', width: 90, align: 'right', render: bpsCell },
-    { title: '状态', dataIndex: 'status', width: 90, render: (v, row) => <span title={row.note || ''}>{MIRROR_STATUS_LABELS[v] || v}</span> },
+    {
+      title: '状态',
+      dataIndex: 'status',
+      width: 100,
+      render: (v, row) => (
+        <span title={row.note || ''}>
+          {MIRROR_STATUS_LABELS[v] || v}
+          {Number(row.attempt) > 1 && (
+            <Typography.Text type="secondary" style={{ fontSize: 11, marginLeft: 4 }}>
+              ·第{row.attempt}次
+            </Typography.Text>
+          )}
+        </span>
+      ),
+    },
   ];
 
   return (
@@ -171,6 +187,11 @@ function BrokerMirrorCard({ version = 0 }) {
                 ({fmtNum(stats.fill_rate, 1)}%)
               </Typography.Text>
             )}
+            {Boolean(stats.retried) && (
+              <Typography.Text type="secondary" style={{ fontSize: 11, marginLeft: 4 }}>
+                重挂 {stats.retried}
+              </Typography.Text>
+            )}
           </span>
         </Descriptions.Item>
         <Descriptions.Item label="平均偏差">
@@ -192,8 +213,9 @@ function BrokerMirrorCard({ version = 0 }) {
       <Typography.Paragraph type="secondary" style={{ fontSize: 13, margin: '12px 0 0' }}>
         实盘每笔成交同步以「限价单」发往券商模拟账户,按真实盘口撮合(盘前盘后带盘外标记,当日有效)。
         偏差为正表示券商撮合价对我们不利(买得更贵/卖得更便宜)——即内部滑点模型偏乐观;
-        长期未成交/过期的单说明该价格在真实盘口拿不到。净值偏离与逐笔偏差共同回答:
-        内部账本的收益有多少经得起真实撮合的检验。
+        休市时段的单先「待开盘」,开盘后以实时价挂出;过期未成交会按策略重挂(卖单保证成交收敛,
+        买单漂移超限即放弃),偏差始终以最初内部成交价为基准,追单成本如实入账。
+        净值偏离与逐笔偏差共同回答:内部账本的收益有多少经得起真实撮合的检验。
       </Typography.Paragraph>
     </Card>
   );

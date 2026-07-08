@@ -29,6 +29,13 @@ services:
         value: "true"
       - key: BROKER_MIRROR_LIMIT_SLACK_PERCENT
         value: "1"
+      # 镜像单未成交跟进(027):限价重挂上限 / 买单追单策略 / 对账清理开关
+      - key: BROKER_MIRROR_MAX_RETRIES
+        value: "3"
+      - key: BROKER_MIRROR_BUY_RETRY
+        value: "chase"
+      - key: BROKER_MIRROR_RECONCILE
+        value: "true"
       # 券商净值对照快照间隔(秒,下限 10;休市自动降回 10 分钟一条)
       - key: BROKER_SNAPSHOT_SECONDS
         value: "30"

@@ -53,9 +53,16 @@ export const config = {
   alpacaSecretKey: process.env.ALPACA_SECRET_KEY || '',
   alpacaBaseUrl: process.env.ALPACA_BASE_URL || 'https://paper-api.alpaca.markets',
   enableBrokerMirror: process.env.ENABLE_BROKER_MIRROR !== 'false',
-  // marketable 限价单的穿价容忍(%):买 = 内部成交价 ×(1+N%),卖 = ×(1−N%);
-  // 当日有效,收盘未成交自动过期并计入"未成交"偏差样本
+  // marketable 限价单的穿价容忍(%):买 = 基准价 ×(1+N%),卖 = ×(1−N%);当日有效。
+  // 未成交不再一弃了之(027):休市顺延到开盘以实时价挂单,到期按下面的策略重挂 ——
+  // 卖单保证收敛(限价重试耗尽升级市价单),买单限时追单(漂移超限/次数用尽放弃)
   brokerMirrorLimitSlackPercent: num(process.env.BROKER_MIRROR_LIMIT_SLACK_PERCENT, 1),
+  // 镜像单限价重挂次数上限(0=关闭重挂;卖单在限价重试耗尽后仍升级一次市价单)
+  brokerMirrorMaxRetries: num(process.env.BROKER_MIRROR_MAX_RETRIES, 3),
+  // 买单追单策略:chase=限时追单(漂移上限复用 BUY_PRICE_DRIFT_ABORT_PERCENT),off=过期即放弃
+  brokerMirrorBuyRetry: process.env.BROKER_MIRROR_BUY_RETRY === 'off' ? 'off' : 'chase',
+  // 对账清理:定期(约 30 分钟)平掉"券商持有但内部账本已不持有"的滞留仓位
+  brokerMirrorReconcile: process.env.BROKER_MIRROR_RECONCILE !== 'false',
   // 券商净值对照快照间隔(秒,下限 10s;休市时段净值不动,自动降回 10 分钟一条)
   brokerSnapshotSeconds: num(process.env.BROKER_SNAPSHOT_SECONDS, 30),
 
