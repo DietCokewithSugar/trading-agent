@@ -1,10 +1,34 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { Button, Card, Empty, Input, Space, Table, Tag } from 'antd';
-import TradeItem from './TradeItem.jsx';
+import { Button, Card, Empty, Input, Segmented, Select, Space, Table, Tag, Typography } from 'antd';
 import CandidatePool from './CandidatePool.jsx';
-import { api, fmtMoney, fmtTime } from '../api.js';
+import {
+  api,
+  fmtMoney,
+  fmtNum,
+  fmtTime,
+  TIER_LABELS,
+  TRIGGER_LABELS,
+  REGIME_LABELS,
+  REGIME_TAG_COLORS,
+} from '../api.js';
 
 const PAGE_SIZE = 100;
+
+const SIDE_FILTERS = [
+  { value: 'all', label: '全部' },
+  { value: 'buy', label: '买入' },
+  { value: 'sell', label: '卖出' },
+];
+
+const TRIGGER_FILTERS = [
+  { value: 'all', label: '全部触发方式' },
+  { value: 'news', label: '新闻信号' },
+  { value: 'stop_loss', label: '自动止损' },
+  { value: 'take_profit', label: '自动止盈' },
+  { value: 'max_hold', label: '持有超时' },
+  { value: 'review', label: '持仓复查' },
+  { value: 'rotation', label: '止盈腾位' },
+];
 
 /** 等待开盘成交的挂单(休市时段产生的信号),有挂单时显示在交易列表上方 */
 function PendingOrders({ orders, onSymbolClick }) {
@@ -56,8 +80,38 @@ function PendingOrders({ orders, onSymbolClick }) {
   );
 }
 
+/** 行展开:决策依据 / 信号档位 / 触发新闻(把长文本移出主表,保持行密度) */
+function TradeExpand({ trade: t }) {
+  return (
+    <div style={{ padding: '2px 8px' }}>
+      {t.reason && (
+        <p className="reason" style={{ margin: 0 }}>
+          <span className="reason-label">决策依据</span>
+          {t.reason}
+        </p>
+      )}
+      {t.news_analyses && (
+        <Typography.Paragraph type="secondary" style={{ fontSize: 12.5, margin: '6px 0 0' }}>
+          信号:{t.news_analyses.sentiment === 'bullish' ? '利好' : '利空'}
+          {t.news_analyses.tier ? ` · ${TIER_LABELS[t.news_analyses.tier]}` : ''}
+        </Typography.Paragraph>
+      )}
+      {t.news_articles && (
+        <Typography.Paragraph style={{ fontSize: 12.5, margin: '6px 0 0' }}>
+          <Typography.Text type="secondary">触发新闻 </Typography.Text>
+          <a href={t.news_articles.url} target="_blank" rel="noreferrer">
+            {t.news_articles.title}
+          </a>
+        </Typography.Paragraph>
+      )}
+    </div>
+  );
+}
+
 export default function TradesPage({ trades, macroVersion = 0, onSymbolClick }) {
   const [search, setSearch] = useState('');
+  const [side, setSide] = useState('all');
+  const [trigger, setTrigger] = useState('all');
   const [extra, setExtra] = useState([]);
   const [loadingMore, setLoadingMore] = useState(false);
   const [noMore, setNoMore] = useState(false);
@@ -77,9 +131,19 @@ export default function TradesPage({ trades, macroVersion = 0, onSymbolClick }) 
     });
   }, [trades, extra]);
 
-  const filtered = search.trim()
-    ? merged.filter((t) => t.symbol.includes(search.trim().toUpperCase()))
-    : merged;
+  const filtered = useMemo(() => {
+    const q = search.trim().toUpperCase();
+    return merged.filter((t) => {
+      if (q && !t.symbol.includes(q)) return false;
+      if (side !== 'all' && t.side !== side) return false;
+      if (trigger !== 'all') {
+        // 历史数据的新闻单 trigger 可能为空:按「非其他触发方式」归入新闻信号
+        const trig = t.trigger || 'news';
+        if (trig !== trigger) return false;
+      }
+      return true;
+    });
+  }, [merged, search, side, trigger]);
 
   const loadMore = async () => {
     setLoadingMore(true);
@@ -93,40 +157,135 @@ export default function TradesPage({ trades, macroVersion = 0, onSymbolClick }) 
     setLoadingMore(false);
   };
 
-  if (!merged.length) {
-    return (
-      <div>
-        <CandidatePool version={macroVersion} onSymbolClick={onSymbolClick} />
-        <PendingOrders orders={pending} onSymbolClick={onSymbolClick} />
-        <Empty description="暂无交易记录。出现高档位的利好/利空新闻时,AI 会自动执行模拟买卖。" />
-      </div>
-    );
-  }
+  const columns = [
+    {
+      title: '时间',
+      dataIndex: 'created_at',
+      width: 100,
+      render: (v) => <span className="num muted">{fmtTime(v)}</span>,
+    },
+    {
+      title: '方向',
+      dataIndex: 'side',
+      width: 130,
+      render: (v, t) => (
+        <Space size={4}>
+          <Tag color={v === 'buy' ? 'green' : 'red'} style={{ marginRight: 0 }}>
+            {v === 'buy' ? '买入' : '卖出'}
+          </Tag>
+          {TRIGGER_LABELS[t.trigger] && (
+            <span className="muted small">{TRIGGER_LABELS[t.trigger]}</span>
+          )}
+        </Space>
+      ),
+    },
+    {
+      title: '代码',
+      dataIndex: 'symbol',
+      width: 90,
+      render: (s) => (
+        <Button type="link" size="small" style={{ padding: 0, fontWeight: 600 }} onClick={() => onSymbolClick(s)}>
+          {s}
+        </Button>
+      ),
+    },
+    {
+      title: '成交',
+      dataIndex: 'quantity',
+      align: 'right',
+      width: 180,
+      render: (v, t) => (
+        <span className="num">
+          {fmtNum(v, 4)} 股 × {fmtMoney(t.price)}
+        </span>
+      ),
+    },
+    {
+      title: '金额',
+      dataIndex: 'amount',
+      align: 'right',
+      width: 110,
+      render: (v) => <span className="num">{fmtMoney(v)}</span>,
+    },
+    {
+      title: '已实现盈亏',
+      dataIndex: 'realized_pnl',
+      align: 'right',
+      width: 120,
+      render: (v) =>
+        v === null || v === undefined ? (
+          <span className="muted num">—</span>
+        ) : (
+          <span className={`num ${Number(v) >= 0 ? 'up' : 'down'}`}>{fmtMoney(v)}</span>
+        ),
+    },
+    {
+      title: '宏观环境',
+      dataIndex: 'macro_regime',
+      width: 100,
+      responsive: ['md'],
+      render: (v) =>
+        v && REGIME_LABELS[v] ? (
+          <Tag color={REGIME_TAG_COLORS[v]} style={{ marginRight: 0 }}>
+            {REGIME_LABELS[v]}
+          </Tag>
+        ) : (
+          <span className="muted">—</span>
+        ),
+    },
+  ];
 
   return (
     <div>
       <CandidatePool version={macroVersion} onSymbolClick={onSymbolClick} />
       <PendingOrders orders={pending} onSymbolClick={onSymbolClick} />
-      <Input.Search
-        allowClear
-        placeholder="按股票代码筛选"
-        value={search}
-        onChange={(e) => setSearch(e.target.value)}
-        style={{ maxWidth: 280, marginBottom: 16 }}
-      />
 
-      <Space direction="vertical" size={8} style={{ width: '100%' }}>
-        {filtered.map((t) => (
-          <TradeItem key={t.id} trade={t} onSymbolClick={onSymbolClick} />
-        ))}
-      </Space>
-
-      {!noMore && merged.length >= PAGE_SIZE && (
-        <div className="load-more-row">
-          <Button onClick={loadMore} loading={loadingMore}>
-            加载更多
-          </Button>
-        </div>
+      {!merged.length ? (
+        <Empty description="暂无交易记录。出现高档位的利好/利空新闻时,AI 会自动执行模拟买卖。" />
+      ) : (
+        <Card
+          title={`成交记录 (${filtered.length})`}
+          extra={
+            <Space wrap>
+              <Segmented size="small" options={SIDE_FILTERS} value={side} onChange={setSide} />
+              <Select
+                size="small"
+                style={{ width: 140 }}
+                options={TRIGGER_FILTERS}
+                value={trigger}
+                onChange={setTrigger}
+              />
+              <Input.Search
+                allowClear
+                size="small"
+                placeholder="按代码筛选"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                style={{ width: 150 }}
+              />
+            </Space>
+          }
+        >
+          <Table
+            rowKey="id"
+            size="small"
+            columns={columns}
+            dataSource={filtered}
+            pagination={false}
+            scroll={{ x: 840 }}
+            expandable={{
+              expandedRowRender: (t) => <TradeExpand trade={t} />,
+              rowExpandable: (t) => Boolean(t.reason || t.news_analyses || t.news_articles),
+            }}
+          />
+          {!noMore && merged.length >= PAGE_SIZE && (
+            <div className="load-more-row" style={{ marginBottom: 0 }}>
+              <Button onClick={loadMore} loading={loadingMore}>
+                加载更多
+              </Button>
+            </div>
+          )}
+        </Card>
       )}
     </div>
   );

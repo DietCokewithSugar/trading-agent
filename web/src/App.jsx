@@ -55,7 +55,6 @@ function MainApp() {
   const [macroVersion, setMacroVersion] = useState(0);
   const [stats, setStats] = useState(null);
   const [performance, setPerformance] = useState(null);
-  const [status, setStatus] = useState(null);
   const [error, setError] = useState(null);
   const [live, setLive] = useState(false);
   const liveRef = useRef(false);
@@ -76,11 +75,10 @@ function MainApp() {
 
   const refresh = useCallback(async () => {
     try {
-      const [p, s, t, st, stt, perf] = await Promise.all([
+      const [p, s, t, stt, perf] = await Promise.all([
         api.portfolio(),
         api.snapshots(),
         api.trades(),
-        api.status(),
         api.stats(),
         api.performance().catch(() => null),
       ]);
@@ -91,7 +89,6 @@ function MainApp() {
       // 宏观页/候选池/消融页自行拉取数据,这里同样递增版本号:
       // SSE 断线的兜底轮询期间与重置/重连补拉时,这些页面不能停在旧数据
       setMacroVersion((v) => v + 1);
-      setStatus(st);
       setStats(stt);
       if (perf) setPerformance(perf);
       setError(null);
@@ -177,7 +174,6 @@ function MainApp() {
         );
       } catch { /* 忽略畸形数据 */ }
     });
-    es.addEventListener('cycle', () => api.status().then(setStatus).catch(() => {}));
     // 宏观环境切换 / 候选池变化:递增版本号触发宏观页重拉,regime 切换时弹提示
     es.addEventListener('macro', (e) => {
       setMacroVersion((v) => v + 1);
@@ -200,14 +196,15 @@ function MainApp() {
 
   const pnl = portfolio?.pnl ?? 0;
   const session = portfolio?.market_session;
+  const dayPnl = stats?.day_pnl;
 
-  // 次要指标(英雄区右侧):现金 / 持仓 / 盈亏
+  // 次要指标(账户条右侧):现金 / 持仓 / 盈亏
   const heroMetrics = portfolio
     ? [
         { label: '可用现金 / CASH', value: <span className="num">{fmtMoney(portfolio.cash)}</span> },
         { label: '持仓市值 / HOLDINGS', value: <span className="num">{fmtMoney(portfolio.positions_value)}</span> },
         {
-          label: '总盈亏 / P&L',
+          label: '总盈亏 / TOTAL P&L',
           value: (
             <span className={`num ${pnl >= 0 ? 'up' : 'down'}`}>
               {fmtMoney(pnl)} ({fmtPercent(portfolio.pnl_percent)})
@@ -246,12 +243,20 @@ function MainApp() {
           </div>
         </div>
         {portfolio && (
-          <div className="hero dot-grid">
+          <div className="hero">
             <div className="hero__primary">
-              <div className="label-caps" style={{ marginBottom: 8 }}>
-                总资产 / TOTAL ASSETS
+              <div className="label-caps" style={{ marginBottom: 6 }}>
+                总资产 / TOTAL EQUITY
               </div>
               <div className="display-num">{fmtMoney(portfolio.total_value)}</div>
+              {dayPnl !== null && dayPnl !== undefined && (
+                <div className={`num ${dayPnl >= 0 ? 'up' : 'down'}`} style={{ marginTop: 6, fontSize: 13.5 }}>
+                  今日 {fmtMoney(dayPnl)}
+                  {stats?.day_pnl_percent !== null && stats?.day_pnl_percent !== undefined
+                    ? ` (${fmtPercent(stats.day_pnl_percent)})`
+                    : ''}
+                </div>
+              )}
             </div>
             <div className="hero__secondary">
               {heroMetrics.map((m) => (
@@ -276,8 +281,8 @@ function MainApp() {
             trades={trades}
             stats={stats}
             performance={performance}
-            status={status}
             onSymbolClick={setActiveSymbol}
+            onNavigate={setTab}
           />
         )}
         {tab === 'news' && <NewsFeed version={newsVersion} onSymbolClick={setActiveSymbol} />}
