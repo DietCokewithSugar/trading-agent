@@ -11,6 +11,7 @@ import {
 import { api, fmtMoney, fmtNum, fmtPercent } from '../api.js';
 import { getChart, getPnl } from '../theme.js';
 import { useThemeMode } from '../theme-context.jsx';
+import { TZ_OFFSET_SEC, toShiftedSec, fmtShiftedTime, tickMarkFormatter } from './chartTime.js';
 
 const RANGES = [
   { key: '1d', label: '1天', hours: 24 },
@@ -19,25 +20,12 @@ const RANGES = [
   { key: 'all', label: '全部', hours: null },
 ];
 
-// 图表库按 UTC 解读时间戳:整体平移到本地时区,坐标轴/刻度即显示本地钟点
-const TZ_OFFSET_SEC = -new Date().getTimezoneOffset() * 60;
-
 function hexToRgba(hex, alpha) {
   const v = hex.replace('#', '');
   const r = parseInt(v.slice(0, 2), 16);
   const g = parseInt(v.slice(2, 4), 16);
   const b = parseInt(v.slice(4, 6), 16);
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-}
-
-const pad = (n) => String(n).padStart(2, '0');
-
-/** 平移后的秒级时间戳 → 本地钟点文本(平移后 UTC 读数即本地墙钟) */
-function fmtShiftedTime(sec, { withTime = true } = {}) {
-  const d = new Date(sec * 1000);
-  const date = `${pad(d.getUTCMonth() + 1)}/${pad(d.getUTCDate())}`;
-  if (!withTime) return date;
-  return `${date} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
 }
 
 /** 按数值跨度选轴刻度精度:窄幅波动时固定「$xx.xk」会让所有刻度同值 */
@@ -123,26 +111,44 @@ export default function NetWorthChart({ snapshots, trades, initialCapital, bench
     return { points, markers };
   }, [rows, trades]);
 
-  // 买入持有参考基线(标普500/黄金,日线):1 天视图下日线粒度太粗,不展示
+  // 买入持有参考基线(标普500/黄金,日线):1 天视图下日线粒度太粗,不展示。
+  // 日线收盘点只保留到最后一个净值时刻为止(数据源当日未收盘的行会落在"未来"
+  // ——本地时区的次日凌晨,画出去是悬空斜线);窗口起点用前收盘补锚点,让基准
+  // 从左缘画起;窗口内不足 2 个真实收盘点或覆盖不到窗口的 40% 时整条隐藏
+  // (假期/周末窗口里两点拉一条长斜线没有信息量,看起来像数据错误)。
   const benchmarkSeries = useMemo(() => {
     if (rangeKey === '1d' || !benchmarks?.length || !points.length) return [];
-    const minTime = points[0].time - 24 * 3600;
-    const maxTime = points[points.length - 1].time + 24 * 3600;
+    const windowStart = points[0].time;
+    const windowEnd = points[points.length - 1].time;
+    const span = Math.max(windowEnd - windowStart, 1);
     return benchmarks
       .filter((b) => b?.series?.length)
-      .map((b) => ({
-        symbol: b.symbol,
-        name: b.name || b.symbol,
-        rows: b.series
+      .map((b) => {
+        const all = b.series
           .map((p) => ({
             // 日线点定位到当日美股收盘附近(20:00 UTC)
-            time: Math.floor(new Date(`${p.date}T20:00:00Z`).getTime() / 1000) + TZ_OFFSET_SEC,
+            time: toShiftedSec(`${p.date}T20:00:00Z`),
             value: Number(p.value),
           }))
-          .filter((p) => Number.isFinite(p.value) && p.time >= minTime && p.time <= maxTime)
-          .sort((a, b) => a.time - b.time),
-      }))
-      .filter((b) => b.rows.length > 1);
+          .filter((p) => Number.isFinite(p.value))
+          .sort((x, y) => x.time - y.time);
+        const inWindow = all.filter((p) => p.time >= windowStart && p.time <= windowEnd);
+        const prev = [...all].reverse().find((p) => p.time < windowStart);
+        const anchorValue = prev ? prev.value : inWindow[0]?.value;
+        const rows =
+          anchorValue !== undefined && (!inWindow.length || inWindow[0].time > windowStart)
+            ? [{ time: windowStart, value: anchorValue }, ...inWindow]
+            : inWindow;
+        const lastReal = inWindow[inWindow.length - 1];
+        return {
+          symbol: b.symbol,
+          name: b.name || b.symbol,
+          rows,
+          realPoints: inWindow.length,
+          coverage: lastReal ? (lastReal.time - windowStart) / span : 0,
+        };
+      })
+      .filter((b) => b.rows.length > 1 && b.realPoints >= 2 && b.coverage >= 0.4);
   }, [benchmarks, points, rangeKey]);
 
   const base = Number(initialCapital) || points[0]?.value || 0;
@@ -175,12 +181,7 @@ export default function NetWorthChart({ snapshots, trades, initialCapital, bench
         borderVisible: false,
         timeVisible: true,
         secondsVisible: false,
-        tickMarkFormatter: (time, tickMarkType) => {
-          const d = new Date(time * 1000);
-          // 平移后的 UTC 读数即本地墙钟;Year/Month/Day 档显示日期,更细档显示钟点
-          if (tickMarkType <= 2) return `${d.getUTCMonth() + 1}/${d.getUTCDate()}`;
-          return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
-        },
+        tickMarkFormatter,
       },
       crosshair: {
         mode: CrosshairMode.Magnet,
@@ -313,7 +314,16 @@ export default function NetWorthChart({ snapshots, trades, initialCapital, bench
               {active ? (hover ? fmtShiftedTime(active.time) : `最新 ${fmtShiftedTime(active.time)}`) : ''}
             </span>
             {hover?.trades?.length ? (
-              <span className="muted">
+              // 单行省略:成交详情再长也不换行,避免悬停买卖点时读数区高度跳动
+              <span
+                className="muted chart-head__trades"
+                title={hover.trades
+                  .map(
+                    (t) =>
+                      `${t.side === 'buy' ? '买入' : '卖出'} ${t.symbol} ${fmtNum(t.quantity, 4)} 股 @ ${fmtMoney(t.price)}`
+                  )
+                  .join('\n')}
+              >
                 {hover.trades
                   .map(
                     (t) =>

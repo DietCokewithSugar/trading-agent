@@ -256,15 +256,78 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  flex-wrap: wrap;
+  /* 固定单行:悬停买卖点出现的成交详情不换行、不撑高读数区(高度跳动会让
+     光标反复脱离标记点) */
+  flex-wrap: nowrap;
+  overflow: hidden;
+  min-height: 20px;
   margin-top: 6px;
   font-size: 12.5px;
+}
+
+.chart-head__meta > span {
+  white-space: nowrap;
+}
+
+.chart-head__trades {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .chart-canvas {
   position: relative;
   width: 100%;
   height: 340px;
+}
+
+/* ---- 多组合对比图:头部时间读数 + 可点击图例芯片 ---- */
+.cmp-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+  min-height: 18px;
+}
+
+.cmp-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 14px;
+  margin-bottom: 8px;
+  min-height: 22px;
+}
+
+.cmp-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  border: none;
+  background: none;
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: opacity 150ms var(--ease);
+}
+
+.cmp-chip__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 3px;
+  flex: 0 0 auto;
+}
+
+.cmp-chip__val {
+  color: var(--text-primary);
+  font-size: 11.5px;
+}
+
+.cmp-chip.is-hidden {
+  opacity: 0.4;
 }
 
 /* ---- 资产配置条(持仓卡内,替代饼图) ---- */
