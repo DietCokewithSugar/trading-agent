@@ -87,6 +87,11 @@ const SOURCE_TIERS = [
   },
 ];
 
+// SEC EDGAR 官方直抓(source='sec-filings')的监管披露档:唯一的 1.00 满分档。
+// 放在 SOURCE_TIERS 数组外、只按抓取渠道选中——FMP/Yahoo 转发的 sec.gov 链接
+// 仍走域名匹配的 0.95 档(±聚合折价),满分只给官方接口直抓的原始文件
+const SEC_FILING_TIER = { label: '监管披露', score: 1.0 };
+
 // 域名不在分层表内:有原文 URL 的小站给中低分,连 URL 都没有的按最低档处理
 const UNKNOWN_WITH_URL_SCORE = 0.4;
 const UNKNOWN_NO_URL_SCORE = 0.25;
@@ -130,8 +135,14 @@ function matchTier(domain, publisher) {
 export function scoreSource(article) {
   const domain = extractDomain(article.url);
 
+  // 按抓取渠道强制选档:SEC 官方直抓 → 监管披露满分档;
   // FMP 公告端点(fmp-press)就是公司新闻稿本身,直接按公司公告档计分
-  let tier = article.source === 'fmp-press' ? SOURCE_TIERS[1] : matchTier(domain, article.publisher);
+  let tier =
+    article.source === 'sec-filings'
+      ? SEC_FILING_TIER
+      : article.source === 'fmp-press'
+        ? SOURCE_TIERS[1]
+        : matchTier(domain, article.publisher);
 
   let score;
   let label;
@@ -164,6 +175,18 @@ export function isPressRelease(article) {
   const domain = article?.source_domain || extractDomain(article?.url);
   if (!domain) return false;
   return SOURCE_TIERS[1].domains.some((d) => domain === d || domain.endsWith(`.${d}`));
+}
+
+/**
+ * 是否为"公司自述类"来源(新闻稿通道 + 公司自报的监管披露如 8-K)。
+ * 自述内容真实性高,但立场天然偏发行方:利好方向与新闻稿共享
+ * pressBullishPenalty 门槛折价(孤立自述利好挂起等独立信源确认);
+ * 利空自述反而是强信号(公司很少自曝坏消息),不折价、按满分可信度直接生效。
+ * 注意与 isPressRelease 的分工:统计口径(signalStats 的 is_press 桶、advisor 的
+ * press 规则)仍只看新闻稿,监管披露单独用 is_filing 观测,证据链互不污染。
+ */
+export function isSelfIssued(article) {
+  return isPressRelease(article) || article?.source === 'sec-filings';
 }
 
 /** 时效分:1 小时内 1.0,随后线性衰减,24 小时以上 0.5;无发布时间按 0.7 */

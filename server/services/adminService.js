@@ -5,6 +5,7 @@ import { allocatorStatus } from './allocator.js';
 import { queueStatus } from './openQueue.js';
 import { withTradeLock } from './trader.js';
 import { clearCaches } from './fmp.js';
+import { clearSecFilingsState } from './secFilings.js';
 import { clearQuotesPushState } from './quotesPush.js';
 import { getPrimaryValuation } from './primaryLedger.js';
 import { broadcast } from './bus.js';
@@ -163,6 +164,7 @@ export async function resetAllData() {
     // 注意:人工交易暂停开关(tradingHalt)不随重置改变——人工开关由人工关;
     // 经济日历缓存也不清——它是外部市场数据,清空只会在下次轮询前误报「日历不可用」
     clearCaches();
+    clearSecFilingsState(); // SEC 已见 filing 集合:库已清空需可重灌(ticker 映射是外部数据,保留)
     clearQuotesPushState(); // 池符号清单/广播去重签名:避免继续为已清空的池取报价
     resetMetrics();
     resetRiskControlState();
