@@ -82,6 +82,25 @@ test('summarizeMirror:空输入安全', () => {
   assert.equal(summarizeMirror(null).orders, 0);
 });
 
+test('summarizeMirror:deferred 在途、abandoned 未成交、被重挂接替的行记 retried 出分母(027)', () => {
+  const orders = [
+    { id: 1, side: 'sell', status: 'expired', retry_of: null },           // 被 #2 接替 → retried,出分母
+    { id: 2, side: 'sell', status: 'filled', diff_bps: 12, retry_of: 1 }, // 重挂成交:正常计入
+    { id: 3, side: 'buy', status: 'deferred' },                           // 休市顺延:按在途计
+    { id: 4, side: 'buy', status: 'abandoned' },                          // 追单放弃:未成交
+    { id: 5, side: 'buy', status: 'expired' },                            // 无人接替的过期:未成交
+  ];
+  const s = summarizeMirror(orders);
+  assert.equal(s.orders, 4, '被接替的 #1 不进分母');
+  assert.equal(s.filled, 1);
+  assert.equal(s.retried, 1);
+  assert.equal(s.unfilled, 2, 'abandoned + 无人接替的 expired');
+  assert.equal(s.pending, 1, 'deferred 在途');
+  assert.equal(s.fill_rate, 25);
+  assert.equal(s.sell.n, 1);
+  assert.equal(s.sell.avg_bps, 12);
+});
+
 test('mapBrokerPositions:字段映射为内部估值口径,非法行丢弃(024)', () => {
   const rows = mapBrokerPositions([
     {

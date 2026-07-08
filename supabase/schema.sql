@@ -748,3 +748,13 @@ alter table broker_mirror_snapshots add column if not exists account_id bigint r
 alter table news_articles add column if not exists source_type text;    -- 'regulatory_filing'
 alter table news_articles add column if not exists filing_form text;    -- '8-K' / '8-K/A'
 alter table news_articles add column if not exists filing_items text[]; -- ['2.02','9.01']
+
+-- 券商镜像单未成交跟进(027):休市顺延(status='deferred')/ 到期重挂 / 对账清理。
+-- attempt = 第几次尝试(1=首挂),retry_of 指向被接替的上一次尝试;
+-- 对账清理行靠 trade_id is null + client_order_id like 'reconcile-%' 识别,不加专列
+alter table broker_mirror_orders add column if not exists attempt int not null default 1;
+alter table broker_mirror_orders add column if not exists retry_of bigint references broker_mirror_orders(id) on delete set null;
+drop index if exists idx_broker_mirror_orders_open;
+create index if not exists idx_broker_mirror_orders_open
+  on broker_mirror_orders (submitted_at)
+  where status in ('submitted', 'partially_filled', 'deferred');
