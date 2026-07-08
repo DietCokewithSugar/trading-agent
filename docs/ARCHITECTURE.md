@@ -238,10 +238,10 @@ broker_mirror_orders/snapshots 加 account_id/source_variant)。
 
 ## 6. 前端(`web/`)
 
-Vite + React 18 + Ant Design 5,专业金融终端设计语言(深蓝石墨底/钢蓝交互色/无渐变阴影,
-参考 IBKR / Robinhood 一类交易面板),双主题默认暗色;净值曲线用 TradingView 开源的
-lightweight-charts,其余图表 recharts;PnL 沿用美股惯例**绿涨红跌**(唯一的数据编码色)。
-数据一律走 `/api/*`,实时性靠 SSE,SSE 断线才降级 60 秒轮询。
+Vite + React 18 + Ant Design 5,暖炭金融终端设计语言(暖近黑底/陶土色交互点缀/虚线行分隔/
+无渐变阴影,图标用 @ant-design/icons 且克制、绝不用 emoji),双主题默认暗色;净值曲线用
+TradingView 开源的 lightweight-charts,其余图表 recharts;PnL 沿用美股惯例**绿涨红跌**
+(唯一的数据编码色)。数据一律走 `/api/*`,实时性靠 SSE,SSE 断线才降级 60 秒轮询。
 
 | 文件 | 职责 |
 |---|---|
@@ -252,14 +252,14 @@ lightweight-charts,其余图表 recharts;PnL 沿用美股惯例**绿涨红跌**(
 | `src/theme.js` | **颜色唯一事实源**:明暗两套调色板、`buildThemeConfig(mode)`(antd token)、图表/饼图/PnL 取色器 |
 | `src/theme-context.jsx` | 主题上下文:localStorage 持久化,设 `<html data-theme>` 联动 CSS 变量 |
 | `src/quotes-context.jsx` | 实时报价上下文:App 持有 SSE `quotes` 事件的 symbol→报价映射,候选池/个股抽屉经 `useLiveQuotes()` 消费(避免层层透传 props);SSE 断线或管理重置即清空,消费方回退拉取值 |
-| `src/styles.css` / `src/fonts.css` | 双主题 CSS 变量、布局、签名工具类(`.label-caps`/`.display-num`/`.segbar`/`.chart-head`(净值图读数)/`.alloc`(配置条)/`.slband`(风控区间)/`.metric-row`/`.param-chip`)、价格闪烁动画(`.flash-up`/`.flash-down`,只用 `--up`/`--down`,受 reduced-motion 全局覆盖);自托管字体(Inter Variable / IBM Plex Mono) |
+| `src/styles.css` / `src/fonts.css` | 双主题 CSS 变量、布局、签名工具类(`.label-caps`/`.display-num`/`.segbar`/`.chart-head`(净值图读数)/`.alloc`(配置条)/`.slband`(风控区间)/`.metric-row`/`.param-chip`)、价格闪烁动画(`.flash-up`/`.flash-down`,只用 `--up`/`--down`,受 reduced-motion 全局覆盖);自托管字体(Archivo Variable / JetBrains Mono——claude.ai 的 Styrene/Tiempos 为商业授权字体不可自托管,取其开源近似) |
 | `components/Dashboard.jsx` | 主页装配:净值图 + 关键指标栏(2/3+1/3 网格)、持仓卡(资产配置条 + 持仓表,止损→止盈风控区间微条)、最近交易紧凑表 |
 | `components/MetricsPanel.jsx` | 关键指标栏(累计收益/今日盈亏/已实现/夏普/胜率/回撤,行式指标) |
 | `components/NetWorthChart.jsx` | 净值曲线(lightweight-charts):初始资金基线分色面积(上绿下红)、十字光标扫读时头部固定读数跟随(净值/盈亏/时刻/当刻成交,信息不挤悬浮框)、买卖点标记、SPY/GLD 基准虚线、窗口切换,主题切换整体重建 |
 | `components/CandidatePool.jsx` | 候选池实时预览(状态/分数)+ 两层止盈止损参考:「若现在买入」锚定**现价** ±系统口径(朋友照此设单才正确,非常规时段带 盘前/盘后 ±% 徽标);「入池价反事实区间」进度条显示现价落在 [入池价−止损%, 入池价+止盈%] 何处,越界即标注"若入池即买已止盈/止损"(016 排队成本的可视化)。现价/时段经 SSE `quotes` 事件实时合并(`useLiveQuotes`,`/api/pool` 拉取值兜底),漂移随之实时重算 |
 | `components/NewsFeed.jsx` | 新闻+分析流(服务端过滤/搜索/分页,SSE 触发刷新) |
 | `components/NewsHeatmap.jsx` | 按票聚合的信号热力格 |
-| `components/TradesPage.jsx` | 交易页:候选池/待开盘挂单 + 成交记录表(方向/触发筛选 + 代码搜索,行展开显示决策依据与触发新闻,游标加载更多) |
+| `components/TradesPage.jsx` | 交易页:候选池/待开盘挂单 + 成交记录表。默认**单日视图**(今天,无成交回落到最近有成交的一天),DatePicker + 前后一天步进(选中早于已加载范围的日期按游标补拉一页);代码搜索为跨日期全量检索;另有方向/触发筛选,行展开显示决策依据与触发新闻 |
 | `components/SymbolModal.jsx` | 个股抽屉:报价(含盘外)/持仓/事件聚类的分析历史/交易历史。报价取「live 或一次性拉取」的完整快照之一(不逐字段混用——live 盘外字段为 null 是有效信息),SSE 覆盖的持仓/池内票实时跳动;未覆盖符号打开期间每 15s 轮询轻量 `/api/quote/:symbol`(只换 quote 字段,带切换符号作废守卫,热力图选中日期不被打断) |
 | `components/SignalStatsPage.jsx` | 「信号质量」页:窗口切换/截断提示/IC 卡/排队成本卡/**实盘兑现表**/各分桶组表(命中率按 CI 显著性着色) |
 | `components/MacroPage.jsx` | 「宏观」页:当前 regime 与生效参数、市场核验、经济日历与黑窗、宏观事件流 |

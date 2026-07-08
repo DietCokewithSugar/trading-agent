@@ -1,4 +1,4 @@
-/* 专业金融终端设计语言 · 明暗双主题(默认深色)。
+/* Claude 风暖炭交易终端 · 明暗双主题(默认深色)。
    组件样式交给 Ant Design 5(token 在 web/src/theme.js),这里保留布局、
    排版工具类与少量标志性元素(账户条 / 净值图读数 / 配置条 / 风控区间 / 分段条 / 热力图)。
    维护注:盈亏色 --up/--down 须与 theme.js 的 PNL 同步,theme.js 为权威。 */
@@ -6,50 +6,50 @@
 /* ---- 双主题 CSS 变量 ---- */
 :root,
 :root[data-theme='dark'] {
-  --black: #0b0f17;
-  --surface: #111726;
-  --surface-raised: #1a2233;
-  --border: #1e2635;
-  --border-visible: #2c3850;
-  --text-disabled: #5b6478;
-  --text-secondary: #949db2;
-  --text-primary: #e6eaf2;
-  --text-display: #f7f9fc;
+  --black: #141413;
+  --surface: #1c1c1a;
+  --surface-raised: #262624;
+  --border: #2a2a27;
+  --border-visible: #3b3b36;
+  --text-disabled: #6b6862;
+  --text-secondary: #a29f98;
+  --text-primary: #e8e6e1;
+  --text-display: #f5f4f0;
   --up: #3dd68c;   /* 涨/利好/买入/盈利 */
   --down: #ff5c5c; /* 跌/利空/卖出/亏损 */
   --muted: var(--text-secondary);
-  --accent: #5b8def;
+  --accent: #d97757;
   --alert: #d4a843;
   --ease: cubic-bezier(0.25, 0.1, 0.25, 1);
   /* 新闻热力图:单色阶梯,空日近底色 → 高频接近文字主色。不用盈亏绿/红。 */
-  --heat-0: rgba(230, 234, 242, 0.06);
-  --heat-1: rgba(230, 234, 242, 0.22);
-  --heat-2: rgba(230, 234, 242, 0.42);
-  --heat-3: rgba(230, 234, 242, 0.66);
-  --heat-4: rgba(230, 234, 242, 0.92);
+  --heat-0: rgba(232, 230, 225, 0.06);
+  --heat-1: rgba(232, 230, 225, 0.22);
+  --heat-2: rgba(232, 230, 225, 0.42);
+  --heat-3: rgba(232, 230, 225, 0.66);
+  --heat-4: rgba(232, 230, 225, 0.92);
 }
 
 :root[data-theme='light'] {
-  --black: #f4f6fa;
+  --black: #faf9f5;
   --surface: #ffffff;
-  --surface-raised: #eef1f6;
-  --border: #e4e8f0;
-  --border-visible: #c9d0dd;
-  --text-disabled: #9aa3b5;
-  --text-secondary: #5d6677;
-  --text-primary: #1c2333;
-  --text-display: #0a0f1c;
+  --surface-raised: #f0eee7;
+  --border: #e8e6de;
+  --border-visible: #d1cec3;
+  --text-disabled: #a29f96;
+  --text-secondary: #6e6b63;
+  --text-primary: #21201c;
+  --text-display: #131210;
   --up: #389e0d;
   --down: #cf1322;
   --muted: var(--text-secondary);
-  --accent: #1f5ae0;
+  --accent: #c15f3c;
   --alert: #b7791f;
   --ease: cubic-bezier(0.25, 0.1, 0.25, 1);
-  --heat-0: rgba(28, 35, 51, 0.06);
-  --heat-1: rgba(28, 35, 51, 0.2);
-  --heat-2: rgba(28, 35, 51, 0.4);
-  --heat-3: rgba(28, 35, 51, 0.64);
-  --heat-4: rgba(28, 35, 51, 0.88);
+  --heat-0: rgba(33, 32, 28, 0.06);
+  --heat-1: rgba(33, 32, 28, 0.2);
+  --heat-2: rgba(33, 32, 28, 0.4);
+  --heat-3: rgba(33, 32, 28, 0.64);
+  --heat-4: rgba(33, 32, 28, 0.88);
 }
 
 * {
@@ -61,7 +61,7 @@ body {
   background: var(--black);
   color: var(--text-primary);
   font-family:
-    'Inter Variable', 'Inter', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', system-ui,
+    'Archivo Variable', 'Archivo', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', system-ui,
     sans-serif;
   -webkit-font-smoothing: antialiased;
 }
@@ -97,16 +97,16 @@ body {
   flex-wrap: wrap;
 }
 
-/* 账户条:左侧总资产 + 今日变动,右侧现金/持仓/盈亏,水平细分隔(券商账户头样式) */
+/* 账户条:左侧总资产 + 今日变动,右侧现金/持仓/盈亏,细分隔(券商账户头样式) */
 .hero {
   display: flex;
   align-items: stretch;
   justify-content: space-between;
   gap: 28px;
   flex-wrap: wrap;
-  padding: 18px 22px;
+  padding: 20px 24px;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 14px;
   background: var(--surface);
 }
 
@@ -130,41 +130,54 @@ body {
   border-left: 1px solid var(--border);
 }
 
-/* ---- 排版工具类 ---- */
-.mono {
-  font-family: 'IBM Plex Mono', 'SF Mono', 'JetBrains Mono', monospace;
+/* 涨跌变动小胶囊:图标 + 数值,底色极淡 */
+.delta-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
 }
 
-/* ALL-CAPS 等宽小标签:区块标题 / 指标名(终端感的来源,克制使用) */
+.delta-chip.up { background: color-mix(in srgb, var(--up) 12%, transparent); }
+.delta-chip.down { background: color-mix(in srgb, var(--down) 12%, transparent); }
+
+/* ---- 排版工具类 ---- */
+.mono {
+  font-family: 'JetBrains Mono', 'SF Mono', 'Menlo', monospace;
+}
+
+/* 小标签:区块标题 / 指标名。正常大小写、常规字体——克制、不做作 */
 .label-caps {
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  letter-spacing: 0.01em;
   color: var(--text-secondary);
-  line-height: 1.2;
+  line-height: 1.3;
 }
 
 .caption {
   font-size: 12px;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.02em;
 }
 
-/* 全站数字 = 表格数字对齐(数据即视觉),字体沿用正文 Inter 保持专业密度 */
+/* 全站数字 = 等宽 + 表格数字对齐(数据即视觉) */
 .num {
+  font-family: 'JetBrains Mono', 'SF Mono', 'Menlo', monospace;
   font-variant-numeric: tabular-nums;
   font-feature-settings: 'tnum' 1;
 }
 
-/* 英雄数字:大号紧字距,券商账户总值样式 */
+/* 英雄数字:大号紧字距(正文字体的重磅字重,非等宽——参考专业终端账户头) */
 .display-num {
   font-variant-numeric: tabular-nums;
   font-feature-settings: 'tnum' 1;
-  font-weight: 640;
+  font-weight: 680;
   font-size: clamp(32px, 4.6vw, 46px);
   line-height: 1.05;
-  letter-spacing: -0.025em;
+  letter-spacing: -0.02em;
   color: var(--text-display);
 }
 
@@ -193,7 +206,12 @@ body {
   text-align: center;
   color: var(--muted);
   font-size: 12.5px;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.02em;
+}
+
+/* 表格行分隔改虚线(参考终端面板的点线分隔,弱化行框感) */
+.ant-table-tbody > tr > td {
+  border-bottom-style: dashed !important;
 }
 
 /* 卡片内的「分析理由 / 决策依据」说明块:左边框规则,不用填充 */
@@ -208,10 +226,8 @@ body {
 }
 
 .reason-label {
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 11px;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+  font-size: 11.5px;
+  font-weight: 500;
   margin-right: 8px;
   color: var(--text-disabled);
 }
@@ -229,19 +245,19 @@ body {
 .chart-head__value {
   font-variant-numeric: tabular-nums;
   font-feature-settings: 'tnum' 1;
-  font-weight: 620;
+  font-weight: 660;
   font-size: 26px;
   line-height: 1.1;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.015em;
   color: var(--text-display);
 }
 
 .chart-head__meta {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 10px;
   flex-wrap: wrap;
-  margin-top: 4px;
+  margin-top: 6px;
   font-size: 12.5px;
 }
 
@@ -260,7 +276,7 @@ body {
   display: flex;
   width: 100%;
   height: 10px;
-  border-radius: 3px;
+  border-radius: 5px;
   overflow: hidden;
   gap: 2px;
 }
@@ -293,7 +309,7 @@ body {
 .alloc__dot {
   width: 8px;
   height: 8px;
-  border-radius: 2px;
+  border-radius: 3px;
   flex: 0 0 auto;
 }
 
@@ -340,7 +356,7 @@ body {
   justify-content: space-between;
   gap: 12px;
   padding: 11px 0;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px dashed var(--border);
 }
 
 .metric-row:last-child {
@@ -373,11 +389,11 @@ body {
 }
 
 .step-no {
-  font-family: 'IBM Plex Mono', monospace;
+  font-family: 'JetBrains Mono', monospace;
   font-size: 12px;
   font-weight: 600;
   color: var(--text-disabled);
-  letter-spacing: 0.06em;
+  letter-spacing: 0.04em;
   margin-right: 10px;
 }
 
@@ -393,7 +409,7 @@ body {
   gap: 2px;
   padding: 8px 14px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 10px;
   background: var(--surface-raised);
 }
 
@@ -431,7 +447,7 @@ body {
 .segbar__seg {
   flex: 1 1 0;
   height: 8px;
-  border-radius: 1px;
+  border-radius: 2px;
   background: var(--border);
   transition: background 250ms var(--ease), opacity 250ms var(--ease);
 }
@@ -486,7 +502,7 @@ body {
 .heatmap__cell {
   width: 13px;
   height: 13px;
-  border-radius: 2px;
+  border-radius: 3px;
   background: var(--heat-0);
   border: 1px solid transparent;
   cursor: pointer;
@@ -525,7 +541,7 @@ body {
 .heatmap__legend-cell {
   width: 11px;
   height: 11px;
-  border-radius: 2px;
+  border-radius: 3px;
 }
 
 /* 价格变动闪烁:涨绿/跌红后 ~0.8s 渐回原色(FlashOnChange.jsx 消费)。

@@ -1,5 +1,7 @@
-import React, { useState, useMemo, useEffect } from 'react';
-import { Button, Card, Empty, Input, Segmented, Select, Space, Table, Tag, Typography } from 'antd';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
+import { Button, Card, DatePicker, Empty, Input, Segmented, Select, Space, Table, Tag, Typography } from 'antd';
+import { LeftOutlined, RightOutlined } from '@ant-design/icons';
+import dayjs from 'dayjs';
 import CandidatePool from './CandidatePool.jsx';
 import {
   api,
@@ -112,10 +114,14 @@ export default function TradesPage({ trades, macroVersion = 0, onSymbolClick }) 
   const [search, setSearch] = useState('');
   const [side, setSide] = useState('all');
   const [trigger, setTrigger] = useState('all');
+  // 选中日期:null = 自动(今天有成交看今天,否则回落到最近有成交的一天)
+  const [selectedDate, setSelectedDate] = useState(null);
   const [extra, setExtra] = useState([]);
   const [loadingMore, setLoadingMore] = useState(false);
   const [noMore, setNoMore] = useState(false);
   const [pending, setPending] = useState([]);
+  // 已按日期补拉过的日子,避免重复请求
+  const fetchedDatesRef = useRef(new Set());
 
   // 挂单状态随成交事件变化:trades 更新(SSE trade 事件触发重拉)时一并刷新
   useEffect(() => {
@@ -131,10 +137,35 @@ export default function TradesPage({ trades, macroVersion = 0, onSymbolClick }) 
     });
   }, [trades, extra]);
 
+  // 代码搜索是跨日期的全量检索;未搜索时按天查看
+  const searching = Boolean(search.trim());
+  // 数据按时间倒序,第一条的日期即「今天或最近有成交的一天」
+  const latestActiveDay = merged.length ? dayjs(merged[0].created_at) : null;
+  const activeDate = selectedDate || latestActiveDay;
+
+  // 选中早于已加载范围的日期时,以该日结束时间为游标向服务端补拉一页
+  useEffect(() => {
+    if (!selectedDate || !merged.length) return;
+    const key = selectedDate.format('YYYY-MM-DD');
+    if (fetchedDatesRef.current.has(key)) return;
+    const oldestLoaded = merged[merged.length - 1]?.created_at;
+    if (oldestLoaded && selectedDate.endOf('day').isBefore(dayjs(oldestLoaded))) {
+      fetchedDatesRef.current.add(key);
+      api
+        .trades(PAGE_SIZE, { before: selectedDate.endOf('day').toISOString() })
+        .then((rows) => setExtra((prev) => [...prev, ...rows]))
+        .catch(() => {});
+    }
+  }, [selectedDate, merged]);
+
   const filtered = useMemo(() => {
     const q = search.trim().toUpperCase();
     return merged.filter((t) => {
-      if (q && !t.symbol.includes(q)) return false;
+      if (q) {
+        if (!t.symbol.includes(q)) return false;
+      } else if (activeDate && !dayjs(t.created_at).isSame(activeDate, 'day')) {
+        return false;
+      }
       if (side !== 'all' && t.side !== side) return false;
       if (trigger !== 'all') {
         // 历史数据的新闻单 trigger 可能为空:按「非其他触发方式」归入新闻信号
@@ -143,7 +174,7 @@ export default function TradesPage({ trades, macroVersion = 0, onSymbolClick }) 
       }
       return true;
     });
-  }, [merged, search, side, trigger]);
+  }, [merged, search, side, trigger, activeDate, searching]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const loadMore = async () => {
     setLoadingMore(true);
@@ -155,6 +186,13 @@ export default function TradesPage({ trades, macroVersion = 0, onSymbolClick }) 
       setExtra((prev) => [...prev, ...next]);
     } catch { /* 下次再试 */ }
     setLoadingMore(false);
+  };
+
+  const stepDay = (delta) => {
+    if (!activeDate) return;
+    const next = activeDate.add(delta, 'day');
+    if (next.isAfter(dayjs(), 'day')) return;
+    setSelectedDate(next);
   };
 
   const columns = [
@@ -244,9 +282,32 @@ export default function TradesPage({ trades, macroVersion = 0, onSymbolClick }) 
         <Empty description="暂无交易记录。出现高档位的利好/利空新闻时,AI 会自动执行模拟买卖。" />
       ) : (
         <Card
-          title={`成交记录 (${filtered.length})`}
+          title={
+            searching
+              ? `“${search.trim().toUpperCase()}” 的成交 (${filtered.length})`
+              : `${activeDate ? activeDate.format('M月D日') : ''} 成交 (${filtered.length})`
+          }
           extra={
             <Space wrap>
+              {!searching && (
+                <Space.Compact size="small">
+                  <Button icon={<LeftOutlined />} onClick={() => stepDay(-1)} title="前一天" />
+                  <DatePicker
+                    size="small"
+                    value={activeDate}
+                    onChange={setSelectedDate}
+                    allowClear={Boolean(selectedDate)}
+                    disabledDate={(d) => d.isAfter(dayjs(), 'day')}
+                    style={{ width: 130 }}
+                  />
+                  <Button
+                    icon={<RightOutlined />}
+                    onClick={() => stepDay(1)}
+                    disabled={!activeDate || activeDate.isSame(dayjs(), 'day')}
+                    title="后一天"
+                  />
+                </Space.Compact>
+              )}
               <Segmented size="small" options={SIDE_FILTERS} value={side} onChange={setSide} />
               <Select
                 size="small"
@@ -258,30 +319,39 @@ export default function TradesPage({ trades, macroVersion = 0, onSymbolClick }) 
               <Input.Search
                 allowClear
                 size="small"
-                placeholder="按代码筛选"
+                placeholder="按公司代码检索全部"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                style={{ width: 150 }}
+                style={{ width: 170 }}
               />
             </Space>
           }
         >
-          <Table
-            rowKey="id"
-            size="small"
-            columns={columns}
-            dataSource={filtered}
-            pagination={false}
-            scroll={{ x: 840 }}
-            expandable={{
-              expandedRowRender: (t) => <TradeExpand trade={t} />,
-              rowExpandable: (t) => Boolean(t.reason || t.news_analyses || t.news_articles),
-            }}
-          />
-          {!noMore && merged.length >= PAGE_SIZE && (
+          {!searching && !selectedDate && latestActiveDay && !latestActiveDay.isSame(dayjs(), 'day') && (
+            <Typography.Paragraph type="secondary" style={{ fontSize: 12.5, marginTop: 0, marginBottom: 12 }}>
+              今日暂无成交,已显示最近有成交的一天;用日期选择器可查看任意一天。
+            </Typography.Paragraph>
+          )}
+          {!filtered.length ? (
+            <Empty description={searching ? '没有匹配该代码的成交记录。' : '该日无成交记录。'} />
+          ) : (
+            <Table
+              rowKey="id"
+              size="small"
+              columns={columns}
+              dataSource={filtered}
+              pagination={false}
+              scroll={{ x: 840 }}
+              expandable={{
+                expandedRowRender: (t) => <TradeExpand trade={t} />,
+                rowExpandable: (t) => Boolean(t.reason || t.news_analyses || t.news_articles),
+              }}
+            />
+          )}
+          {searching && !noMore && merged.length >= PAGE_SIZE && (
             <div className="load-more-row" style={{ marginBottom: 0 }}>
               <Button onClick={loadMore} loading={loadingMore}>
-                加载更多
+                向更早加载
               </Button>
             </div>
           )}

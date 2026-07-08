@@ -160,7 +160,7 @@ export default function NetWorthChart({ snapshots, trades, initialCapital, bench
         textColor: CHART.axis,
         fontSize: 11,
         fontFamily:
-          "'Inter Variable', 'Inter', 'PingFang SC', system-ui, sans-serif",
+          "'Archivo Variable', 'Archivo', 'PingFang SC', system-ui, sans-serif",
         attributionLogo: false,
       },
       grid: {
@@ -302,7 +302,7 @@ export default function NetWorthChart({ snapshots, trades, initialCapital, bench
     <div>
       <div className="chart-head">
         <div>
-          <div className="chart-head__value num">{active ? fmtMoney(active.value) : '—'}</div>
+          <div className="chart-head__value">{active ? fmtMoney(active.value) : '—'}</div>
           <div className="chart-head__meta">
             {active && (
               <span className={`num ${activePnl >= 0 ? 'up' : 'down'}`}>

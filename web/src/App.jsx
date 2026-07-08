@@ -1,5 +1,17 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { Alert, App as AntApp, Badge, Segmented, Tabs, Tag, Typography } from 'antd';
+import {
+  AimOutlined,
+  DashboardOutlined,
+  ExperimentOutlined,
+  FallOutlined,
+  GlobalOutlined,
+  MoonOutlined,
+  ReadOutlined,
+  RiseOutlined,
+  SunOutlined,
+  SwapOutlined,
+} from '@ant-design/icons';
 import { api, fmtMoney, fmtNum, fmtPercent, SESSION_LABELS, REGIME_LABELS } from './api.js';
 import { useThemeMode } from './theme-context.jsx';
 import { QuotesProvider } from './quotes-context.jsx';
@@ -14,15 +26,15 @@ import AdminPage from './components/AdminPage.jsx';
 import StrategyPage from './components/StrategyPage.jsx';
 
 const TABS = [
-  { key: 'dashboard', label: '仪表盘' },
-  { key: 'news', label: '新闻分析' },
-  { key: 'trades', label: '交易记录' },
-  { key: 'macro', label: '宏观' },
-  { key: 'signals', label: '信号质量' },
-  { key: 'ablation', label: '消融实验' },
+  { key: 'dashboard', label: '仪表盘', icon: <DashboardOutlined /> },
+  { key: 'news', label: '新闻分析', icon: <ReadOutlined /> },
+  { key: 'trades', label: '交易记录', icon: <SwapOutlined /> },
+  { key: 'macro', label: '宏观', icon: <GlobalOutlined /> },
+  { key: 'signals', label: '信号质量', icon: <AimOutlined /> },
+  { key: 'ablation', label: '消融实验', icon: <ExperimentOutlined /> },
 ];
 
-// 深浅主题切换控件(ALL-CAPS 等宽,无 emoji)
+// 深浅主题切换控件(图标,无 emoji)
 function ThemeToggle() {
   const { mode, setMode } = useThemeMode();
   return (
@@ -31,8 +43,8 @@ function ThemeToggle() {
       value={mode}
       onChange={setMode}
       options={[
-        { label: 'DARK', value: 'dark' },
-        { label: 'LIGHT', value: 'light' },
+        { value: 'dark', icon: <MoonOutlined />, title: '深色' },
+        { value: 'light', icon: <SunOutlined />, title: '浅色' },
       ]}
     />
   );
@@ -201,10 +213,10 @@ function MainApp() {
   // 次要指标(账户条右侧):现金 / 持仓 / 盈亏
   const heroMetrics = portfolio
     ? [
-        { label: '可用现金 / CASH', value: <span className="num">{fmtMoney(portfolio.cash)}</span> },
-        { label: '持仓市值 / HOLDINGS', value: <span className="num">{fmtMoney(portfolio.positions_value)}</span> },
+        { label: '可用现金', value: <span className="num">{fmtMoney(portfolio.cash)}</span> },
+        { label: '持仓市值', value: <span className="num">{fmtMoney(portfolio.positions_value)}</span> },
         {
-          label: '总盈亏 / TOTAL P&L',
+          label: '总盈亏',
           value: (
             <span className={`num ${pnl >= 0 ? 'up' : 'down'}`}>
               {fmtMoney(pnl)} ({fmtPercent(portfolio.pnl_percent)})
@@ -246,15 +258,19 @@ function MainApp() {
           <div className="hero">
             <div className="hero__primary">
               <div className="label-caps" style={{ marginBottom: 6 }}>
-                总资产 / TOTAL EQUITY
+                总资产
               </div>
               <div className="display-num">{fmtMoney(portfolio.total_value)}</div>
               {dayPnl !== null && dayPnl !== undefined && (
-                <div className={`num ${dayPnl >= 0 ? 'up' : 'down'}`} style={{ marginTop: 6, fontSize: 13.5 }}>
-                  今日 {fmtMoney(dayPnl)}
-                  {stats?.day_pnl_percent !== null && stats?.day_pnl_percent !== undefined
-                    ? ` (${fmtPercent(stats.day_pnl_percent)})`
-                    : ''}
+                <div style={{ marginTop: 8 }}>
+                  <span className={`delta-chip num ${dayPnl >= 0 ? 'up' : 'down'}`}>
+                    {dayPnl >= 0 ? <RiseOutlined /> : <FallOutlined />}
+                    {fmtMoney(dayPnl)}
+                    {stats?.day_pnl_percent !== null && stats?.day_pnl_percent !== undefined
+                      ? ` (${fmtPercent(stats.day_pnl_percent)})`
+                      : ''}
+                  </span>
+                  <span className="muted" style={{ marginLeft: 8, fontSize: 12.5 }}>今日</span>
                 </div>
               )}
             </div>

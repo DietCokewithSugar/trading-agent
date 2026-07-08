@@ -1,9 +1,11 @@
 /* 自托管字体(@fontsource):构建期打包指纹化,无运行时 CDN 依赖。
-   Inter Variable = 正文与数字(表格数字对齐);IBM Plex Mono = 标签/元信息等宽。
+   Archivo Variable = 正文/标题/大数字(Anthropic Styrene 的开源近似,宽体 grotesque);
+   JetBrains Mono = 数据/等宽元信息(Claude Code 终端气质的开源替代)。
+   注:claude.ai 实际使用的 Styrene / Tiempos 为商业授权字体,不可自托管。
    须在 styles.css 之前引入,保证 @font-face 先注册。 */
 
-@import '@fontsource-variable/inter';
+@import '@fontsource-variable/archivo';
 
-@import '@fontsource/ibm-plex-mono/400.css';
-@import '@fontsource/ibm-plex-mono/500.css';
-@import '@fontsource/ibm-plex-mono/600.css';
+@import '@fontsource/jetbrains-mono/400.css';
+@import '@fontsource/jetbrains-mono/500.css';
+@import '@fontsource/jetbrains-mono/600.css';
