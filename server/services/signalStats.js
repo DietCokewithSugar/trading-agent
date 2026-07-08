@@ -330,7 +330,7 @@ export function pairSellsToBuys(sells, buys) {
 /**
  * 实盘兑现聚合(纯函数,±2%/48h 策略口径):每笔已平仓卖单按源信号维度分桶,
  * 统计离场触发分布(止盈/止损/持有超时/其他)与已实现盈亏。
- * rows = [{ trigger, realized_pnl, tier, source_score, is_press }]。
+ * rows = [{ trigger, realized_pnl, tier, source_score, is_press, is_filing }]。
  * 直接回答"哪类信号在固定敞口+持有时限的规则下真能兑现到止盈"。
  */
 export function summarizeTradeOutcomes(rows) {
@@ -349,6 +349,8 @@ export function summarizeTradeOutcomes(rows) {
     },
     { label: '来源低(<0.65)', match: (r) => num(r.source_score) !== null && num(r.source_score) < 0.65 },
     { label: '新闻稿来源', match: (r) => r.is_press === true },
+    // 监管披露(SEC 8-K)与新闻稿分开观测:同属公司自述,但可信档不同,证据链互不污染
+    { label: '监管披露来源', match: (r) => r.is_filing === true },
   ];
   const pct = (part, n) => (n ? round((part / n) * 100, 1) : null);
   const out = buckets
@@ -539,6 +541,7 @@ export async function loadSignalRows({ days = null } = {}) {
               ? null
               : Number(article.source_score),
           is_press: dim ? isPressRelease(article) : false,
+          is_filing: dim ? article.source === 'sec-filings' : false,
         };
       });
     }
@@ -560,6 +563,8 @@ export async function loadSignalRows({ days = null } = {}) {
           : Number(article.source_score),
       // 公司公告类来源(新闻稿通道):参数建议器评估 PRESS_BULLISH_PENALTY 用
       is_press: isPressRelease(article),
+      // 监管披露来源(SEC 8-K):单独观测,不混入 is_press 口径
+      is_filing: article.source === 'sec-filings',
       traded: tradedSet.has(a.id),
       candidate_status: cand?.status ?? null,
       officer_veto: cand?.status === 'rejected' && /^风控官/.test(cand?.status_reason || ''),

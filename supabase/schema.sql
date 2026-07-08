@@ -742,3 +742,9 @@ alter table broker_accounts enable row level security;
 alter table broker_mirror_orders add column if not exists account_id bigint references broker_accounts(id) on delete set null;
 alter table broker_mirror_orders add column if not exists source_variant text;
 alter table broker_mirror_snapshots add column if not exists account_id bigint references broker_accounts(id) on delete set null;
+
+-- SEC EDGAR 监管文件源(026):文章行携带监管文件元数据
+-- (source='sec-filings' 渠道;url 为主文档链接,onConflict 去重键不变)
+alter table news_articles add column if not exists source_type text;    -- 'regulatory_filing'
+alter table news_articles add column if not exists filing_form text;    -- '8-K' / '8-K/A'
+alter table news_articles add column if not exists filing_items text[]; -- ['2.02','9.01']

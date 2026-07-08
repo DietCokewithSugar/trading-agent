@@ -3,11 +3,12 @@ import { supabase } from '../db.js';
 import { config } from '../config.js';
 import { getStockNews, getGeneralNews, getPressReleases, getQuote } from './fmp.js';
 import { getYahooNews } from './yahoo.js';
+import { getSecFilings } from './secFilings.js';
 import { analyzeArticle } from './deepseek.js';
 import { resolveEvent, markEventTraded } from './eventService.js';
 import { isMacroCandidate, processMacroArticle } from './macroService.js';
 import { recomputeRegime } from './macroRegime.js';
-import { scoreSource, computeFinalConfidence, isPressRelease } from './credibility.js';
+import { scoreSource, computeFinalConfidence, isSelfIssued } from './credibility.js';
 import { recordSignalPrice } from './signalReturns.js';
 import { handleSignal } from './trader.js';
 import { getPortfolio } from './portfolio.js';
@@ -92,6 +93,24 @@ function normalizeYahooItem(item) {
   });
 }
 
+// SEC EDGAR 监管文件(026):publisher 是真实来源(监管机构),允许出现在公开新闻页
+//(提供商命名禁令只针对内部抓取渠道);url 为主文档链接,onConflict 去重键
+function normalizeSecFilingItem(item) {
+  return withCredibility({
+    url: item.url,
+    title: item.title,
+    text_content: item.textContent || '',
+    source: 'sec-filings',
+    publisher: 'SEC EDGAR',
+    image: null,
+    symbols: item.symbol ? [String(item.symbol).toUpperCase()] : [],
+    published_at: item.filedAt,
+    source_type: 'regulatory_filing',
+    filing_form: item.formType,
+    filing_items: item.items,
+  });
+}
+
 /**
  * 抓取新闻源并去重入库,返回本次新增的文章。
  * 快速轮询(秒级)只抓最轻量的个股新闻;fullFetch=true 时附带综合新闻/公告/Yahoo RSS。
@@ -105,6 +124,10 @@ async function fetchAndStoreNews({ fullFetch = false } = {}) {
       getGeneralNews(20).then((items) => items.map((i) => normalizeFmpItem(i, 'fmp-general'))),
       getPressReleases(20).then((items) => items.map((i) => normalizeFmpItem(i, 'fmp-press')))
     );
+    if (config.enableSecFilings) {
+      // SEC EDGAR 8-K 实时流:最高可信事件源,搭车 fullFetch 节奏(约 5 分钟一轮)
+      sources.push(getSecFilings().then((items) => items.map(normalizeSecFilingItem)));
+    }
     if (config.enableYahoo) {
       const { positions } = await getPortfolio();
       const watchSymbols = [
@@ -133,29 +156,42 @@ async function fetchAndStoreNews({ fullFetch = false } = {}) {
   let inserted = [];
   if (rows.length) {
     // ignoreDuplicates: 数据库中已存在的 URL 直接跳过,返回的就是真正新增的文章
+    let payload = rows;
     let { data, error } = await supabase()
       .from('news_articles')
-      .upsert(rows, { onConflict: 'url', ignoreDuplicates: true })
+      .upsert(payload, { onConflict: 'url', ignoreDuplicates: true })
       .select();
-    // 兼容尚未执行 009 迁移的数据库:去掉来源可信度列重试
-    if (error && /source_domain|source_score/.test(error.message)) {
-      const legacyRows = rows.map(({ source_domain, source_score, ...rest }) => rest);
+    // 兼容旧库:逐列剥离尚未迁移的可选列重试(009 可信度列 / 026 监管文件列)——
+    // 一次性剥全部会在"已跑 009 未跑 026"的库上连带丢掉可信度列
+    const optionalColumns = [
+      'source_domain',
+      'source_score',
+      'source_type',
+      'filing_form',
+      'filing_items',
+    ];
+    const stripped = new Set();
+    while (error) {
+      const col = optionalColumns.find((c) => !stripped.has(c) && error.message.includes(c));
+      if (!col) break;
+      stripped.add(col);
+      payload = payload.map(({ [col]: _drop, ...rest }) => rest);
       ({ data, error } = await supabase()
         .from('news_articles')
-        .upsert(legacyRows, { onConflict: 'url', ignoreDuplicates: true })
+        .upsert(payload, { onConflict: 'url', ignoreDuplicates: true })
         .select());
-      // 评分列未入库,但本轮后续的分析/交易仍可用内存中的评分
-      if (!error) {
-        const scoreByUrl = new Map(rows.map((r) => [r.url, r]));
-        data = (data || []).map((d) => ({
-          ...d,
-          source_domain: scoreByUrl.get(d.url)?.source_domain ?? null,
-          source_score: scoreByUrl.get(d.url)?.source_score ?? null,
-        }));
-      }
     }
     if (error) throw new Error(`新闻入库失败: ${error.message}`);
     inserted = data || [];
+    // 可信度列未入库时,本轮后续的分析/交易仍可用内存中的评分
+    if (stripped.has('source_domain') || stripped.has('source_score')) {
+      const scoreByUrl = new Map(rows.map((r) => [r.url, r]));
+      inserted = inserted.map((d) => ({
+        ...d,
+        source_domain: d.source_domain ?? scoreByUrl.get(d.url)?.source_domain ?? null,
+        source_score: d.source_score ?? scoreByUrl.get(d.url)?.source_score ?? null,
+      }));
+    }
   }
 
   return { inserted, fetched: rows.length, errors };
@@ -390,17 +426,18 @@ export async function runCycle({ fullFetch = false, trigger = 'scheduler' } = {}
           analysisRow.final_confidence === null || analysisRow.final_confidence === undefined
             ? null
             : Number(analysisRow.final_confidence);
-        // 公司公告类来源的利好信号在门槛比较时折价:公告真实性高但立场天然偏多
-        // (新闻稿通道也是微盘股付费拉抬的经典渠道),折价后多数会落入
-        // "挂起等独立媒体交叉确认"流程,由非公告信源的跟进报道解锁交易
+        // 公司自述类来源(新闻稿 + 公司自报的监管披露如 8-K)的利好信号在门槛比较时
+        // 折价:自述真实性高但立场天然偏发行方(新闻稿通道也是微盘股付费拉抬的
+        // 经典渠道),折价后多数会落入"挂起等独立媒体交叉确认"流程,由独立信源的
+        // 跟进报道解锁交易;利空自述是强信号(公司很少自曝坏消息),不折价
         const pressPenalty =
-          analysisRow.sentiment === 'bullish' && isPressRelease(article)
+          analysisRow.sentiment === 'bullish' && isSelfIssued(article)
             ? config.pressBullishPenalty
             : 1;
         const finalConf = rawConf === null ? null : Number((rawConf * pressPenalty).toFixed(3));
         if (pressPenalty < 1 && rawConf !== null) {
           console.log(
-            `[cycle] ${analysisRow.symbol} 公司公告类利好,门槛置信度折价 ×${pressPenalty}: ${rawConf} → ${finalConf}`
+            `[cycle] ${analysisRow.symbol} 公司自述类(公告/监管披露)利好,门槛置信度折价 ×${pressPenalty}: ${rawConf} → ${finalConf}`
           );
         }
 

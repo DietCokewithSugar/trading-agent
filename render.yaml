@@ -164,6 +164,14 @@ services:
         value: "AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA"
       - key: ENABLE_YAHOO
         value: "true"
+      - key: ENABLE_SEC_FILINGS
+        value: "true"
+      - key: SEC_USER_AGENT
+        sync: false # SEC 公平访问政策要求的 User-Agent(建议含联系方式),在 Render 控制台填写
+      - key: SEC_MAX_FILINGS_PER_POLL
+        value: "20"
+      - key: SEC_8K_ITEM_WHITELIST
+        value: "1.01,1.02,1.03,2.01,2.02,2.03,2.04,3.01,4.01,4.02,5.02,8.01"
       - key: TRUST_PROXY
         value: "1" # Render 单层反向代理;直连部署须设 0
       - key: ADMIN_TOKEN

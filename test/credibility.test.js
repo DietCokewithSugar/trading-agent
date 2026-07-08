@@ -6,6 +6,7 @@ import {
   computeFinalConfidence,
   extractDomain,
   isPressRelease,
+  isSelfIssued,
 } from '../server/services/credibility.js';
 import { computeTier } from '../server/services/deepseek.js';
 
@@ -36,6 +37,27 @@ test('scoreSource:按原文域名分层,FMP 转发扣聚合折价', () => {
       .score,
     0.95
   );
+});
+
+test('scoreSource:SEC 官方直抓按监管披露满分档,按渠道而非域名选中', () => {
+  const filingUrl = 'https://www.sec.gov/Archives/edgar/data/320193/000032019326000001/a8-k.htm';
+  // 官方直抓渠道:1.00 满分,无聚合折价
+  const direct = scoreSource({ url: filingUrl, source: 'sec-filings' });
+  assert.equal(direct.score, 1.0);
+  assert.equal(direct.label, '监管披露');
+  assert.equal(direct.domain, 'sec.gov');
+  // 同一 sec.gov 链接经其他渠道转发:仍走域名匹配的 0.95 档(证明按渠道选档)
+  assert.equal(scoreSource({ url: filingUrl, source: 'yahoo' }).score, 0.95);
+  assert.equal(scoreSource({ url: filingUrl, source: 'fmp-stock' }).score, 0.92);
+});
+
+test('isSelfIssued:公司自述类 = 新闻稿 + 监管披露;isPressRelease 口径不变', () => {
+  assert.equal(isSelfIssued({ source: 'sec-filings', url: 'https://www.sec.gov/Archives/x.htm' }), true);
+  assert.equal(isSelfIssued({ source: 'fmp-press', url: 'https://x.com/a' }), true);
+  assert.equal(isSelfIssued({ source: 'yahoo', url: 'https://www.businesswire.com/a' }), true);
+  assert.equal(isSelfIssued({ source: 'yahoo', url: 'https://www.reuters.com/a' }), false);
+  // 监管披露不属于新闻稿统计口径(is_press 桶/advisor press 规则的证据链不被污染)
+  assert.equal(isPressRelease({ source: 'sec-filings', url: 'https://www.sec.gov/Archives/x.htm' }), false);
 });
 
 test('extractDomain:去 www 前缀,保留有意义子域,畸形 URL 返回 null', () => {
@@ -71,6 +93,11 @@ test('computeFinalConfidence:四因子相乘并截断到 [0,1]', () => {
   // 二档材料性 0.9
   assert.equal(
     computeFinalConfidence({ sourceScore: 1, confidence: 1, publishedAt: now, tier: 2 }),
+    0.9
+  );
+  // 监管披露满分来源:1.00 × 0.9 × 1.0 × 1.0(一档)
+  assert.equal(
+    computeFinalConfidence({ sourceScore: 1.0, confidence: 0.9, publishedAt: now, tier: 1 }),
     0.9
   );
   // 置信度缺失按 0.7;来源缺失按未知 0.4

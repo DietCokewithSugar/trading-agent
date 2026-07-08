@@ -77,6 +77,24 @@ export const config = {
   // 是否补充 Yahoo Finance RSS 新闻源
   enableYahoo: process.env.ENABLE_YAHOO !== 'false',
 
+  // ── SEC EDGAR 监管文件源(026)──
+  // 官方接口免密钥,最高可信事件源(1.00 监管披露档);全市场 8-K 实时流发现,
+  // 搭车 fullFetch 节奏(约 5 分钟一轮),失败不影响其他新闻源
+  enableSecFilings: process.env.ENABLE_SEC_FILINGS !== 'false',
+  // SEC 公平访问政策要求申明 User-Agent(建议改成含联系方式的自有标识)
+  secUserAgent:
+    process.env.SEC_USER_AGENT ||
+    'trading-agent/1.0 (+https://github.com/DietCokewithSugar/trading-agent)',
+  // 每轮最多抓取多少份新 filing 的正文(每份约 2 个子请求,限频保护)
+  secMaxFilingsPerPoll: num(process.env.SEC_MAX_FILINGS_PER_POLL, 20),
+  // 进入分析管线的 8-K 重大事项条目白名单(不在名单内的例行披露直接丢弃)。
+  // 用 ?? 而非 ||:显式设空字符串表示不过滤(全部放行走 fail-open)
+  sec8kItemWhitelist: (process.env.SEC_8K_ITEM_WHITELIST ??
+    '1.01,1.02,1.03,2.01,2.02,2.03,2.04,3.01,4.01,4.02,5.02,8.01')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean),
+
   // 模拟交易参数
   initialCapital: num(process.env.INITIAL_CAPITAL, 100000),
   // 触发交易决策的最低档位(1=只有一档触发,2=一二档触发,4=全部触发)
