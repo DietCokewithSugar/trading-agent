@@ -255,6 +255,8 @@ let seenAccessions = new Set();
 let seenWarmed = false;
 // 首次成功轮询的就绪日志旗标(进程级,一次即可)
 let readinessLogged = false;
+// feed 解析 0 条的诊断告警限频(每小时一条;恢复后归零,再次为空立即告警)
+let lastEmptyFeedWarnAt = 0;
 
 function markSeen(accession) {
   if (seenAccessions.has(accession)) return;
@@ -336,17 +338,27 @@ export async function getSecFilings({ max = config.secMaxFilingsPerPoll } = {}) 
   const tickerMap = await getCikTickerMap();
 
   const feedRes = await secFetch(SEC_CURRENT_FEED_URL);
-  const entries = parseAtomEntries(await feedRes.text());
+  const feedText = await feedRes.text();
+  const entries = parseAtomEntries(feedText);
 
   // 首次成功轮询打一条就绪日志:此前 0 新增的成功轮完全无日志,
   // 与"整源持续失败"(错误只进 summary.errors)在部署日志里无法区分
   if (!readinessLogged) {
     readinessLogged = true;
     console.log(`[sec] 8-K 源就绪:feed ${entries.length} 条,映射 ${tickerMap.size} 只`);
-    if (entries.length === 0) {
-      console.warn('[sec] feed 返回 0 条:接口可达但内容为空/格式变化,请关注后续轮次');
-    }
   }
+  // feed 解析 0 条的定性诊断:可能是深夜真空窗(EDGAR 受理 06:00–22:00 ET),
+  // 也可能是 bot 防护返回 200 状态的空壳/挑战页(HTML)——记录响应片段一看便知。
+  // 每小时至多一条(深夜真空窗不刷屏),恢复后归零(再次为空立即告警)
+  if (entries.length === 0) {
+    if (Date.now() - lastEmptyFeedWarnAt > 3600_000) {
+      lastEmptyFeedWarnAt = Date.now();
+      const snippet = feedText.replace(/\s+/g, ' ').trim().slice(0, 160);
+      console.warn(`[sec] feed 解析 0 条(响应 ${feedText.length} 字节): ${snippet || '(空响应)'}`);
+    }
+    return [];
+  }
+  lastEmptyFeedWarnAt = 0;
 
   const hadSeen = seenAccessions.size > 0;
   let seenHits = 0;
