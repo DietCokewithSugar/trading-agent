@@ -141,8 +141,16 @@ async function fetchAndStoreNews({ fullFetch = false } = {}) {
   const errors = [];
   let articles = [];
   for (const r of results) {
-    if (r.status === 'fulfilled') articles = articles.concat(r.value);
-    else errors.push(r.reason?.message || String(r.reason));
+    if (r.status === 'fulfilled') {
+      articles = articles.concat(r.value);
+    } else {
+      const msg = r.reason?.message || String(r.reason);
+      errors.push(msg);
+      // 源级整体失败此前只进 summary.errors(cycle_runs/管理面可见),部署日志零痕迹——
+      // 某个源持续挂掉(如官方接口拒绝云出口 IP)时从日志完全看不出来。
+      // 每源每轮至多一条(全源轮约 5 分钟一次),不会刷屏
+      console.warn(`[cycle] 新闻源抓取失败: ${msg}`);
+    }
   }
 
   // 批内按 URL 去重
