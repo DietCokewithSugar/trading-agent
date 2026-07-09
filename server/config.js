@@ -102,6 +102,16 @@ export const config = {
     .map((s) => s.trim())
     .filter(Boolean),
 
+  // ── 标的名录与停牌守护(028)──
+  // 名录:交易所官方符号目录 → 准入门的存在性/测试标的/财务异常/ETF/交易所校验;
+  // 停牌:官方 Trading Halts feed → 停牌股禁新买、持仓不按 stale price 强平。
+  // 两开关独立:目录故障不连累停牌安全线,反之亦然
+  enableSymbolReference: process.env.ENABLE_SYMBOL_REFERENCE !== 'false',
+  enableHaltGuard: process.env.ENABLE_HALT_GUARD !== 'false',
+  // 名录刷新间隔(小时;官方文件盘中周期性更新,6h 足够)与停牌轮询间隔(秒,休市自动跳过)
+  symbolDirectoryRefreshHours: num(process.env.SYMBOL_DIRECTORY_REFRESH_HOURS, 6),
+  haltPollSeconds: num(process.env.HALT_POLL_SECONDS, 60),
+
   // 模拟交易参数
   initialCapital: num(process.env.INITIAL_CAPITAL, 100000),
   // 触发交易决策的最低档位(1=只有一档触发,2=一二档触发,4=全部触发)

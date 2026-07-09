@@ -101,6 +101,12 @@ export default function Dashboard({ portfolio, snapshots, trades, stats, perform
           <Button type="link" size="small" style={{ padding: 0, fontWeight: 600 }} onClick={() => onSymbolClick(symbol)}>
             {symbol}
           </Button>
+          {/* 停牌标记(028):停牌期间止损/止盈暂停、现价为停牌前最后成交价 */}
+          {p.halted && (
+            <Tag color="orange" style={{ marginLeft: 4, marginRight: 0, fontSize: 11, lineHeight: '16px', padding: '0 4px' }}>
+              停牌
+            </Tag>
+          )}
           {totalValue > 0 && (
             <span className="cell-sub num">{(((Number(p.market_value) || 0) / totalValue) * 100).toFixed(1)}% 仓位</span>
           )}

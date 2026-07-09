@@ -5,11 +5,15 @@ import { getPortfolio } from './portfolio.js';
 import { executeSellOrder } from './trader.js';
 import { broadcast } from './bus.js';
 import { isHalted } from './halt.js';
+import { isSymbolHalted } from './tradingHalts.js';
 import { holdAnchor, isHoldExpired } from './holding.js';
 import { computeTrailedStop } from './trailing.js';
 import { getTradingStrategy, strategyMaxHoldHours } from './strategy.js';
 
 let running = false;
+
+// 停牌跳过日志限频:每票停牌期间只提示一次,复牌自动清除
+const haltSkipLogged = new Set();
 
 // opened_at/hold_refreshed_at 列缺失(未执行 020 迁移)时持有时限自动停用,只警告一次
 let holdLimitUnavailable = false;
@@ -74,6 +78,17 @@ export async function checkStops() {
   try {
     const { positions } = await getPortfolio();
     for (const pos of positions) {
+      // 停牌守护(028):停牌中的报价是停牌前最后一笔,按 stale price 触发止损/止盈/
+      // 持有超时都不真实,整票跳过;复牌后的下一个 tick 按真实(可能跳空的)价格执行
+      if (isSymbolHalted(pos.symbol)) {
+        if (!haltSkipLogged.has(pos.symbol)) {
+          haltSkipLogged.add(pos.symbol);
+          console.log(`[risk] ${pos.symbol} 停牌中,暂停止损/止盈/持有超时监控,复牌后恢复`);
+        }
+        continue;
+      }
+      haltSkipLogged.delete(pos.symbol);
+
       let stopLoss = pos.stop_loss !== null && pos.stop_loss !== undefined ? Number(pos.stop_loss) : null;
       const takeProfit =
         pos.take_profit !== null && pos.take_profit !== undefined ? Number(pos.take_profit) : null;

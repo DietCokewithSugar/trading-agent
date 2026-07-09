@@ -758,3 +758,22 @@ drop index if exists idx_broker_mirror_orders_open;
 create index if not exists idx_broker_mirror_orders_open
   on broker_mirror_orders (submitted_at)
   where status in ('submitted', 'partially_filled', 'deferred');
+
+-- 标的名录 + 新闻筛选索引(028):官方上市目录镜像(准入名录/测试标的/财务异常/ETF/交易所),
+-- 表缺失时服务端只停 DB 镜像,进程内名录照常工作
+create table if not exists symbol_reference (
+  symbol text primary key,          -- 归一后代码('.'→'-',与报价源一致)
+  security_name text,
+  exchange text,                    -- 归一短代码:NASDAQ/NYSE/AMEX/ARCA/BATS/IEX
+  market_category text,             -- NASDAQ 上市层级(Q/G/S),其他交易所为 null
+  is_etf boolean,
+  is_test_issue boolean,
+  financial_status text,            -- N/D/E/Q/G/H/J/K,仅 NASDAQ 上市有
+  round_lot integer,
+  listing_source text,              -- 'nasdaq' | 'other'
+  updated_at timestamptz not null default now()
+);
+alter table symbol_reference enable row level security;
+create policy "public read symbol_reference" on symbol_reference for select using (true);
+create index if not exists idx_news_symbols_gin on news_articles using gin (symbols);
+create index if not exists idx_analyses_sentiment_tier on news_analyses (sentiment, tier);

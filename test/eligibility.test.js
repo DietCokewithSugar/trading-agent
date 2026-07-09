@@ -99,3 +99,86 @@ test('normalizeExchange:归一与别名', () => {
   assert.equal(normalizeExchange(null), null);
   assert.equal(normalizeExchange(undefined), null);
 });
+
+// ── 上市名录校验(028,reference 参数)──
+
+const GOOD_PROFILE = { exchange: 'NASDAQ', marketCap: 5e9, averageVolume: 2e6 };
+const NORMAL_ENTRY = {
+  symbol: 'AAPL', exchange: 'NASDAQ', isEtf: false, isTestIssue: false, financialStatus: 'N',
+};
+
+test('名录未加载/未传:整组跳过,行为与旧版一致', () => {
+  assert.equal(checkBuyEligibility({ profile: GOOD_PROFILE, price: 50 }).ok, true);
+  assert.equal(
+    checkBuyEligibility({ profile: GOOD_PROFILE, price: 50, reference: null }).ok,
+    true
+  );
+  assert.equal(
+    checkBuyEligibility({ profile: GOOD_PROFILE, price: 50, reference: { loaded: false, entry: null } }).ok,
+    true
+  );
+});
+
+test('名录已加载但无条目:疑似 OTC/退市拦截', () => {
+  const r = checkBuyEligibility({
+    profile: GOOD_PROFILE,
+    price: 50,
+    reference: { loaded: true, entry: null },
+  });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /名录/);
+});
+
+test('名录条目正常:放行', () => {
+  const r = checkBuyEligibility({
+    profile: GOOD_PROFILE,
+    price: 50,
+    reference: { loaded: true, entry: NORMAL_ENTRY },
+  });
+  assert.equal(r.ok, true);
+});
+
+test('测试标的/财务异常/名录 ETF 拦截', () => {
+  const base = { profile: GOOD_PROFILE, price: 50 };
+  assert.match(
+    checkBuyEligibility({ ...base, reference: { loaded: true, entry: { ...NORMAL_ENTRY, isTestIssue: true } } }).reason,
+    /测试标的/
+  );
+  for (const code of ['D', 'E', 'Q']) {
+    const r = checkBuyEligibility({
+      ...base,
+      reference: { loaded: true, entry: { ...NORMAL_ENTRY, financialStatus: code } },
+    });
+    assert.equal(r.ok, false, `${code} 应拦截`);
+    assert.match(r.reason, /异常/);
+  }
+  assert.match(
+    checkBuyEligibility({ ...base, reference: { loaded: true, entry: { ...NORMAL_ENTRY, isEtf: true } } }).reason,
+    /ETF/
+  );
+  // 财务状态缺失(otherlisted 无该字段)正常放行
+  assert.equal(
+    checkBuyEligibility({ ...base, reference: { loaded: true, entry: { ...NORMAL_ENTRY, financialStatus: null } } }).ok,
+    true
+  );
+});
+
+test('名录交易所是补充校验:两源都须过白名单', () => {
+  // 名录说 ARCA(默认白名单外)→ 拒,即使行情商 profile 说 NASDAQ
+  const r = checkBuyEligibility({
+    profile: GOOD_PROFILE,
+    price: 50,
+    reference: { loaded: true, entry: { ...NORMAL_ENTRY, exchange: 'ARCA' } },
+  });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /名录交易所/);
+  // 名录交易所缺失(极端数据缺口)不因该项拦截
+  assert.equal(
+    checkBuyEligibility({
+      profile: GOOD_PROFILE,
+      price: 50,
+      reference: { loaded: true, entry: { ...NORMAL_ENTRY, exchange: null } },
+    }).ok,
+    true
+  );
+});

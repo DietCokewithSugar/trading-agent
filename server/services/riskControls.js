@@ -15,25 +15,48 @@ import { etDayKey } from './metrics.js';
 
 // ===== 纯函数 =====
 
-/**
- * 美东今日零点对应的 UTC 时刻(ISO)。分别尝试 EST(-05:00)/EDT(-04:00)两个偏移,
- * 取换算回美东后日历日仍为今日且小时为 0 的那个,DST 边界安全。
- */
-export function etMidnightUtcIso(now = new Date()) {
-  const dayKey = etDayKey(now);
+/** 任意美东日历日('YYYY-MM-DD')的零点 UTC 时刻;非法输入返回 null(EST/EDT 偏移试探) */
+function etMidnightForDayKey(dayKey) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(dayKey ?? ''))) return null;
   for (const offset of ['-05:00', '-04:00']) {
     const candidate = new Date(`${dayKey}T00:00:00${offset}`);
+    if (Number.isNaN(candidate.getTime())) continue;
     if (etDayKey(candidate) === dayKey) {
       const hour = new Intl.DateTimeFormat('en-US', {
         timeZone: 'America/New_York',
         hour: '2-digit',
         hourCycle: 'h23',
       }).format(candidate);
-      if (Number(hour) === 0) return candidate.toISOString();
+      if (Number(hour) === 0) return candidate;
     }
   }
+  return null;
+}
+
+/**
+ * 美东今日零点对应的 UTC 时刻(ISO)。分别尝试 EST(-05:00)/EDT(-04:00)两个偏移,
+ * 取换算回美东后日历日仍为今日且小时为 0 的那个,DST 边界安全。
+ */
+export function etMidnightUtcIso(now = new Date()) {
+  const dayKey = etDayKey(now);
+  const midnight = etMidnightForDayKey(dayKey);
   // 理论不可达的兜底:按 EST 计
-  return new Date(`${dayKey}T00:00:00-05:00`).toISOString();
+  return (midnight ?? new Date(`${dayKey}T00:00:00-05:00`)).toISOString();
+}
+
+/**
+ * 美东日历日 dayKey('YYYY-MM-DD')对应的 UTC 时间范围 [startIso, endIso)。
+ * endIso 用"日历日 +1 再算零点"(不能 startIso+24h:DST 切换日是 23/25 小时)。
+ * 非法/不存在的日期返回 null。新闻页服务端单日筛选用。
+ */
+export function etDayRangeUtc(dayKey) {
+  const start = etMidnightForDayKey(dayKey);
+  if (!start) return null;
+  const [y, m, d] = String(dayKey).split('-').map(Number);
+  const nextKey = new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10);
+  const end = etMidnightForDayKey(nextKey);
+  if (!end) return null;
+  return { startIso: start.toISOString(), endIso: end.toISOString() };
 }
 
 /** 当日盈亏百分比 = (当前总值 − 日初基线)/基线;任一输入无效(非正数)返回 null */
