@@ -253,6 +253,8 @@ async function getCikTickerMap() {
 const SEEN_CAP = 2000;
 let seenAccessions = new Set();
 let seenWarmed = false;
+// 首次成功轮询的就绪日志旗标(进程级,一次即可)
+let readinessLogged = false;
 
 function markSeen(accession) {
   if (seenAccessions.has(accession)) return;
@@ -335,6 +337,16 @@ export async function getSecFilings({ max = config.secMaxFilingsPerPoll } = {}) 
 
   const feedRes = await secFetch(SEC_CURRENT_FEED_URL);
   const entries = parseAtomEntries(await feedRes.text());
+
+  // 首次成功轮询打一条就绪日志:此前 0 新增的成功轮完全无日志,
+  // 与"整源持续失败"(错误只进 summary.errors)在部署日志里无法区分
+  if (!readinessLogged) {
+    readinessLogged = true;
+    console.log(`[sec] 8-K 源就绪:feed ${entries.length} 条,映射 ${tickerMap.size} 只`);
+    if (entries.length === 0) {
+      console.warn('[sec] feed 返回 0 条:接口可达但内容为空/格式变化,请关注后续轮次');
+    }
+  }
 
   const hadSeen = seenAccessions.size > 0;
   let seenHits = 0;
