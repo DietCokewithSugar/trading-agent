@@ -22,6 +22,8 @@ import { getPortfolio, getValuation } from './portfolio.js';
 import { reflectOnClosedTrade, getMemories } from './memoryService.js';
 import { computeFill, computePoolMetrics } from './execution.js';
 import { checkBuyEligibility } from './eligibility.js';
+import { getReferenceForEligibility } from './symbolReference.js';
+import { isSymbolHalted } from './tradingHalts.js';
 import { scaleFraction } from './sizing.js';
 import { enqueuePendingOrder } from './openQueue.js';
 import {
@@ -89,9 +91,14 @@ export async function rotateProfitablePosition(excludeSymbol, constraintReason) 
     console.warn(`[trader] 止盈腾位前获取估值失败: ${err.message}`);
     return null;
   }
-  // 持仓报价缺失时估值不可信,不据此做腾位决策(与 settleBuyLocked 的约定一致)
-  if (valuation.missing_quotes) return null;
-  const pick = pickRotationSell(valuation.positions, { excludeSymbol });
+  // 持仓报价缺失时估值不可信,不据此做腾位决策(与 settleBuyLocked 的约定一致)。
+  // missing_quotes 恒为数组,须判长度——原先的真值判断让腾位永远早退(实盘腾位从未生效)
+  if (valuation.missing_quotes?.length) return null;
+  // 停牌票不参与腾位(028):停牌中卖不掉,按 stale price 腾位也不真实
+  const pick = pickRotationSell(
+    valuation.positions.filter((p) => !isSymbolHalted(p.symbol)),
+    { excludeSymbol }
+  );
   if (!pick) {
     console.log(`[trader] 无盈利持仓可腾位(${constraintReason})`);
     return null;
@@ -331,9 +338,11 @@ export async function handleSignal(article, analysisRow) {
   const price = quote.effective_price ?? quote.price;
 
   if (analysisRow.sentiment === 'bullish') {
-    // 标的准入门槛(只拦做多):最小市值/最低股价/最低日均美元成交额,
-    // 入池/决策之前硬性拦截,微盘/低流动性的利好新闻连候选资格都没有
-    const gate = checkBuyEligibility({ profile, price });
+    // 标的准入门槛(只拦做多):最小市值/最低股价/最低日均美元成交额 + 上市名录校验(028),
+    // 入池/决策之前硬性拦截,微盘/低流动性/名录外的利好新闻连候选资格都没有。
+    // 停牌不在此拦:入池免费且正确(复牌后分配器重评,24h 过期自然兜底),
+    // 买入执行由 settleBuyLocked 的 symbol_halted transient reject 总闸把守
+    const gate = checkBuyEligibility({ profile, price, reference: getReferenceForEligibility(symbol) });
     if (!gate.ok) {
       console.log(`[trader] ${symbol} 未过标的准入门槛,跳过: ${gate.reason}`);
       recordReject('eligibility_gate');
@@ -793,8 +802,11 @@ async function sellHeldPositionOnBearish({ symbol, price, analysisRow, article }
   if (!held) return null;
 
   const summary = analysisRow.event_summary || '';
-  const reason = `利空信号(第${analysisRow.tier}档)确定性清仓${summary ? `:${summary}` : ''}`.slice(0, 300);
-  if (getMarketSession() === 'closed') {
+  const halted = isSymbolHalted(symbol);
+  const reason = `利空信号(第${analysisRow.tier}档)确定性清仓${summary ? `:${summary}` : ''}${halted ? '(停牌中,复牌后成交)' : ''}`.slice(0, 300);
+  // 休市或停牌(028)都无法真实成交:挂入开盘队列,复牌/开盘后按真实价成交
+  //(停牌中的报价是停牌前最后一笔,照常成交等于用 stale price 不真实地逃顶)
+  if (getMarketSession() === 'closed' || halted) {
     const pending = await enqueuePendingOrder({
       symbol,
       side: 'sell',
@@ -926,10 +938,17 @@ export async function executeCandidate(candidate, { macroContext = null, extraSc
   const price = quote.effective_price ?? quote.price;
 
   // 准入门槛复查:入池时过了,但市值/价格/流动性可能在池中等待期间恶化
-  const gate = checkBuyEligibility({ profile, price });
+  const gate = checkBuyEligibility({ profile, price, reference: getReferenceForEligibility(symbol) });
   if (!gate.ok) {
     recordReject('eligibility_gate');
     return { reject: `未过标的准入门槛: ${gate.reason}`, reason: 'eligibility_gate' };
+  }
+
+  // 停牌预检(028):transient 拒绝让候选留池等复牌,同时省下 decideTrade+风控官的 LLM 调用
+  //(settleBuyLocked 的同名总闸仍在,这里只是省钱的前置)
+  if (isSymbolHalted(symbol)) {
+    recordReject('symbol_halted');
+    return { reject: '停牌中,候选留池待复牌', transient: true, reason: 'symbol_halted' };
   }
 
   // 冷却复查:上一轮分配刚成交的同票,本轮合并后的候选不能再买
@@ -1291,6 +1310,13 @@ async function settleBuyLocked({
   if (isTradingHalted()) {
     recordReject('trading_halted');
     return { reject: '交易暂停开关已开启(人工)', transient: true, reason: 'trading_halted' };
+  }
+  // 单票停牌守护(028):所有买入路径(即时/队列/分配/入场策略)的总闸。
+  // 停牌中的报价是停牌前最后一笔,按 stale price 建仓不真实;transient 拒绝
+  // 让开盘队列保留挂单、分配器保留候选,复牌后自动重试
+  if (isSymbolHalted(symbol)) {
+    recordReject('symbol_halted');
+    return { reject: '该股票处于停牌状态,暂缓买入', transient: true, reason: 'symbol_halted' };
   }
   const dailyLoss = await evaluateDailyLossHalt(valuation.total_value);
   if (dailyLoss.halted) {

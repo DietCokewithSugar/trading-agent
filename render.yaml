@@ -179,6 +179,15 @@ services:
         value: "20"
       - key: SEC_8K_ITEM_WHITELIST
         value: "1.01,1.02,1.03,2.01,2.02,2.03,2.04,3.01,4.01,4.02,5.02,8.01"
+      # 标的名录与停牌守护(028):官方符号目录 + Trading Halts feed(均免密钥)
+      - key: ENABLE_SYMBOL_REFERENCE
+        value: "true"
+      - key: SYMBOL_DIRECTORY_REFRESH_HOURS
+        value: "6"
+      - key: ENABLE_HALT_GUARD
+        value: "true"
+      - key: HALT_POLL_SECONDS
+        value: "60"
       - key: TRUST_PROXY
         value: "1" # Render 单层反向代理;直连部署须设 0
       - key: ADMIN_TOKEN

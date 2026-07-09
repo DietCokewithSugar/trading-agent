@@ -23,6 +23,8 @@ import {
 import { getRiskControlState } from '../services/riskControls.js';
 import { listRecentDecisions } from '../services/decisionLog.js';
 import { getParameterAdvice } from '../services/parameterAdvisor.js';
+import { getSymbolReferenceStatus } from '../services/symbolReference.js';
+import { getHaltState } from '../services/tradingHalts.js';
 
 const router = Router();
 
@@ -66,6 +68,9 @@ router.get('/status', (req, res) => {
     brokerLedgerPrimary: isBrokerLedgerPrimary(),
     brokerMirrorAvailable: isBrokerEnabled(),
     riskControls: getRiskControlState(),
+    // 标的名录与停牌守护(028):名录加载状态 + 生效中停牌全列表(含 reason code)
+    symbolReference: getSymbolReferenceStatus(),
+    halts: getHaltState(),
     sseClients: clientCount(),
     pollSeconds: config.newsPollSeconds,
     riskCheckSeconds: config.riskCheckSeconds,

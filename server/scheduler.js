@@ -20,6 +20,8 @@ import { broadcast, clientCount } from './services/bus.js';
 import { pushLiveQuotes } from './services/quotesPush.js';
 import { pollMirrorOrders, takeBrokerSnapshots, getLatestBrokerSnapshot } from './services/brokerMirror.js';
 import { getPrimaryValuation, isBrokerLedgerPrimary } from './services/primaryLedger.js';
+import { refreshSymbolReference, warmSymbolReference } from './services/symbolReference.js';
+import { pollTradingHalts } from './services/tradingHalts.js';
 
 // 休市时段净值几乎不变,快照降频到每 30 分钟一条(保持折线图连续),
 // 同时避免对持仓报价的无谓 FMP 请求
@@ -116,6 +118,32 @@ export function startScheduler() {
   // 券商净值对照快照:独立节奏(BROKER_SNAPSHOT_SECONDS,默认 30s;
   // 休市自动降回 10 分钟),限频在 takeBrokerSnapshots 内部,与对照轮询双入口先到先写
   every(Math.max(config.brokerSnapshotSeconds, 10) * 1000, '券商净值快照', takeBrokerSnapshots);
+
+  // 标的名录(028):官方符号目录周期刷新(准入门的存在性/测试标的/财务异常/ETF 校验)
+  if (config.enableSymbolReference) {
+    every(Math.max(config.symbolDirectoryRefreshHours, 1) * 3600_000, '标的名录刷新', refreshSymbolReference);
+  }
+
+  // 停牌监控(028):官方 Trading Halts feed 盘中轮询(休市在模块内自动跳过)
+  if (config.enableHaltGuard) {
+    every(Math.max(config.haltPollSeconds, 30) * 1000, '停牌监控', pollTradingHalts);
+  }
+
+  // 名录/停牌启动预热:名录先从 DB 镜像暖表再抓最新(交易开始前就位)
+  if (config.enableSymbolReference || config.enableHaltGuard) {
+    setTimeout(() => {
+      if (config.enableSymbolReference) {
+        warmSymbolReference().catch((err) =>
+          console.error(`[scheduler] 标的名录预热失败: ${err.message}`)
+        );
+      }
+      if (config.enableHaltGuard) {
+        pollTradingHalts().catch((err) =>
+          console.error(`[scheduler] 停牌首抓失败: ${err.message}`)
+        );
+      }
+    }, 12_000);
+  }
 
   if (config.enableMacro) {
     // 经济日历刷新(黑窗与 surprise 数据源;套餐不含端点时模块内部自动停用)

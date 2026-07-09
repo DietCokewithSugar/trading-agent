@@ -1,6 +1,7 @@
 import { supabase } from '../db.js';
 import { config } from '../config.js';
 import { getQuotes, getMarketSession, quoteDisplayFields } from './fmp.js';
+import { isSymbolHalted } from './tradingHalts.js';
 
 /** 读取(必要时初始化)资金账户与持仓 */
 export async function getPortfolio() {
@@ -52,6 +53,8 @@ export async function getValuation({ quoteMaxAgeMs = 10_000 } = {}) {
         p.take_profit !== null && p.take_profit !== undefined ? Number(p.take_profit) : null,
       current_price: price,
       live_quote: Boolean(quote),
+      // 停牌标记(028,进程内富化不落库):停牌是瞬态,feed 重启后重拉即恢复
+      halted: isSymbolHalted(p.symbol),
       ...quoteDisplayFields(quote),
       market_value: marketValue,
       unrealized_pnl: marketValue - costBasis,

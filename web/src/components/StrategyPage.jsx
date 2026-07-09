@@ -212,6 +212,10 @@ function SystemStatus() {
     { value: `${status.snapshotSeconds}s`, label: '净值快照' },
     { value: `${status.riskCheckSeconds}s`, label: '止损监控' },
   ];
+  // 停牌监控(028):有生效中停牌时展示数量(全市场口径,持仓行另有停牌标记)
+  if (status.halts && status.halts.active > 0) {
+    cadence.push({ value: `${status.halts.active} 只`, label: '停牌监控' });
+  }
   return (
     <Card size="small" title="系统状态">
       <div className="param-chips">

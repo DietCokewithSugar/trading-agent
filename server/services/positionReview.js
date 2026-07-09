@@ -7,6 +7,7 @@ import { getMarketSession, getQuote, getHistoricalPricesAdjusted } from './fmp.j
 import { etDateOf, spyHoldingReturn } from './benchmark.js';
 import { broadcast } from './bus.js';
 import { isHalted } from './halt.js';
+import { isSymbolHalted } from './tradingHalts.js';
 
 function round4(n) {
   return Math.round(n * 10000) / 10000;
@@ -162,6 +163,13 @@ export async function maybeRunDailyReview() {
       // 防御:模型可能编造不存在的持仓代码
       const position = valuation.positions.find((p) => p.symbol === review.symbol);
       if (!position) continue;
+
+      // 停牌守护(028):停牌票跳过卖出与收紧止损——卖出会按 stale price 成交,
+      // 按停牌前价格收紧的止损可能在复牌跳空瞬间误触发;明日复查再评估
+      if (isSymbolHalted(review.symbol)) {
+        console.log(`[review] ${review.symbol} 停牌中,跳过复查动作(${review.action})`);
+        continue;
+      }
 
       if (review.action === 'sell' && review.fraction > 0) {
         const trade = await executeSellOrder({

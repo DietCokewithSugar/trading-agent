@@ -20,6 +20,8 @@ import { getPrimaryValuation, isBrokerLedgerPrimary } from '../services/primaryL
 import { getBrokerSnapshots } from '../services/brokerMirror.js';
 import { safeTokenEqual, createAuthRateLimiter } from '../services/authGuard.js';
 import { clusterAnalyses } from '../services/newsDedup.js';
+import { getHaltState } from '../services/tradingHalts.js';
+import { etDayRangeUtc } from '../services/riskControls.js';
 
 const router = Router();
 
@@ -418,11 +420,21 @@ router.get(
   })
 );
 
+// 来源可信度分层(与信号质量页 signalStats 同口径):高 ≥0.85 / 中 0.65–0.85 / 低 <0.65
+const NEWS_BAND_RANGES = {
+  high: { min: 0.85, max: null },
+  mid: { min: 0.65, max: 0.85 },
+  low: { min: null, max: 0.65 },
+};
+
 /**
- * 新闻流(含分析结果)。过滤在数据库端完成,前端不再为筛选拉全量数据:
- * ?analyzed=true 只看已分析;?sentiment=bullish|bearish 按方向过滤(隐含已分析且有档位);
- * ?q=xxx 按标题/股票代码搜索;?before=<ISO> 游标分页(发布时间早于该时刻,
- * 防 SSE 推送让 offset 漂移漏行)。
+ * 新闻流(含分析结果)。过滤全部在数据库端完成,前端不再为筛选拉全量数据:
+ * ?analyzed=true 只看已分析;?sentiment=bullish|bearish|neutral 按方向过滤
+ * (bullish/bearish 隐含有档位;neutral 的 tier 本为 null,不附加档位条件);
+ * ?tier=1..4 按档位过滤;?symbol=XXX 按分析主体代码精确过滤(权威口径,只命中已分析文章);
+ * ?band=high|mid|low 按来源可信度分层过滤;?date=YYYY-MM-DD 按美东日历日过滤(单日视图);
+ * ?q=xxx 按标题/原始股票标签模糊搜索;?before=<ISO> 游标分页(发布时间早于该时刻,
+ * 防 SSE 推送让 offset 漂移漏行)。非法参数值一律按未传处理(fail-soft)。
  */
 router.get(
   '/news',
@@ -432,32 +444,55 @@ router.get(
     const beforeRaw = req.query.before ? new Date(String(req.query.before)) : null;
     const before = beforeRaw && !Number.isNaN(beforeRaw.getTime()) ? beforeRaw : null;
     const onlyAnalyzed = req.query.analyzed === 'true';
-    const sentiment = ['bullish', 'bearish'].includes(req.query.sentiment)
+    const sentiment = ['bullish', 'bearish', 'neutral'].includes(req.query.sentiment)
       ? req.query.sentiment
       : null;
+    const tierRaw = Number(req.query.tier);
+    const tier = [1, 2, 3, 4].includes(tierRaw) ? tierRaw : null;
+    const symbolRaw = String(req.query.symbol || '').trim().toUpperCase();
+    const symbol = /^[A-Z0-9.\-]{1,10}$/.test(symbolRaw) ? symbolRaw : null;
+    const band = NEWS_BAND_RANGES[req.query.band] ? req.query.band : null;
+    const dateKey = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.date || ''))
+      ? String(req.query.date)
+      : null;
+    const dayRange = dateKey ? etDayRangeUtc(dateKey) : null;
     // 搜索词只保留安全字符,避免拼入 PostgREST or 过滤器时产生语法歧义
     const q = String(req.query.q || '')
       .trim()
       .slice(0, 40)
       .replace(/[%,()."'\\{}]/g, '');
 
-    const buildQuery = (cols) => {
-      // sentiment 过滤需要 inner join,否则嵌套过滤只清空子数组、不过滤父行
+    const buildQuery = (cols, { withBand = true } = {}) => {
+      // 子表(news_analyses)字段上的过滤需要 inner join,
+      // 否则嵌套过滤只清空子数组、不过滤父行
+      const needsInner = Boolean(sentiment || tier || symbol);
       let query = supabase()
         .from('news_articles')
-        .select(`${cols}, ${sentiment ? 'news_analyses!inner(*)' : 'news_analyses(*)'}`)
+        .select(`${cols}, ${needsInner ? 'news_analyses!inner(*)' : 'news_analyses(*)'}`)
         .order('published_at', { ascending: false, nullsFirst: false });
       if (before) {
         query = query.lt('published_at', before.toISOString()).range(0, limit - 1);
       } else {
         query = query.range(offset, offset + limit - 1);
       }
+      if (dayRange) {
+        // 与 before 叠加时两个 lt 条件同时生效(PostgREST AND 语义),取更早的边界
+        query = query.gte('published_at', dayRange.startIso).lt('published_at', dayRange.endIso);
+      }
       if (sentiment) {
-        query = query
-          .eq('news_analyses.sentiment', sentiment)
-          .not('news_analyses.tier', 'is', null);
-      } else if (onlyAnalyzed) {
+        query = query.eq('news_analyses.sentiment', sentiment);
+        // neutral 的 tier 本为 null:档位非空条件只配 bullish/bearish
+        if (sentiment !== 'neutral') query = query.not('news_analyses.tier', 'is', null);
+      }
+      if (tier) query = query.eq('news_analyses.tier', tier);
+      if (symbol) query = query.eq('news_analyses.symbol', symbol);
+      if (!needsInner && onlyAnalyzed) {
         query = query.not('news_analyses', 'is', null);
+      }
+      if (withBand && band) {
+        const range = NEWS_BAND_RANGES[band];
+        if (range.min !== null) query = query.gte('source_score', range.min);
+        if (range.max !== null) query = query.lt('source_score', range.max);
       }
       if (q) {
         query = query.or(`title.ilike.%${q}%,symbols.cs.{${q.toUpperCase()}}`);
@@ -468,10 +503,12 @@ router.get(
     let { data, error } = await buildQuery(
       'id, url, title, source, publisher, source_domain, source_score, symbols, published_at, fetched_at'
     );
-    // 兼容尚未执行 009 迁移的数据库:去掉来源可信度列重试
+    // 兼容尚未执行 009 迁移的数据库:去掉来源可信度列(以及基于它的分层过滤)重试
     if (error && /source_domain|source_score/.test(error.message)) {
+      if (band) console.warn('[api] source_score 列不可用,来源可信度筛选已忽略(请执行 009 迁移)');
       ({ data, error } = await buildQuery(
-        'id, url, title, source, publisher, symbols, published_at, fetched_at'
+        'id, url, title, source, publisher, symbols, published_at, fetched_at',
+        { withBand: false }
       ));
     }
     if (error) throw new Error(error.message);
@@ -484,6 +521,7 @@ router.get('/stream', sseHandler);
 
 /** 调度状态(公开接口,不暴露模型等内部配置;完整状态见 /api/admin/status) */
 router.get('/status', (req, res) => {
+  const haltState = getHaltState();
   res.json({
     ...cycleStatus,
     pollSeconds: config.newsPollSeconds,
@@ -491,6 +529,10 @@ router.get('/status', (req, res) => {
     snapshotSeconds: config.snapshotSeconds,
     riskCheckSeconds: config.riskCheckSeconds,
     sseClients: clientCount(),
+    // 停牌监控概览(028;完整列表在管理面):公开面只给数量与更新时间
+    halts: config.enableHaltGuard
+      ? { active: haltState.activeCount, updated_at: haltState.fetchedAt }
+      : null,
   });
 });
 

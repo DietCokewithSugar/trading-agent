@@ -4,6 +4,7 @@ import { getMarketSession } from './fmp.js';
 import { executeQueuedBuy, executeSellOrder } from './trader.js';
 import { broadcast } from './bus.js';
 import { isHalted } from './halt.js';
+import { isSymbolHalted } from './tradingHalts.js';
 
 /**
  * 开盘队列:休市时段产生的交易信号不按 stale 收盘价成交,而是挂入 pending_orders,
@@ -98,6 +99,14 @@ async function fillPendingOrder(order) {
       console.log(`[queue] 订单 #${order.id} ${order.symbol} 暂缓成交: ${result.reject}`);
     }
     // result 为 null(报价暂不可得):留在队列,下轮重试
+    return;
+  }
+
+  // 停牌复查(028):停牌中的卖单留在队列等复牌(买单无需在此拦——
+  // executeQueuedBuy → settleBuyLocked 的 symbol_halted transient 拒绝会保留挂单);
+  // 停牌超过 pendingOrderMaxAgeHours 的极端情况仍由顶部超龄作废兜底
+  if (order.side === 'sell' && isSymbolHalted(order.symbol)) {
+    console.log(`[queue] 订单 #${order.id} ${order.symbol} 停牌中,留待复牌成交`);
     return;
   }
 

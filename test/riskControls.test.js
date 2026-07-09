@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { etDayKey } from '../server/services/metrics.js';
 import {
   etMidnightUtcIso,
+  etDayRangeUtc,
   computeDayPnlPercent,
   updateDailyLossState,
   checkMaxPositions,
@@ -24,6 +25,30 @@ test('etMidnightUtcIso:EST 与 EDT 日期均换算回美东当日零点', () => 
     }).format(midnight);
     assert.equal(Number(hour), 0, '美东小时为 0');
   }
+});
+
+test('etDayRangeUtc:常规日与 DST 切换日的 [start, end) 范围', () => {
+  // 常规夏令日:24 小时
+  const jul = etDayRangeUtc('2026-07-09');
+  assert.equal(jul.startIso, '2026-07-09T04:00:00.000Z'); // EDT 零点 = UTC 04:00
+  assert.equal(jul.endIso, '2026-07-10T04:00:00.000Z');
+  // 常规冬令日:EST 零点 = UTC 05:00
+  const jan = etDayRangeUtc('2026-01-15');
+  assert.equal(jan.startIso, '2026-01-15T05:00:00.000Z');
+  assert.equal(jan.endIso, '2026-01-16T05:00:00.000Z');
+  // 春令切换日(2026-03-08):23 小时
+  const spring = etDayRangeUtc('2026-03-08');
+  assert.equal(
+    (new Date(spring.endIso) - new Date(spring.startIso)) / 3600_000,
+    23
+  );
+  // 秋令切换日(2026-11-01):25 小时
+  const fall = etDayRangeUtc('2026-11-01');
+  assert.equal((new Date(fall.endIso) - new Date(fall.startIso)) / 3600_000, 25);
+  // 非法输入
+  assert.equal(etDayRangeUtc('2026-02-30'), null);
+  assert.equal(etDayRangeUtc('not-a-date'), null);
+  assert.equal(etDayRangeUtc(null), null);
 });
 
 test('computeDayPnlPercent:正常计算与无效基线', () => {

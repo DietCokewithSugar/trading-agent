@@ -17,13 +17,28 @@ export const api = {
     else params.set('offset', offset);
     return get(`/trades?${params.toString()}`);
   },
-  // 新闻流:筛选/搜索在服务端完成,前端不再为过滤拉全量数据
-  news: ({ limit = 60, offset = 0, before = null, filter = 'all', q = '' } = {}) => {
+  // 新闻流:筛选/搜索在服务端完成,前端不再为过滤拉全量数据。
+  // date=美东日历日(单日视图),symbol=分析主体精确筛选,tier=档位,band=来源可信度分层
+  news: ({
+    limit = 60,
+    offset = 0,
+    before = null,
+    filter = 'all',
+    q = '',
+    symbol = '',
+    tier = null,
+    band = null,
+    date = null,
+  } = {}) => {
     const params = new URLSearchParams({ limit });
     if (before) params.set('before', before);
     else params.set('offset', offset);
     if (filter === 'analyzed') params.set('analyzed', 'true');
-    if (filter === 'bullish' || filter === 'bearish') params.set('sentiment', filter);
+    if (['bullish', 'bearish', 'neutral'].includes(filter)) params.set('sentiment', filter);
+    if (tier) params.set('tier', tier);
+    if (band) params.set('band', band);
+    if (symbol) params.set('symbol', symbol);
+    if (date) params.set('date', date);
     if (q) params.set('q', q);
     return get(`/news?${params.toString()}`);
   },
@@ -116,6 +131,44 @@ export function fmtTime(iso) {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+export const SENTIMENT_LABELS = { bullish: '利好', bearish: '利空', neutral: '中性' };
+
+// 来源可信度分层(与信号质量页同口径:0.85/0.65 分界)
+export const CREDIBILITY_BANDS = {
+  high: { label: '高可信 (≥85%)' },
+  mid: { label: '中等 (65–85%)' },
+  low: { label: '低可信 (<65%)' },
+};
+
+/** 来源可信度分层归类:high/mid/low,无效输入 null */
+export function credibilityBandOf(score) {
+  const s = Number(score);
+  if (!Number.isFinite(s)) return null;
+  if (s >= 0.85) return 'high';
+  if (s >= 0.65) return 'mid';
+  return 'low';
+}
+
+// 美东日历日(新闻/交易的自然口径):en-CA 区域格式恰为 YYYY-MM-DD
+const ET_DAY_FMT = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'America/New_York',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
+
+/** ISO 时间 → 美东日历日 'YYYY-MM-DD'(无效输入 null) */
+export function etDayOf(iso) {
+  if (!iso) return null;
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? null : ET_DAY_FMT.format(d);
+}
+
+/** 今天的美东日历日 'YYYY-MM-DD' */
+export function etToday() {
+  return ET_DAY_FMT.format(new Date());
 }
 
 export const TIER_LABELS = {
@@ -283,6 +336,7 @@ export const REJECT_LABELS = {
   price_drift_abort: '价格漂移熔断',
   below_min_amount: '金额低于下限',
   trading_halted: '交易暂停(人工开关)',
+  symbol_halted: '停牌暂缓交易',
   daily_loss_halt: '当日亏损熔断',
   max_positions: '持仓数达上限',
   sector_cap: '行业集中度上限',

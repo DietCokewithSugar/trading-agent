@@ -26,6 +26,7 @@ import { computeFill } from './execution.js';
 import { scaleFraction } from './sizing.js';
 import { sanitizeProviderText } from './metrics.js';
 import { isHalted } from './halt.js';
+import { isSymbolHalted } from './tradingHalts.js';
 import { isHoldExpired } from './holding.js';
 import {
   computeShadowSpend,
@@ -859,6 +860,9 @@ export async function checkShadowStops() {
     // 同一票多个变体共用一次报价(25s 缓存,与实盘监控同步常常直接命中)
     const quoteBySymbol = new Map();
     for (const pos of positions) {
+      // 停牌守护(028):与实盘 riskMonitor 同款跳过——否则影子变体在停牌票上按
+      // stale price 离场而实盘不动,消融对照失真
+      if (isSymbolHalted(pos.symbol)) continue;
       if (!quoteBySymbol.has(pos.symbol)) {
         quoteBySymbol.set(pos.symbol, await getQuote(pos.symbol, 25_000).catch(() => null));
       }
