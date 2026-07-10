@@ -35,6 +35,13 @@ const SEC_TICKER_MAP_URL = 'https://www.sec.gov/files/company_tickers_exchange.j
  * entry 标题形如 "8-K - Apple Inc. (0000320193) (Filer)",id 携带 accession number,
  * link 指向 filing 的 -index.htm 页面,updated 是带时区的受理时间戳。
  */
+/** 节点文本:带属性的节点(如 <title type="text">)被解析成 { '#text', '@_x' },统一取文本 */
+function nodeText(v) {
+  if (v === null || v === undefined) return '';
+  if (typeof v === 'object') return String(v['#text'] ?? '');
+  return String(v);
+}
+
 export function parseAtomEntries(xml) {
   let doc;
   try {
@@ -47,22 +54,56 @@ export function parseAtomEntries(xml) {
   const out = [];
   for (const e of entries) {
     if (!e) continue;
-    const title = String(e.title ?? '');
-    const tm = /^(.+?) - (.+?) \((\d{10})\)/.exec(title);
-    const formType = String(e.category?.['@_term'] ?? (tm ? tm[1] : '')).trim();
-    const company = tm ? tm[2].trim() : '';
-    const cik = tm ? Number(tm[3]) : null;
-    const am = /accession-number=(\d{10}-\d{2}-\d{6})/.exec(String(e.id ?? ''));
-    const accession = am ? am[1] : null;
-    let link = e.link;
-    if (Array.isArray(link)) link = link[0];
-    const indexUrl = link?.['@_href'] ? String(link['@_href']) : null;
+    const title = nodeText(e.title).trim();
+
+    // CIK:标题里最后一个纯数字括号组——公司名可能含数字括号(如 "FUND (2009) LLC"),
+    // CIK 恒在最后;兼容未补零(格式演变容错)
+    let cik = null;
+    let cikIndex = -1;
+    const cikRe = /\((\d{1,10})\)/g;
+    let cm;
+    while ((cm = cikRe.exec(title)) !== null) {
+      cik = Number(cm[1]);
+      cikIndex = cm.index;
+    }
+
+    // 表单类型:category term 优先(可能是对象或数组),标题前缀兜底
+    let categories = e.category ?? [];
+    if (!Array.isArray(categories)) categories = [categories];
+    const term = categories.map((c) => c?.['@_term']).find((t) => t);
+    const dashIdx = title.indexOf(' - ');
+    const formType = String(term ?? (dashIdx > 0 ? title.slice(0, dashIdx) : '')).trim();
+
+    // 公司名:标题中表单前缀与 CIK 括号之间的部分(缺失不再整条丢弃,
+    // 调用方回退用名录里的公司名)
+    const nameStart = dashIdx > 0 ? dashIdx + 3 : 0;
+    const company = (cikIndex > nameStart ? title.slice(nameStart, cikIndex) : '').trim();
+
+    // 链接:数组取首个带 href 的;相对路径补全官网域名(格式演变容错)
+    let links = e.link ?? [];
+    if (!Array.isArray(links)) links = [links];
+    const href = links.map((l) => l?.['@_href']).find((h) => h) ?? null;
+    let indexUrl = null;
+    if (href) {
+      try {
+        indexUrl = new URL(String(href), 'https://www.sec.gov/').toString();
+      } catch {
+        indexUrl = null;
+      }
+    }
+
+    // accession:id 优先,index 链接文件名与 summary 文本兜底(三路容错)
+    const accessionFrom = (s) => /(\d{10}-\d{2}-\d{6})/.exec(String(s ?? ''))?.[1] ?? null;
+    const accession =
+      accessionFrom(nodeText(e.id)) ?? accessionFrom(indexUrl) ?? accessionFrom(nodeText(e.summary));
+
     let filedAt = null;
-    if (e.updated) {
-      const d = new Date(e.updated);
+    const updated = nodeText(e.updated);
+    if (updated) {
+      const d = new Date(updated);
       if (!Number.isNaN(d.getTime())) filedAt = d.toISOString();
     }
-    if (!formType || !company || !cik || !accession || !indexUrl) continue;
+    if (!formType || !cik || !accession || !indexUrl) continue;
     out.push({ formType, company, cik, accession, indexUrl, filedAt });
   }
   return out;
@@ -315,12 +356,14 @@ async function fetchFilingArticle(f) {
     return null;
   }
   markSeen(f.accession);
+  // 标题里的公司名缺失(feed 格式演变)时回退名录公司名,再退 ticker
+  const companyName = f.company || f.name || f.ticker;
   return {
     url: docUrl, // 主文档链接:稳定唯一,news_articles 的 onConflict 去重键
-    title: buildFilingTitle({ formType: f.formType, company: f.company, items }),
+    title: buildFilingTitle({ formType: f.formType, company: companyName, items }),
     textContent: `${buildMetadataHeader({ formType: f.formType, items })} ${text}`.slice(0, 4000),
     symbol: f.ticker,
-    companyName: f.company,
+    companyName,
     cik: f.cik,
     accession: f.accession,
     formType: f.formType,
@@ -347,14 +390,18 @@ export async function getSecFilings({ max = config.secMaxFilingsPerPoll } = {}) 
     readinessLogged = true;
     console.log(`[sec] 8-K 源就绪:feed ${entries.length} 条,映射 ${tickerMap.size} 只`);
   }
-  // feed 解析 0 条的定性诊断:可能是深夜真空窗(EDGAR 受理 06:00–22:00 ET),
-  // 也可能是 bot 防护返回 200 状态的空壳/挑战页(HTML)——记录响应片段一看便知。
-  // 每小时至多一条(深夜真空窗不刷屏),恢复后归零(再次为空立即告警)
+  // feed 解析 0 条的定性诊断:响应里有 <entry> 却解析不出 = 真实 entry 结构与
+  // 解析器假设不符,直接输出首个 entry 原文定位;无 <entry> 则输出文档头
+  //(空壳/挑战页一看便知)。每小时至多一条,恢复后归零(再次为空立即告警)
   if (entries.length === 0) {
     if (Date.now() - lastEmptyFeedWarnAt > 3600_000) {
       lastEmptyFeedWarnAt = Date.now();
-      const snippet = feedText.replace(/\s+/g, ' ').trim().slice(0, 160);
-      console.warn(`[sec] feed 解析 0 条(响应 ${feedText.length} 字节): ${snippet || '(空响应)'}`);
+      const entryIdx = feedText.indexOf('<entry');
+      const raw = entryIdx >= 0 ? feedText.slice(entryIdx, entryIdx + 400) : feedText.slice(0, 160);
+      const snippet = raw.replace(/\s+/g, ' ').trim();
+      console.warn(
+        `[sec] feed 解析 0 条(响应 ${feedText.length} 字节,${entryIdx >= 0 ? `首个 entry@${entryIdx}` : '无 <entry> 标签'}): ${snippet || '(空响应)'}`
+      );
     }
     return [];
   }

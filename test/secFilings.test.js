@@ -46,6 +46,34 @@ const ATOM_FEED_SINGLE = `<?xml version="1.0" encoding="ISO-8859-1" ?>
   </entry>
 </feed>`;
 
+// 格式演变容错:标题带 type 属性(解析为对象)、CIK 未补零、相对链接、
+// id 无 accession(从链接文件名兜底)、公司名含数字括号
+const ATOM_FEED_MODERN = `<?xml version="1.0" encoding="ISO-8859-1" ?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <entry>
+    <title type="text">8-K - FUND (2009) HOLDINGS LLC (320193) (Filer)</title>
+    <link rel="alternate" type="text/html" href="/Archives/edgar/data/320193/000032019326000009/0000320193-26-000009-index.htm"/>
+    <summary type="html">&lt;b&gt;Filed:&lt;/b&gt; 2026-07-09 &lt;b&gt;AccNo:&lt;/b&gt; 0000320193-26-000009</summary>
+    <updated>2026-07-09T16:31:12-04:00</updated>
+    <category scheme="https://www.sec.gov/" label="form type" term="8-K"/>
+    <id>https://www.sec.gov/Archives/edgar/data/320193/000032019326000009/</id>
+  </entry>
+</feed>`;
+
+test('parseAtomEntries:格式演变容错(标题对象/未补零 CIK/相对链接/id 无 accession)', () => {
+  const entries = parseAtomEntries(ATOM_FEED_MODERN);
+  assert.equal(entries.length, 1);
+  assert.deepEqual(entries[0], {
+    formType: '8-K',
+    company: 'FUND (2009) HOLDINGS LLC', // 数字括号不误判为 CIK(取最后一组)
+    cik: 320193, // 未补零也解析
+    accession: '0000320193-26-000009', // id 缺失时从 index 链接文件名兜底
+    indexUrl:
+      'https://www.sec.gov/Archives/edgar/data/320193/000032019326000009/0000320193-26-000009-index.htm', // 相对路径补全
+    filedAt: '2026-07-09T20:31:12.000Z',
+  });
+});
+
 test('parseAtomEntries:解析条目字段,单条目非数组兜底,残缺条目丢弃', () => {
   const entries = parseAtomEntries(ATOM_FEED);
   assert.equal(entries.length, 2);
