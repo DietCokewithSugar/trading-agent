@@ -1095,28 +1095,21 @@ async function reconcileSweep() {
     }
     if (!brokerPositions.length) continue;
 
-    // 有在途镜像单的 symbol 跳过(重挂机制正在收敛);缺 025 列的旧库退回不过滤账户
-    let inflightQuery = supabase()
-      .from('broker_mirror_orders')
-      .select('symbol')
-      .in('status', ['submitted', 'partially_filled', 'deferred']);
-    inflightQuery = account ? inflightQuery.eq('account_id', account.id) : inflightQuery.is('account_id', null);
-    let { data: inflight, error } = await inflightQuery;
-    if (error && /account_id/.test(error.message)) {
-      ({ data: inflight, error } = await supabase()
-        .from('broker_mirror_orders')
-        .select('symbol')
-        .in('status', ['submitted', 'partially_filled', 'deferred']));
-    }
-    if (error) {
-      console.warn(`[broker] 对账读取在途单失败(${label}): ${error.message}`);
+    // 有在途镜像单的 symbol 跳过(重挂机制正在收敛);缺 025 列的旧库退回不过滤账户。
+    // 例外:顺延中的买单(deferred buy)不算在途 —— 它没在券商侧锁任何东西,却可能
+    // 等现金等最长 96h,不能让同票孤儿持仓的清理被它长期阻塞
+    const inflight = await listInflightOrders(account, {});
+    if (inflight === null) {
+      console.warn(`[broker] 对账读取在途单失败(${label}),本轮跳过该账户`);
       continue;
     }
 
     const plans = planReconcile({
       brokerPositions,
       internalPositions: refPositions,
-      inflightSymbols: (inflight || []).map((r) => r.symbol),
+      inflightSymbols: inflight
+        .filter((r) => !(r.side === 'buy' && r.status === 'deferred'))
+        .map((r) => r.symbol),
     });
     for (const item of plans) {
       const price = await fetchLivePrice(item.symbol, `对账(${label})`);
