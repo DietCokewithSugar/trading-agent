@@ -205,14 +205,16 @@ const VALUATION_CACHE_MS = 15_000;
 let valuationCache = { key: null, at: 0, value: null };
 let equityBaseline = { key: null, value: undefined }; // value: undefined=未取过, null=无快照
 
-// 参照账户的快照过滤(025 多账户后 account_id=null 才是 env 默认账户;缺列=纯旧库,不过滤)
-async function referenceSnapshotQuery(ref, columns, ascending, limit) {
+// 参照账户的快照过滤(025 多账户后 account_id=null 才是 env 默认账户;缺列=纯旧库,不过滤);
+// ltCreatedAt 供统计层做定点查询(今日盈亏锚点/日度收盘回走,brokerStats.js)
+export async function referenceSnapshotQuery(ref, columns, { ascending, limit, ltCreatedAt = null } = {}) {
   const build = (filtered) => {
     let q = supabase()
       .from('broker_mirror_snapshots')
       .select(columns)
       .order('created_at', { ascending })
       .limit(limit);
+    if (ltCreatedAt) q = q.lt('created_at', ltCreatedAt);
     if (filtered) q = ref.account ? q.eq('account_id', ref.account.id) : q.is('account_id', null);
     return q;
   };
@@ -223,10 +225,35 @@ async function referenceSnapshotQuery(ref, columns, ascending, limit) {
   return { data, error };
 }
 
-async function loadEquityBaseline(ref) {
+/**
+ * 参照账户的镜像单查询(brokerStats/对照卡公用):账户过滤 + 两级列回退
+ * (fallbackColumns 供剥 attempt/retry_of(027 未迁移)重试;account_id/source_variant
+ * 缺列 = 纯旧单账户库,剥账户过滤重试)。apply(q) 由调用方追加过滤/排序/限量。
+ */
+export async function referenceOrdersQuery(ref, columns, { fallbackColumns = null, apply = (q) => q } = {}) {
+  const build = (cols, filtered) => {
+    let q = supabase().from('broker_mirror_orders').select(cols);
+    if (filtered) {
+      q = ref.account ? q.eq('account_id', ref.account.id) : q.is('account_id', null);
+      q = q.is('source_variant', null);
+    }
+    return apply(q);
+  };
+  let { data, error } = await build(columns, true);
+  if (error && fallbackColumns && /attempt|retry_of/.test(error.message)) {
+    warnRetryColumnsOnce();
+    ({ data, error } = await build(fallbackColumns, true));
+  }
+  if (error && /account_id|source_variant/.test(error.message)) {
+    ({ data, error } = await build(fallbackColumns || columns, false));
+  }
+  return { data, error };
+}
+
+export async function loadEquityBaseline(ref) {
   if (equityBaseline.key === ref.key && equityBaseline.value !== undefined) return equityBaseline.value;
   try {
-    const { data, error } = await referenceSnapshotQuery(ref, 'equity', true, 1);
+    const { data, error } = await referenceSnapshotQuery(ref, 'equity', { ascending: true, limit: 1 });
     if (error) throw new Error(error.message);
     equityBaseline = { key: ref.key, value: data?.length ? Number(data[0].equity) : null };
   } catch {
@@ -319,10 +346,12 @@ export async function getBrokerSnapshots(sinceIso) {
   if (!ref) throw new Error('券商模拟账户未配置');
   const baseline = await loadEquityBaseline(ref);
   const build = (filtered) => {
+    // 倒序取最近窗口再反转:30s 快照节奏下升序 + limit 会永远卡在最老的 5000 行,
+    // 账户运行几天后曲线就冻结在早期
     let q = supabase()
       .from('broker_mirror_snapshots')
       .select('equity, cash, created_at')
-      .order('created_at', { ascending: true })
+      .order('created_at', { ascending: false })
       .limit(5000);
     if (filtered) q = ref.account ? q.eq('account_id', ref.account.id) : q.is('account_id', null);
     if (sinceIso) q = q.gte('created_at', sinceIso);
@@ -334,7 +363,7 @@ export async function getBrokerSnapshots(sinceIso) {
   }
   if (error) throw new Error(error.message);
   // 30s 快照粒度下行数远超图表可用点数:均匀降采样到 ≤600 点(保首尾)
-  let rows = data || [];
+  let rows = (data || []).reverse();
   if (rows.length > 600) {
     const step = (rows.length - 1) / 599;
     rows = Array.from({ length: 600 }, (_, i) => rows[Math.round(i * step)]);
@@ -348,7 +377,7 @@ export async function getLatestBrokerSnapshot() {
     const ref = brokerReference();
     if (!ref) return null;
     const baseline = await loadEquityBaseline(ref);
-    const { data, error } = await referenceSnapshotQuery(ref, 'equity, cash, created_at', false, 1);
+    const { data, error } = await referenceSnapshotQuery(ref, 'equity, cash, created_at', { ascending: false, limit: 1 });
     if (error) throw new Error(error.message);
     return mapBrokerSnapshotRow(data?.[0], baseline);
   } catch {
@@ -1167,28 +1196,15 @@ export async function getBrokerMirrorOverview() {
   if (tableMissing) return { enabled: true, available: false };
   try {
     // 对照卡只看参照账户的实盘镜像(管理页主对照账户优先,否则 env 默认账户;
-    // 其余附加账户/影子镜像单不混入);
-    // 三级列回退:剥 attempt/retry_of(027 未迁移)→ 剥账户过滤(025 未迁移)
+    // 其余附加账户/影子镜像单不混入);列回退在 referenceOrdersQuery 内公用
     const OVERVIEW_COLUMNS = 'id, symbol, side, qty, limit_price, status, filled_avg_price, internal_price, diff_bps, note, submitted_at, filled_at';
-    const ordersSelect = (columns, filtered) => {
-      let q = supabase().from('broker_mirror_orders').select(columns);
-      if (filtered) {
-        q = ref.account ? q.eq('account_id', ref.account.id) : q.is('account_id', null);
-        q = q.is('source_variant', null);
-      }
-      return q.order('submitted_at', { ascending: false }).limit(200);
-    };
-    let [snapRes, ordersRes] = await Promise.all([
-      referenceSnapshotQuery(ref, 'equity, cash, internal_total_value, created_at', false, 1),
-      ordersSelect(`${OVERVIEW_COLUMNS}, attempt, retry_of`, true),
+    const [snapRes, ordersRes] = await Promise.all([
+      referenceSnapshotQuery(ref, 'equity, cash, internal_total_value, created_at', { ascending: false, limit: 1 }),
+      referenceOrdersQuery(ref, `${OVERVIEW_COLUMNS}, attempt, retry_of`, {
+        fallbackColumns: OVERVIEW_COLUMNS,
+        apply: (q) => q.order('submitted_at', { ascending: false }).limit(200),
+      }),
     ]);
-    if (ordersRes.error && /attempt|retry_of/.test(ordersRes.error.message)) {
-      warnRetryColumnsOnce();
-      ordersRes = await ordersSelect(OVERVIEW_COLUMNS, true);
-    }
-    if (ordersRes.error && /account_id|source_variant/.test(ordersRes.error.message)) {
-      ordersRes = await ordersSelect(OVERVIEW_COLUMNS, false);
-    }
     if (snapRes.error || ordersRes.error) {
       const err = snapRes.error || ordersRes.error;
       if (isMissingTable(err)) {

@@ -264,7 +264,17 @@ export default function Dashboard({ portfolio, snapshots, trades, stats, perform
           </Card>
         </Col>
         <Col xs={24} lg={8}>
-          <Card title="关键指标" style={{ height: '100%' }}>
+          <Card
+            title="关键指标"
+            style={{ height: '100%' }}
+            extra={
+              stats?.ledger === 'broker' ? (
+                <Tag bordered style={{ marginRight: 0 }} className="label-caps">
+                  券商模拟
+                </Tag>
+              ) : null
+            }
+          >
             <MetricsPanel stats={stats} performance={performance} />
           </Card>
         </Col>
@@ -291,11 +301,18 @@ export default function Dashboard({ portfolio, snapshots, trades, stats, perform
       <Card
         title="最近交易"
         extra={
-          trades?.length ? (
-            <Button type="link" size="small" onClick={() => onNavigate?.('trades')}>
-              查看全部
-            </Button>
-          ) : null
+          <Space size={4}>
+            {trades?.[0]?.ledger === 'broker' && (
+              <Tag bordered style={{ marginRight: 0 }} className="label-caps">
+                券商模拟
+              </Tag>
+            )}
+            {trades?.length ? (
+              <Button type="link" size="small" onClick={() => onNavigate?.('trades')}>
+                查看全部
+              </Button>
+            ) : null}
+          </Space>
         }
       >
         {!trades?.length ? (

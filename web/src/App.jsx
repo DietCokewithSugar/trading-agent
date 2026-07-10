@@ -196,6 +196,9 @@ function MainApp() {
         }
       } catch { /* 忽略畸形数据 */ }
     });
+    // 管理后台切换了展示主账本:净值/指标/交易记录整体换源,一次全量刷新原子切换
+    // (否则 stats/trades 要等下一次成交事件才换,且净值图会新旧账本点混线)
+    es.addEventListener('ledger', () => refresh());
     // 管理后台执行了全量数据重置:全部数据作废,整体刷新,清空实时报价残留
     es.addEventListener('reset', () => {
       setLiveQuotes({});

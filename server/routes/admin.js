@@ -3,7 +3,7 @@ import { supabase } from '../db.js';
 import { config } from '../config.js';
 import { runCycle, cycleStatus, countAnalysisBacklog } from '../services/newsService.js';
 import { resetAllData } from '../services/adminService.js';
-import { clientCount } from '../services/bus.js';
+import { clientCount, broadcast } from '../services/bus.js';
 import { isHalted } from '../services/halt.js';
 import { safeTokenEqual, createAuthRateLimiter } from '../services/authGuard.js';
 import { getTodayMetrics } from '../services/metrics.js';
@@ -113,8 +113,9 @@ router.post(
 );
 
 /**
- * 展示主账本切换(024):开启后仪表盘主视图(净值/持仓/曲线)展示券商模拟账户实时数据;
- * 内部引擎账本与交易链路不变。未配置券商 API / 缺列(未执行 024 迁移)开启时报 409
+ * 展示主账本切换(024):开启后仪表盘主视图(净值/持仓/曲线,030 起含关键指标与
+ * 交易记录)展示券商模拟账户数据;内部引擎账本与交易链路不变。
+ * 未配置券商 API / 缺列(未执行 024 迁移)开启时报 409
  */
 router.post(
   '/primary-ledger',
@@ -126,6 +127,8 @@ router.post(
     console.log(
       `[admin] 展示主账本 → ${result.enabled ? '券商模拟账户' : '内部账本'}${result.persisted ? '' : '(未持久化)'}`
     );
+    // 通知在线仪表盘整体换源:净值/指标/交易记录一次全量刷新原子切换,不等下一次成交或轮询
+    broadcast('ledger', { ledger: result.enabled ? 'broker' : 'internal' });
     res.json(result);
   })
 );

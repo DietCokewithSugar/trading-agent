@@ -18,6 +18,7 @@ import { getBrokerMirrorOverview } from '../services/brokerMirror.js';
 import { isVolBracketEnabled, getTradingStrategy, strategyBracket } from '../services/strategy.js';
 import { getPrimaryValuation, isBrokerLedgerPrimary } from '../services/primaryLedger.js';
 import { getBrokerSnapshots } from '../services/brokerMirror.js';
+import { listBrokerTrades } from '../services/brokerStats.js';
 import { safeTokenEqual, createAuthRateLimiter } from '../services/authGuard.js';
 import { clusterAnalyses } from '../services/newsDedup.js';
 import { getHaltState } from '../services/tradingHalts.js';
@@ -394,10 +395,15 @@ router.get(
   })
 );
 
+// 券商主账本下交易记录取数失败的限频告警(回退内部账本,与 statsService 同一节奏)
+let lastBrokerTradesWarnAt = 0;
+
 /**
  * 交易记录(含关联新闻标题与分析)。
  * ?before=<ISO> 游标分页:取该时刻之前的记录——SSE 推送会让列表头部增长,
  * 纯 offset 翻页的偏移会随之漂移漏行,加载更多一律走游标。
+ * 券商主账本(024/030)下改为返回参照账户的镜像成交(映射为同一行形状,
+ * id 带 bm- 前缀,行携带 ledger 标记);取数失败回退内部账本。
  */
 router.get(
   '/trades',
@@ -405,18 +411,29 @@ router.get(
     const limit = Math.min(Number(req.query.limit) || 100, 500);
     const offset = Math.max(Number(req.query.offset) || 0, 0);
     const before = req.query.before ? new Date(String(req.query.before)) : null;
+    const beforeIso = before && !Number.isNaN(before.getTime()) ? before.toISOString() : null;
+    if (isBrokerLedgerPrimary()) {
+      try {
+        return res.json(await listBrokerTrades({ limit, offset, before: beforeIso }));
+      } catch (err) {
+        if (Date.now() - lastBrokerTradesWarnAt > 5 * 60_000) {
+          lastBrokerTradesWarnAt = Date.now();
+          console.warn(`[api] 券商侧交易记录取数失败,回退内部账本: ${err.message}`);
+        }
+      }
+    }
     let query = supabase()
       .from('trades')
       .select('*, news_articles(title, url), news_analyses(sentiment, tier, reasoning)')
       .order('created_at', { ascending: false });
-    if (before && !Number.isNaN(before.getTime())) {
-      query = query.lt('created_at', before.toISOString()).range(0, limit - 1);
+    if (beforeIso) {
+      query = query.lt('created_at', beforeIso).range(0, limit - 1);
     } else {
       query = query.range(offset, offset + limit - 1);
     }
     const { data, error } = await query;
     if (error) throw new Error(error.message);
-    res.json(data || []);
+    res.json((data || []).map((t) => ({ ...t, ledger: 'internal' })));
   })
 );
 
