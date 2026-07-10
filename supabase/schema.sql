@@ -743,6 +743,13 @@ alter table broker_mirror_orders add column if not exists account_id bigint refe
 alter table broker_mirror_orders add column if not exists source_variant text;
 alter table broker_mirror_snapshots add column if not exists account_id bigint references broker_accounts(id) on delete set null;
 
+-- 券商账户主对照标记(029):管理页指定的「主对照账户」优先于 env 默认账户
+-- 承担展示主账本/对照卡/快照对比职责;仅 mirror_actual 用途可设,至多一个
+alter table broker_accounts add column if not exists is_primary boolean not null default false;
+create unique index if not exists idx_broker_accounts_primary
+  on broker_accounts (is_primary)
+  where is_primary;
+
 -- SEC EDGAR 监管文件源(026):文章行携带监管文件元数据
 -- (source='sec-filings' 渠道;url 为主文档链接,onConflict 去重键不变)
 alter table news_articles add column if not exists source_type text;    -- 'regulatory_filing'

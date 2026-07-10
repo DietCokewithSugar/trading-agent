@@ -41,11 +41,14 @@ if (fs.existsSync(dist)) {
 const missing = assertConfig();
 app.listen(config.port, () => {
   console.log(`[server] 服务已启动: http://localhost:${config.port}`);
-  // 人工交易暂停/交易策略/主账本开关跨重启持久化,与调度是否启动无关;内部自行容错,绝不抛错
+  // 人工交易暂停/交易策略/主账本开关跨重启持久化,与调度是否启动无关;内部自行容错,绝不抛错。
+  // 主账本开关的可用性判定依赖账户缓存(管理页主对照账户,029),须先加载账户再加载开关
   loadTradingHalt().catch(() => {});
   loadTradingStrategy().catch(() => {});
-  loadPrimaryLedger().catch(() => {});
-  loadBrokerAccounts().catch(() => {});
+  loadBrokerAccounts()
+    .catch(() => {})
+    .then(() => loadPrimaryLedger())
+    .catch(() => {});
   if (missing.length === 0) {
     startScheduler();
   } else {

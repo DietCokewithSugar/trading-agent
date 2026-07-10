@@ -5,8 +5,7 @@
 // 券商取数失败 fail-open 回退内部账本(限频告警),仪表盘永不因外部 API 故障空白。
 import { supabase } from '../db.js';
 import { getValuation } from './portfolio.js';
-import { isBrokerEnabled } from './alpacaBroker.js';
-import { getBrokerValuation } from './brokerMirror.js';
+import { getBrokerValuation, hasBrokerReference } from './brokerMirror.js';
 
 let brokerPrimary = false;
 let columnMissing = false;
@@ -40,9 +39,10 @@ export async function loadPrimaryLedger() {
       }
       return;
     }
-    brokerPrimary = data?.broker_ledger_primary === true && isBrokerEnabled();
-    if (data?.broker_ledger_primary === true && !isBrokerEnabled()) {
-      console.warn('[broker] 主账本开关持久化为券商模拟,但券商 API 未配置,回退内部账本');
+    // 参照账户 = 管理页主对照账户(029)或 env 默认账户;须在 loadBrokerAccounts 之后调用
+    brokerPrimary = data?.broker_ledger_primary === true && hasBrokerReference();
+    if (data?.broker_ledger_primary === true && !hasBrokerReference()) {
+      console.warn('[broker] 主账本开关持久化为券商模拟,但无可用参照账户(env 未配置且未指定主对照账户),回退内部账本');
     }
     if (brokerPrimary) console.log('[broker] 展示主账本: 券商模拟账户');
   } catch (err) {
@@ -69,8 +69,8 @@ export async function setBrokerLedgerPrimary(value) {
       return { enabled: false, persisted: false };
     }
   }
-  if (!isBrokerEnabled()) {
-    const err = new Error('券商模拟账户未配置(缺少 API key),无法设为主账本');
+  if (!hasBrokerReference()) {
+    const err = new Error('无可用参照账户(env 未配置且未在管理页指定主对照账户),无法设为主账本');
     err.status = 409;
     throw err;
   }
