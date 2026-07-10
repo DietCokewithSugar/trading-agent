@@ -5,6 +5,9 @@
 //  - 卖单必须收敛:限价重挂 maxRetries 次后升级一次市价单(盘外提交排队到下一常规时段);
 //  - 买单限时追单(buyRetry='chase'):漂移(相对原内部成交价,只限上行)超 buyDriftCapPercent
 //    或次数用尽即放弃 —— 不以离谱价格追高污染对照数据;
+//  - 买单资金约束(planBuyFunding):镜像账户按现金账户语义运作,现金不足时顺延等
+//    在途卖单回款或放弃,绝不动用保证金(否则账户现金转负、敞口脱离被镜像账本);
+//    顺延买单超龄作废(deferredBuyMaxAgeHours,沿用实盘挂单时效);
 //  - 对账清理(planReconcile):券商持有但内部账本已不持有的仓位 → 平掉(永不买入对账)。
 // IO(券商持仓定量、报价、落库)全部留在 brokerMirror.js。
 
@@ -44,6 +47,48 @@ export function buyDriftPercent({ internalPrice, currentPrice }) {
 }
 
 /**
+ * 在途买单的现金占用(纯函数):券商的 cash 只在成交时变动,已提交未成交的限价买单
+ * 不占 cash —— 资金判定必须自己把在途买单的挂单金额记为已承诺,否则串行连发的买单
+ * 各自读到同一余额,集体超买触发被动融资。绑定唯一性保证账户只有本进程一路在写,
+ * 本地记账即完整覆盖。rows 为该账户在途(submitted/partially_filled)买单行;
+ * 单价取 limit_price(挂单冻结口径),缺失退回 internal_price。
+ */
+export function committedBuyNotional(rows) {
+  let total = 0;
+  for (const r of rows || []) {
+    if (r?.side !== 'buy') continue;
+    const price = Number(r.limit_price) > 0 ? Number(r.limit_price) : Number(r.internal_price);
+    if (!(price > 0)) continue;
+    total += remainingQty({ qty: r.qty, filledQty: r.filled_qty }) * price;
+  }
+  return round2(total);
+}
+
+/**
+ * 镜像买单资金决策(纯函数):镜像账户按现金账户语义运作 —— 内部/影子账本都以现金为
+ * 硬约束,券商侧绝不动用保证金(否则保证金账户被动融资、现金转负,敞口脱离被镜像的
+ * 账本,对照失去意义)。availableCash 调用方须已扣除在途买单占用(committedBuyNotional)。
+ *  - 可用现金足额 → submit;
+ *  - 现金读数不可得 → wait(顺延下轮再看,由顺延买单时效兜底);
+ *  - 不足但有在途卖单回款可期 → wait(卖单被设计保证收敛,回款必达);
+ *  - 不足且无回款可期 → abandon(内部已成交而券商放弃,如实计入未成交,绝不融资追买)。
+ */
+export function planBuyFunding({ notional, availableCash, hasPendingSellProceeds = false }) {
+  const need = Number(notional);
+  if (!(need > 0)) return { action: 'abandon', note: '买入金额非法,放弃镜像买入' };
+  // null/undefined = 读数不可得(未知),区别于已知的 0/负现金
+  if (availableCash === null || availableCash === undefined) return { action: 'wait' };
+  const cash = Number(availableCash);
+  if (!Number.isFinite(cash)) return { action: 'wait' };
+  if (cash >= need) return { action: 'submit' };
+  if (hasPendingSellProceeds) return { action: 'wait', note: '现金不足,待在途卖单回款' };
+  return {
+    action: 'abandon',
+    note: `现金不足($${round2(cash)} < $${round2(need)}),放弃镜像买入`,
+  };
+}
+
+/**
  * 镜像单跟进决策。两个入口场景:
  *  - row.status==='deferred':休市顺延单,session/实时价决定 等待/提交/放弃;
  *  - 在途单迁移到终态:brokerStatus ∈ expired/canceled/rejected 时决定 重挂/升级/放弃。
@@ -52,7 +97,7 @@ export function buyDriftPercent({ internalPrice, currentPrice }) {
  *  子行先落 deferred)| market_escalate | abandon(顺延买单漂移超限)| none(不跟进)。
  * 卖出数量不在此定(需查券商持仓,IO),调用方按 adjustSellQty 重定。
  */
-export function planMirrorFollowUp({ row, brokerStatus = null, session = null, currentPrice = null, config = {} }) {
+export function planMirrorFollowUp({ row, brokerStatus = null, session = null, currentPrice = null, config = {}, now = Date.now() }) {
   const side = row?.side;
   const slack = Number(config.slackPercent) >= 0 ? Number(config.slackPercent) : 1;
   const maxRetries = Number.isFinite(Number(config.maxRetries)) ? Math.max(Number(config.maxRetries), 0) : 3;
@@ -62,6 +107,24 @@ export function planMirrorFollowUp({ row, brokerStatus = null, session = null, c
 
   // ── 休市顺延单:开盘后以实时价提交 ──
   if (row?.status === 'deferred') {
+    // 顺延买单超龄作废(时效沿用实盘挂单 PENDING_ORDER_MAX_AGE_HOURS):现金等待没有
+    // 天然终点,超龄一刀切防止顺延单无限占据轮询工作集;卖单不设时效 —— 卖出必须收敛,
+    // 它的等待(休市/同票买单在途)都有确定的终点
+    const maxAgeMs = Number(config.deferredBuyMaxAgeHours) > 0 ? Number(config.deferredBuyMaxAgeHours) * 3600_000 : null;
+    const age = now - Date.parse(row.submitted_at ?? '');
+    if (side === 'buy' && maxAgeMs && Number.isFinite(age) && age > maxAgeMs) {
+      return { action: 'abandon', note: `顺延买单超过 ${config.deferredBuyMaxAgeHours} 小时未能提交,作废` };
+    }
+    // 报价长期不可得的顺延卖单(退市/长期停牌票):升级市价单交由券商裁决(成交或
+    // 参数级拒绝终态)—— 否则毒行永久占据轮询工作集,并作为在途单阻塞同票对账清理
+    if (side === 'sell' && !price && session && session !== 'closed' && maxAgeMs && Number.isFinite(age) && age > maxAgeMs) {
+      return {
+        action: 'market_escalate',
+        qty: remainingQty({ qty: row?.qty, filledQty: row?.filled_qty }),
+        extendedHours: false,
+        note: `顺延卖单超过 ${config.deferredBuyMaxAgeHours} 小时无报价,升级市价单`,
+      };
+    }
     if (session === 'closed' || !price) return { action: 'wait' };
     if (side === 'buy') {
       const drift = buyDriftPercent({ internalPrice: row.internal_price, currentPrice: price });

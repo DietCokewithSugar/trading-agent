@@ -43,6 +43,19 @@ test('computeShadowSpend: 单票持仓帽与最小金额', () => {
   assert.equal(computeShadowSpend({ fraction: 0.0001, cash: 50000, totalValue: 100000, caps }), 0);
 });
 
+test('computeShadowSpend: 现金拉满重算用于腾位判定 —— 持仓帽/最小单额导致的 0 与现金无关', () => {
+  // shadowBuyWithRotation 用 cash=totalValue(现金不设限的假设值)重算:仍为 0 说明
+  // 约束不是现金,腾位卖出救不回来,不应清掉盈利持仓
+  assert.equal(
+    computeShadowSpend({ fraction: 0.1, cash: 100000, totalValue: 100000, positionValue: 25000, caps }),
+    0
+  );
+  assert.equal(computeShadowSpend({ fraction: 0.0001, cash: 100000, totalValue: 100000, caps }), 0);
+  // 现金才是约束:现金拉满后能买 → 腾位有意义
+  assert.equal(computeShadowSpend({ fraction: 0.1, cash: 30, totalValue: 100000, caps }), 0);
+  assert.equal(computeShadowSpend({ fraction: 0.1, cash: 100000, totalValue: 100000, caps }), 10000);
+});
+
 test('computeShadowSpend: benchmark 全仓建仓只受现金约束', () => {
   assert.equal(
     computeShadowSpend({ fraction: 1, cash: 100000, totalValue: 100000, benchmark: true, caps }),

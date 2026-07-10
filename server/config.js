@@ -63,6 +63,9 @@ export const config = {
   brokerMirrorBuyRetry: process.env.BROKER_MIRROR_BUY_RETRY === 'off' ? 'off' : 'chase',
   // 对账清理:定期(约 30 分钟)平掉"券商持有但内部账本已不持有"的滞留仓位
   brokerMirrorReconcile: process.env.BROKER_MIRROR_RECONCILE !== 'false',
+  // 陈旧在途限价单主动撤单重挂(分钟,0=关闭):day 限价单不成交要等收盘过期才进重挂链,
+  // 最坏拖数日 —— 超时主动撤掉,让既有重挂链按实时价重挂,镜像出场时效与被镜像账本对齐
+  brokerMirrorRepriceMinutes: num(process.env.BROKER_MIRROR_REPRICE_MINUTES, 15),
   // 券商净值对照快照间隔(秒,下限 10s;休市时段净值不动,自动降回 10 分钟一条)
   brokerSnapshotSeconds: num(process.env.BROKER_SNAPSHOT_SECONDS, 30),
 

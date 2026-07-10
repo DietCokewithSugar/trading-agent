@@ -36,6 +36,8 @@ services:
         value: "chase"
       - key: BROKER_MIRROR_RECONCILE
         value: "true"
+      - key: BROKER_MIRROR_REPRICE_MINUTES
+        value: "15"
       # 券商净值对照快照间隔(秒,下限 10;休市自动降回 10 分钟一条)
       - key: BROKER_SNAPSHOT_SECONDS
         value: "30"
