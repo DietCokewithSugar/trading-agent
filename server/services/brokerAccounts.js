@@ -82,6 +82,15 @@ export function accountById(id) {
   return accounts.find((a) => a.id === id) || null;
 }
 
+/**
+ * 主对照账户(029):管理页指定、启用中的 is_primary 账户。承担展示主账本/
+ * 券商对照卡/净值快照对比职责,优先于 env 默认账户(遗留可选配置)。
+ * 029 未迁移时行内无 is_primary 字段 → 恒为 null,自动退回 env 账户。
+ */
+export function primaryBrokerAccount() {
+  return accounts.find((a) => a.enabled && a.is_primary === true) || null;
+}
+
 /** 账户行 → 券商客户端凭据 */
 export function credsOf(account) {
   return account ? { keyId: account.key_id, secretKey: account.secret_key } : null;
@@ -96,6 +105,7 @@ export function listAccountsMasked() {
     key_id_masked: `${String(a.key_id).slice(0, 4)}****`,
     purpose: a.purpose,
     enabled: a.enabled,
+    is_primary: a.is_primary === true,
     created_at: a.created_at,
   }));
 }
@@ -168,12 +178,16 @@ export async function addBrokerAccount({ label, keyId, secretKey, purpose = 'una
 }
 
 /**
- * 更新账户(label/purpose/enabled;凭据不可改,重配请删除重加)。
+ * 更新账户(label/purpose/enabled/isPrimary;凭据不可改,重配请删除重加)。
  * purpose 变更时该账户的 deferred 顺延单一并作废(旧用途的顺延买卖提交出去
  * 只会制造与新对账基准的分歧,再被对账清理平掉——白绕一圈);已提交在途单
  * 保持轮询到终局。账户随后由对账清理向新用途的基准账本收敛。
+ * 主对照账户(029):isPrimary=true 要求账户启用且用途为 mirror_actual
+ * (它承担展示主账本/对照卡的"与内部账本对比"职责,绑定影子变体的账户对比无意义),
+ * 先清旧主再设新主,至多一个(部分唯一索引兜底);
+ * 用途改离 mirror_actual 或停用账户时自动摘除主标记。
  */
-export async function updateBrokerAccount(id, { label, purpose, enabled } = {}) {
+export async function updateBrokerAccount(id, { label, purpose, enabled, isPrimary } = {}) {
   requireTable();
   const before = accountById(Number(id));
   const patch = { updated_at: new Date().toISOString() };
@@ -187,11 +201,59 @@ export async function updateBrokerAccount(id, { label, purpose, enabled } = {}) 
     patch.purpose = purpose;
   }
   if (enabled !== undefined) patch.enabled = Boolean(enabled);
-  const { data, error } = await supabase()
+
+  const nextPurpose = purpose !== undefined ? purpose : before?.purpose;
+  const nextEnabled = enabled !== undefined ? Boolean(enabled) : before?.enabled;
+  if (isPrimary === true) {
+    if (nextPurpose !== 'mirror_actual') {
+      const err = new Error('仅用途为「实盘镜像」(mirror_actual)的账户可设为主对照账户');
+      err.status = 400;
+      throw err;
+    }
+    if (!nextEnabled) {
+      const err = new Error('停用中的账户不能设为主对照账户');
+      err.status = 400;
+      throw err;
+    }
+    // 先清旧主(至多一行),再随本次 patch 设新主;并发竞争由部分唯一索引兜底
+    const { error: clearErr } = await supabase()
+      .from('broker_accounts')
+      .update({ is_primary: false, updated_at: new Date().toISOString() })
+      .eq('is_primary', true)
+      .neq('id', id);
+    if (clearErr) {
+      if (/is_primary/.test(clearErr.message)) {
+        const err = new Error('broker_accounts 缺少 is_primary 列,请执行 029 迁移');
+        err.status = 409;
+        throw err;
+      }
+      const err = new Error(`清除旧主对照账户失败: ${clearErr.message}`);
+      err.status = 500;
+      throw err;
+    }
+    patch.is_primary = true;
+  } else if (
+    isPrimary === false ||
+    (before?.is_primary === true && (nextPurpose !== 'mirror_actual' || !nextEnabled))
+  ) {
+    patch.is_primary = false;
+  }
+
+  let { data, error } = await supabase()
     .from('broker_accounts')
     .update(patch)
     .eq('id', id)
     .select('id');
+  // 029 未迁移:显式操作主标记时报 409;附带的自动摘除则剥列重试
+  if (error && /is_primary/.test(error.message) && 'is_primary' in patch) {
+    if (isPrimary !== undefined) {
+      const e = new Error('broker_accounts 缺少 is_primary 列,请执行 029 迁移');
+      e.status = 409;
+      throw e;
+    }
+    const { is_primary, ...rest } = patch;
+    ({ data, error } = await supabase().from('broker_accounts').update(rest).eq('id', id).select('id'));
+  }
   if (error) {
     const e = new Error(`账户更新失败: ${error.message}`);
     e.status = 500;

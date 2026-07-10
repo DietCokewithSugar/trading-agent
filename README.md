@@ -374,7 +374,7 @@ cd web && npm run dev      # 终端 2:启动 Vite :5173(已配置 /api 代理)
 | `ENABLE_SHADOW` | `true` | 影子组合 / 消融实验:多套虚拟组合与实盘并行记账,每套关闭一层防线(需执行 017 迁移,缺表自动停用) |
 | `SHADOW_BASE_FRACTION` | `0.1` | 影子组合中无 LLM 决策路径(宏观拦截重放/即时成交)的确定性基础仓位(占组合总值,再叠加档位/置信度/来源缩放) |
 | `SHADOW_EQUAL_WEIGHT_FRACTION` | `0.05` | 等权变体的固定买入比例(占组合总值) |
-| `ALPACA_KEY_ID` / `ALPACA_SECRET_KEY` | 空 | 券商模拟对照账本(021):Alpaca Paper Trading 的 API 凭据,不填则该功能整体停用 |
+| `ALPACA_KEY_ID` / `ALPACA_SECRET_KEY` | 空 | 券商模拟对照账本(021)的默认账户凭据 —— **029 起为遗留可选**:券商账户推荐全部在管理页添加,「主对照」账户优先于此处的默认账户承担展示主账本/对照卡数据源 |
 | `ALPACA_BASE_URL` | paper 端点 | 券商接口地址(默认模拟盘) |
 | `ENABLE_BROKER_MIRROR` | `true` | 对照账本开关(仅当 key 齐备时实际生效) |
 | `BROKER_MIRROR_LIMIT_SLACK_PERCENT` | `1` | 镜像限价单的穿价容忍(%):买=内部价×(1+N%),卖=×(1−N%) |

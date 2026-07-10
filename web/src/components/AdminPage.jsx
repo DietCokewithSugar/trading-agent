@@ -7,6 +7,7 @@ import {
   Descriptions,
   Form,
   Input,
+  Popconfirm,
   Row,
   Select,
   Space,
@@ -241,7 +242,21 @@ export default function AdminPage() {
     setError(null);
     try {
       await adminApi.deleteBrokerAccount(token, id);
-      setMessage(`账户 #${id} 已删除(历史对照单保留)`);
+      setMessage(`账户 #${id} 已删除(该账户的对照单/快照一并清理;券商侧持仓不动)`);
+      loadBrokerAccounts();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setAcctBusy(false);
+    }
+  };
+
+  const liquidateAccount = async (id) => {
+    setAcctBusy(true);
+    setError(null);
+    try {
+      const r = await adminApi.liquidateBrokerAccount(token, id);
+      setMessage(`账户「${r.label}」已清仓重置(撤单+市价清仓;休市时段市价单排队到下一常规时段)`);
       loadBrokerAccounts();
     } catch (err) {
       setError(err.message);
@@ -660,7 +675,8 @@ export default function AdminPage() {
             <Card title="展示主账本">
               <Typography.Paragraph type="secondary" style={{ fontSize: 12.5 }}>
                 开启后仪表盘主视图(净值/持仓/净值曲线)切换为券商模拟账户的真实撮合数据
-                (盈亏基线为最早一条对照快照的净值);交易引擎、绩效统计与决策仍完全基于
+                (盈亏基线为最早一条对照快照的净值)。数据源为下方指定的「主对照」账户,
+                未指定时退回环境变量默认账户;交易引擎、绩效统计与决策仍完全基于
                 内部模拟账本,券商取数失败时主视图自动回退内部账本。状态跨重启保留。
               </Typography.Paragraph>
               <Space align="center" size={16}>
@@ -676,7 +692,7 @@ export default function AdminPage() {
                   <Alert
                     type="warning"
                     showIcon
-                    message="券商模拟账户未配置(缺少 API key),无法设为主账本"
+                    message="无可用参照账户:请在下方「券商模拟账户管理」添加实盘镜像账户并标记主对照(或配置环境变量默认账户)"
                     style={{ marginBottom: 0 }}
                   />
                 ) : status?.brokerLedgerPrimary ? (
@@ -694,10 +710,13 @@ export default function AdminPage() {
 
             <Card title="券商模拟账户管理">
               <Typography.Paragraph type="secondary" style={{ fontSize: 12.5 }}>
-                可添加多个券商模拟账户(添加时先校验凭据),每个账户可配置用途:
+                券商模拟账户全部在此管理(环境变量配置为可选遗留项)。每个账户可配置用途:
                 「实盘镜像」= 实盘每笔成交同步下真实对照单;绑定某个消融变体 =
                 该变体的影子买卖以 marketable 限价单在该账户真实盘口(NBBO)撮合。
-                Secret 仅保存在服务端,永不回传;删除账户保留历史对照单。
+                「主对照」标记的实盘镜像账户承担展示主账本与券商对照卡的数据源
+                (优先于环境变量默认账户)。Secret 仅保存在服务端,永不回传;
+                「清仓」撤掉该账户全部挂单并市价清空持仓(重新配置前使用);
+                删除账户会一并清理其对照单/快照(券商侧持仓不动)。
               </Typography.Paragraph>
               {brokerAccounts?.error ? (
                 <Alert type="warning" showIcon message={brokerAccounts.error} />
@@ -709,7 +728,11 @@ export default function AdminPage() {
                     <Alert
                       type="info"
                       showIcon
-                      message="默认账户(环境变量配置):实盘镜像 + 展示主账本数据源"
+                      message={
+                        brokerAccounts.reference === 'admin_primary'
+                          ? '环境变量默认账户仍在配置中(遗留可选):继续接收实盘镜像;展示主账本/对照卡已由管理页主对照账户接管'
+                          : '默认账户(环境变量配置,遗留可选):实盘镜像 + 展示主账本数据源;在下方指定主对照账户后由其接管'
+                      }
                       style={{ marginBottom: 0 }}
                     />
                   )}
@@ -725,7 +748,7 @@ export default function AdminPage() {
                       {
                         title: '用途',
                         dataIndex: 'purpose',
-                        width: 220,
+                        width: 200,
                         render: (v, row) => (
                           <Select
                             size="small"
@@ -738,9 +761,22 @@ export default function AdminPage() {
                         ),
                       },
                       {
+                        title: '主对照',
+                        dataIndex: 'is_primary',
+                        width: 80,
+                        render: (v, row) => (
+                          <Switch
+                            size="small"
+                            checked={v === true}
+                            disabled={acctBusy || (row.purpose !== 'mirror_actual' && v !== true) || (!row.enabled && v !== true)}
+                            onChange={(isPrimary) => patchBrokerAccount(row.id, { isPrimary })}
+                          />
+                        ),
+                      },
+                      {
                         title: '启用',
                         dataIndex: 'enabled',
-                        width: 80,
+                        width: 70,
                         render: (v, row) => (
                           <Switch
                             size="small"
@@ -753,11 +789,34 @@ export default function AdminPage() {
                       {
                         title: '',
                         dataIndex: 'id',
-                        width: 70,
-                        render: (id) => (
-                          <Button size="small" danger disabled={acctBusy} onClick={() => removeBrokerAccount(id)}>
-                            删除
-                          </Button>
+                        width: 130,
+                        render: (id, row) => (
+                          <Space size={4}>
+                            <Popconfirm
+                              title={`清仓账户「${row.label}」?`}
+                              description="撤掉全部挂单并市价清空持仓,不可撤销"
+                              okText="清仓"
+                              okButtonProps={{ danger: true }}
+                              cancelText="取消"
+                              onConfirm={() => liquidateAccount(id)}
+                            >
+                              <Button size="small" disabled={acctBusy}>
+                                清仓
+                              </Button>
+                            </Popconfirm>
+                            <Popconfirm
+                              title={`删除账户「${row.label}」?`}
+                              description="解除绑定并清理其对照单/快照;券商侧持仓不动"
+                              okText="删除"
+                              okButtonProps={{ danger: true }}
+                              cancelText="取消"
+                              onConfirm={() => removeBrokerAccount(id)}
+                            >
+                              <Button size="small" danger disabled={acctBusy}>
+                                删除
+                              </Button>
+                            </Popconfirm>
+                          </Space>
                         ),
                       },
                     ]}

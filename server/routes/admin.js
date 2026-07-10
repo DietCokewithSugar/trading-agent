@@ -12,7 +12,7 @@ import { isTradingHalted, setTradingHalt } from '../services/tradingHalt.js';
 import { getTradingStrategy, setTradingStrategy, STRATEGIES } from '../services/strategy.js';
 import { isBrokerLedgerPrimary, setBrokerLedgerPrimary } from '../services/primaryLedger.js';
 import { isBrokerEnabled } from '../services/alpacaBroker.js';
-import { listBrokerAccountsLive } from '../services/brokerMirror.js';
+import { listBrokerAccountsLive, hasBrokerReference, brokerReference, liquidateBrokerAccount } from '../services/brokerMirror.js';
 import {
   listAccountsMasked,
   addBrokerAccount,
@@ -66,7 +66,8 @@ router.get('/status', (req, res) => {
     tradingHalted: isTradingHalted(),
     tradingStrategy: getTradingStrategy(),
     brokerLedgerPrimary: isBrokerLedgerPrimary(),
-    brokerMirrorAvailable: isBrokerEnabled(),
+    // 展示主账本可用性 = 存在参照账户(管理页主对照账户优先,否则 env 默认账户,029)
+    brokerMirrorAvailable: hasBrokerReference(),
     riskControls: getRiskControlState(),
     // 标的名录与停牌守护(028):名录加载状态 + 生效中停牌全列表(含 reason code)
     symbolReference: getSymbolReferenceStatus(),
@@ -136,9 +137,12 @@ router.post(
 router.get(
   '/broker-accounts',
   asyncHandler(async (req, res) => {
+    const ref = brokerReference();
     res.json({
       accounts: listAccountsMasked(),
       env_account: isBrokerEnabled(),
+      // 当前参照账户来源:管理页主对照账户 / env 默认账户 / 无(029)
+      reference: ref ? (ref.account ? 'admin_primary' : 'env') : null,
       purposes: validPurposes(),
     });
   })
@@ -168,8 +172,18 @@ router.post(
 router.post(
   '/broker-accounts/:id',
   asyncHandler(async (req, res) => {
-    const { label, purpose, enabled } = req.body || {};
-    res.json(await updateBrokerAccount(Number(req.params.id), { label, purpose, enabled }));
+    const { label, purpose, enabled, isPrimary } = req.body || {};
+    res.json(await updateBrokerAccount(Number(req.params.id), { label, purpose, enabled, isPrimary }));
+  })
+);
+
+/** 单账户清仓重置(029):撤单+市价清仓+作废该账户在途镜像单;账户配置保留 */
+router.post(
+  '/broker-accounts/:id/liquidate',
+  asyncHandler(async (req, res) => {
+    const result = await liquidateBrokerAccount(Number(req.params.id));
+    console.log(`[admin] 券商模拟账户 #${result.id}(${result.label})清仓重置`);
+    res.json(result);
   })
 );
 

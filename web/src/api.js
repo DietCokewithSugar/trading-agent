@@ -94,6 +94,8 @@ export const adminApi = {
     adminRequest(`/broker-accounts/${id}`, { method: 'POST', token, body }),
   deleteBrokerAccount: (token, id) =>
     adminRequest(`/broker-accounts/${id}`, { method: 'DELETE', token }),
+  liquidateBrokerAccount: (token, id) =>
+    adminRequest(`/broker-accounts/${id}/liquidate`, { method: 'POST', token }),
   runCycle: (token) => adminRequest('/run-cycle', { method: 'POST', token }),
   reset: (token) =>
     adminRequest('/reset', { method: 'POST', token, body: { confirm: 'RESET' } }),

@@ -42,7 +42,7 @@ import {
   cancelOpenOrders,
   closeAllPositions,
 } from './alpacaBroker.js';
-import { accountsForPurpose, enabledAccounts, accountById, credsOf } from './brokerAccounts.js';
+import { accountsForPurpose, enabledAccounts, accountById, credsOf, primaryBrokerAccount } from './brokerAccounts.js';
 
 function round2(n) {
   return Math.round(n * 100) / 100;
@@ -182,56 +182,73 @@ function snapshotIntervalMs() {
   return getMarketSession() === 'closed' ? Math.max(base, 10 * 60_000) : base;
 }
 
-// 展示主账本(024):账户+持仓短 TTL 缓存(报价推送循环每几秒一轮,护住券商限频);
-// 盈亏基线 = 最早一条对照快照净值,取一次后常驻(重置时清除)
-const VALUATION_CACHE_MS = 15_000;
-let valuationCache = { at: 0, value: null };
-let equityBaseline = undefined; // undefined=未取过, null=无快照
+/**
+ * 展示/对照的参照账户(029):管理页指定的主对照账户优先,否则 env 默认账户
+ * (ALPACA_KEY_ID/SECRET,自此为遗留可选配置);都没有 → null(对照卡/主账本不可用)。
+ * key 用于区分缓存归属(主账户切换后缓存立即失效)。
+ */
+export function brokerReference() {
+  const primary = primaryBrokerAccount();
+  if (primary) return { key: `a${primary.id}`, account: primary, creds: credsOf(primary) };
+  if (isBrokerEnabled()) return { key: 'env', account: null, creds: null };
+  return null;
+}
 
-// env 默认账户的快照过滤(025 多账户后 account_id=null 才是默认账户;缺列=纯旧库,不过滤)
-async function envSnapshotQuery(columns, ascending, limit) {
-  let query = supabase()
-    .from('broker_mirror_snapshots')
-    .select(columns)
-    .is('account_id', null)
-    .order('created_at', { ascending })
-    .limit(limit);
-  let { data, error } = await query;
-  if (error && /account_id/.test(error.message)) {
-    ({ data, error } = await supabase()
+/** 是否存在可用的参照账户(展示主账本/对照卡的可用性判定,替代裸 isBrokerEnabled) */
+export function hasBrokerReference() {
+  return brokerReference() !== null;
+}
+
+// 展示主账本(024):账户+持仓短 TTL 缓存(报价推送循环每几秒一轮,护住券商限频);
+// 盈亏基线 = 参照账户最早一条对照快照净值,取一次后常驻(重置/参照切换时失效)
+const VALUATION_CACHE_MS = 15_000;
+let valuationCache = { key: null, at: 0, value: null };
+let equityBaseline = { key: null, value: undefined }; // value: undefined=未取过, null=无快照
+
+// 参照账户的快照过滤(025 多账户后 account_id=null 才是 env 默认账户;缺列=纯旧库,不过滤)
+async function referenceSnapshotQuery(ref, columns, ascending, limit) {
+  const build = (filtered) => {
+    let q = supabase()
       .from('broker_mirror_snapshots')
       .select(columns)
       .order('created_at', { ascending })
-      .limit(limit));
+      .limit(limit);
+    if (filtered) q = ref.account ? q.eq('account_id', ref.account.id) : q.is('account_id', null);
+    return q;
+  };
+  let { data, error } = await build(true);
+  if (error && /account_id/.test(error.message)) {
+    ({ data, error } = await build(false));
   }
   return { data, error };
 }
 
-async function loadEquityBaseline() {
-  if (equityBaseline !== undefined) return equityBaseline;
+async function loadEquityBaseline(ref) {
+  if (equityBaseline.key === ref.key && equityBaseline.value !== undefined) return equityBaseline.value;
   try {
-    const { data, error } = await envSnapshotQuery('equity', true, 1);
+    const { data, error } = await referenceSnapshotQuery(ref, 'equity', true, 1);
     if (error) throw new Error(error.message);
-    equityBaseline = data?.length ? Number(data[0].equity) : null;
+    equityBaseline = { key: ref.key, value: data?.length ? Number(data[0].equity) : null };
   } catch {
-    equityBaseline = null;
+    equityBaseline = { key: ref.key, value: null };
   }
-  return equityBaseline;
+  return equityBaseline.value;
 }
 
 /**
- * 券商模拟账户实时估值(展示主账本,024):账户+全部持仓映射为 getValuation 形状。
+ * 券商模拟账户实时估值(展示主账本,024):参照账户+全部持仓映射为 getValuation 形状。
  * 15s TTL 缓存;取数失败向上抛,由 primaryLedger 兜底回退内部账本(fail-open)。
  */
 export async function getBrokerValuation() {
-  if (!isBrokerEnabled()) throw new Error('券商模拟账户未配置');
-  if (valuationCache.value && Date.now() - valuationCache.at < VALUATION_CACHE_MS) {
+  const ref = brokerReference();
+  if (!ref) throw new Error('券商模拟账户未配置');
+  if (valuationCache.key === ref.key && valuationCache.value && Date.now() - valuationCache.at < VALUATION_CACHE_MS) {
     return valuationCache.value;
   }
   const [account, positions, baseline] = await Promise.all([
-    getAccount(),
-    getPositions(),
-    loadEquityBaseline(),
+    getAccount(ref.creds),
+    getPositions(ref.creds),
+    loadEquityBaseline(ref),
   ]);
   const value = buildBrokerValuation({
     account,
@@ -239,7 +256,7 @@ export async function getBrokerValuation() {
     baseline,
     session: getMarketSession(),
   });
-  valuationCache = { at: Date.now(), value };
+  valuationCache = { key: ref.key, at: Date.now(), value };
   return value;
 }
 
@@ -296,25 +313,24 @@ export function mapBrokerSnapshotRow(row, baseline = null) {
   };
 }
 
-/** 券商净值时间序列(展示主账本的净值曲线,env 默认账户):升序;失败抛错由调用方回退 */
+/** 券商净值时间序列(展示主账本的净值曲线,参照账户):升序;失败抛错由调用方回退 */
 export async function getBrokerSnapshots(sinceIso) {
-  const baseline = await loadEquityBaseline();
-  let query = supabase()
-    .from('broker_mirror_snapshots')
-    .select('equity, cash, created_at')
-    .is('account_id', null)
-    .order('created_at', { ascending: true })
-    .limit(5000);
-  if (sinceIso) query = query.gte('created_at', sinceIso);
-  let { data, error } = await query;
-  if (error && /account_id/.test(error.message)) {
-    let fallback = supabase()
+  const ref = brokerReference();
+  if (!ref) throw new Error('券商模拟账户未配置');
+  const baseline = await loadEquityBaseline(ref);
+  const build = (filtered) => {
+    let q = supabase()
       .from('broker_mirror_snapshots')
       .select('equity, cash, created_at')
       .order('created_at', { ascending: true })
       .limit(5000);
-    if (sinceIso) fallback = fallback.gte('created_at', sinceIso);
-    ({ data, error } = await fallback);
+    if (filtered) q = ref.account ? q.eq('account_id', ref.account.id) : q.is('account_id', null);
+    if (sinceIso) q = q.gte('created_at', sinceIso);
+    return q;
+  };
+  let { data, error } = await build(true);
+  if (error && /account_id/.test(error.message)) {
+    ({ data, error } = await build(false));
   }
   if (error) throw new Error(error.message);
   // 30s 快照粒度下行数远超图表可用点数:均匀降采样到 ≤600 点(保首尾)
@@ -326,11 +342,13 @@ export async function getBrokerSnapshots(sinceIso) {
   return rows.map((row) => mapBrokerSnapshotRow(row, baseline)).filter(Boolean);
 }
 
-/** 最新券商快照(snapshot SSE 广播用,env 默认账户);无数据/失败返回 null */
+/** 最新券商快照(snapshot SSE 广播用,参照账户);无数据/失败返回 null */
 export async function getLatestBrokerSnapshot() {
   try {
-    const baseline = await loadEquityBaseline();
-    const { data, error } = await envSnapshotQuery('equity, cash, created_at', false, 1);
+    const ref = brokerReference();
+    if (!ref) return null;
+    const baseline = await loadEquityBaseline(ref);
+    const { data, error } = await referenceSnapshotQuery(ref, 'equity, cash, created_at', false, 1);
     if (error) throw new Error(error.message);
     return mapBrokerSnapshotRow(data?.[0], baseline);
   } catch {
@@ -741,15 +759,19 @@ export function mirrorShadowTrade(variant, trade) {
 /**
  * 净值对照快照(限频在内,双入口安全):env 默认账户 + 各附加账户逐个落快照。
  * 由独立调度循环(BROKER_SNAPSHOT_SECONDS)与对照轮询共同驱动,先到先写。
+ * 实盘镜像用途(mirror_actual)的附加账户同样记录同时刻内部净值(029)——
+ * 它们与内部账本可比,主对照账户的对照卡 diff 依赖这一列。
  */
 export async function takeBrokerSnapshots() {
   if (tableMissing) return;
   if (Date.now() - lastSnapshotAt < snapshotIntervalMs()) return;
   lastSnapshotAt = Date.now();
+  const needInternal =
+    isBrokerEnabled() || enabledAccounts().some((a) => a.purpose === 'mirror_actual');
+  const valuation = needInternal ? await getValuation().catch(() => null) : null;
   if (isBrokerEnabled()) {
     try {
       const account = await getAccount();
-      const valuation = await getValuation().catch(() => null);
       await supabase().from('broker_mirror_snapshots').insert({
         equity: Number(account.equity),
         cash: Number(account.cash),
@@ -765,7 +787,7 @@ export async function takeBrokerSnapshots() {
       await supabase().from('broker_mirror_snapshots').insert({
         equity: Number(account.equity),
         cash: Number(account.cash),
-        internal_total_value: null,
+        internal_total_value: acc.purpose === 'mirror_actual' ? (valuation?.total_value ?? null) : null,
         account_id: acc.id,
       });
     } catch (err) {
@@ -1140,19 +1162,24 @@ async function reconcileSweep() {
 
 /** 公开 API(/api/broker-mirror)数据源:载荷不含供应商名 */
 export async function getBrokerMirrorOverview() {
-  if (!isBrokerEnabled()) return { enabled: false };
+  const ref = brokerReference();
+  if (!ref) return { enabled: false };
   if (tableMissing) return { enabled: true, available: false };
   try {
-    // 对照卡只看 env 默认账户的实盘镜像(025 多账户后附加账户/影子镜像单不混入);
+    // 对照卡只看参照账户的实盘镜像(管理页主对照账户优先,否则 env 默认账户;
+    // 其余附加账户/影子镜像单不混入);
     // 三级列回退:剥 attempt/retry_of(027 未迁移)→ 剥账户过滤(025 未迁移)
     const OVERVIEW_COLUMNS = 'id, symbol, side, qty, limit_price, status, filled_avg_price, internal_price, diff_bps, note, submitted_at, filled_at';
     const ordersSelect = (columns, filtered) => {
       let q = supabase().from('broker_mirror_orders').select(columns);
-      if (filtered) q = q.is('account_id', null).is('source_variant', null);
+      if (filtered) {
+        q = ref.account ? q.eq('account_id', ref.account.id) : q.is('account_id', null);
+        q = q.is('source_variant', null);
+      }
       return q.order('submitted_at', { ascending: false }).limit(200);
     };
     let [snapRes, ordersRes] = await Promise.all([
-      envSnapshotQuery('equity, cash, internal_total_value, created_at', false, 1),
+      referenceSnapshotQuery(ref, 'equity, cash, internal_total_value, created_at', false, 1),
       ordersSelect(`${OVERVIEW_COLUMNS}, attempt, retry_of`, true),
     ]);
     if (ordersRes.error && /attempt|retry_of/.test(ordersRes.error.message)) {
@@ -1202,8 +1229,8 @@ export async function getBrokerMirrorOverview() {
  *  与轮询的竞态可接受:truncate 前被在途轮询捞到的行若在清仓后触发重挂,
  *  子单卖出按券商持仓重定量为 0 → 至多留一条 skipped 行,绝不会复活仓位 */
 export async function resetBrokerMirror() {
-  valuationCache = { at: 0, value: null };
-  equityBaseline = undefined;
+  valuationCache = { key: null, at: 0, value: null };
+  equityBaseline = { key: null, value: undefined };
   if (isBrokerEnabled()) {
     await cancelOpenOrders().catch((err) => console.warn(`[broker] 重置撤单失败: ${err.message}`));
     await closeAllPositions().catch((err) => console.warn(`[broker] 重置清仓失败: ${err.message}`));
@@ -1219,4 +1246,34 @@ export async function resetBrokerMirror() {
       console.warn(`[broker] 清空 ${table} 失败: ${error.message}`);
     }
   }
+}
+
+/**
+ * 单账户清仓重置(管理页,029):撤掉该账户全部券商挂单、市价清空全部持仓
+ * (休市/盘外提交的市价单排队到下一常规时段),并把该账户的在途/顺延镜像单作废 ——
+ * 防止撤单被重挂链当成未成交去追挂,清仓后又把仓位买回来。
+ * 账户配置与历史终态单据保留;券商侧失败向上抛(由路由报错给管理员)。
+ */
+export async function liquidateBrokerAccount(id) {
+  const account = accountById(Number(id));
+  if (!account) {
+    const err = new Error(`账户 #${id} 不存在`);
+    err.status = 404;
+    throw err;
+  }
+  const creds = credsOf(account);
+  await cancelOpenOrders(creds);
+  await closeAllPositions(creds);
+  const { error } = await supabase()
+    .from('broker_mirror_orders')
+    .update({ status: 'abandoned', note: '管理员清仓重置', updated_at: new Date().toISOString() })
+    .eq('account_id', account.id)
+    .in('status', ['submitted', 'partially_filled', 'deferred']);
+  if (error && !isMissingTable(error) && !/account_id/.test(error.message)) {
+    console.warn(`[broker] 账户 ${account.label} 清仓后作废在途单失败: ${error.message}`);
+  }
+  // 该账户若正是参照账户,估值缓存立即失效(下一次取数反映清仓后状态)
+  if (valuationCache.key === `a${account.id}`) valuationCache = { key: null, at: 0, value: null };
+  console.log(`[broker] 账户 ${account.label} 已清仓重置(撤单+清仓+作废在途镜像单)`);
+  return { id: account.id, label: account.label };
 }
