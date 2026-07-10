@@ -283,9 +283,18 @@ export default function TradesPage({ trades, macroVersion = 0, onSymbolClick }) 
       ) : (
         <Card
           title={
-            searching
-              ? `“${search.trim().toUpperCase()}” 的成交 (${filtered.length})`
-              : `${activeDate ? activeDate.format('M月D日') : ''} 成交 (${filtered.length})`
+            <Space size={8}>
+              <span>
+                {searching
+                  ? `“${search.trim().toUpperCase()}” 的成交 (${filtered.length})`
+                  : `${activeDate ? activeDate.format('M月D日') : ''} 成交 (${filtered.length})`}
+              </span>
+              {merged[0]?.ledger === 'broker' && (
+                <Tag bordered style={{ marginRight: 0 }} className="label-caps">
+                  券商模拟
+                </Tag>
+              )}
+            </Space>
           }
           extra={
             <Space wrap>

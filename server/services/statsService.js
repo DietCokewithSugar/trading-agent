@@ -2,6 +2,10 @@ import { supabase } from '../db.js';
 import { getHistoricalPricesAdjusted } from './fmp.js';
 import { isTradingDay } from './marketCalendar.js';
 import { etMidnightUtcIso } from './riskControls.js';
+import { isBrokerLedgerPrimary } from './primaryLedger.js';
+import { brokerReference, loadEquityBaseline } from './brokerMirror.js';
+import { fetchReferenceFills, fetchBrokerDayAnchors, loadBrokerDailyCloses } from './brokerStats.js';
+import { computeRealizedFromFills } from './mirrorLedger.js';
 
 function round2(n) {
   return Math.round(n * 100) / 100;
@@ -116,14 +120,60 @@ function computeStats(trades, snaps, anchors = null) {
   };
 }
 
+/**
+ * 券商主账本(024/030)下的统计输入:全部换成参照账户的镜像数据 ——
+ * 净值序列 = 日度收盘回走 + 最新快照,成交 = 镜像成交按加权均价重放出已实现盈亏。
+ * 任何一步失败向上抛,由调用方限频告警后回退内部口径。
+ */
+async function fetchBrokerStatsInputs() {
+  const ref = brokerReference();
+  if (!ref) throw new Error('券商参照账户不可用');
+  const [fills, anchors, dailyRows, baseline] = await Promise.all([
+    fetchReferenceFills(ref),
+    fetchBrokerDayAnchors(ref),
+    loadBrokerDailyCloses(ref),
+    loadEquityBaseline(ref),
+  ]);
+  const { realizedById } = computeRealizedFromFills(fills);
+  const tradeRows = fills.map((f) => ({
+    side: f.side,
+    realized_pnl: f.side === 'sell' ? (realizedById.get(f.id) ?? null) : null,
+  }));
+  let snapRows = dailyRows.map((d) => ({ total_value: d.value, created_at: d.created_at }));
+  // 最新实时快照并入序列尾(当日回撤/最新净值不缺席);回走的最新一天通常就是它,按时间去重
+  const latest = anchors?.latest || null;
+  const tail = snapRows[snapRows.length - 1] || null;
+  if (latest && (!tail || Date.parse(latest.created_at) > Date.parse(tail.created_at))) {
+    snapRows = [...snapRows, latest];
+  }
+  return { tradeRows, anchors, snapRows, baseline };
+}
+
+// 券商侧统计取数失败的限频告警(与 primaryLedger 的回退告警同一节奏)
+let lastBrokerStatsWarnAt = 0;
+function warnBrokerStatsFallback(err) {
+  if (Date.now() - lastBrokerStatsWarnAt > 5 * 60_000) {
+    lastBrokerStatsWarnAt = Date.now();
+    console.warn(`[perf] 券商侧统计取数失败,回退内部口径: ${err.message}`);
+  }
+}
+
 /** /api/stats 的数据来源(行为与原内联实现一致:快照不可用时容忍为空) */
 export async function getStats() {
+  if (isBrokerLedgerPrimary()) {
+    try {
+      const b = await fetchBrokerStatsInputs();
+      return { ...computeStats(b.tradeRows, b.snapRows, b.anchors), ledger: 'broker' };
+    } catch (err) {
+      warnBrokerStatsFallback(err);
+    }
+  }
   const [trades, snaps, anchors] = await Promise.all([
     fetchRecentTrades(),
     fetchSampledSnapshots().catch(() => []),
     fetchDayPnlAnchors().catch(() => null),
   ]);
-  return computeStats(trades, snaps, anchors);
+  return { ...computeStats(trades, snaps, anchors), ledger: 'internal' };
 }
 
 /**
@@ -191,21 +241,8 @@ async function getBenchmark({ symbol, name }, daily, initialCapital) {
   };
 }
 
-/**
- * 业绩指标:夏普比率、累计收益率、最大回撤、胜率 + SPY 买入持有基准对比。
- * 数据不足时各指标为 null(账户运行不满 3 个交易日算不出夏普),前端显示「数据不足」。
- */
-export async function getPerformance() {
-  const db = supabase();
-  const [trades, snaps, anchors, stateRes] = await Promise.all([
-    fetchRecentTrades(),
-    fetchSampledSnapshots().catch(() => []),
-    fetchDayPnlAnchors().catch(() => null),
-    db.from('portfolio_state').select('initial_capital').eq('id', 1).maybeSingle(),
-  ]);
-
-  const stats = computeStats(trades, snaps, anchors);
-  const initialCapital = Number(stateRes.data?.initial_capital) || null;
+/** 业绩载荷组装(内部/券商两条路径公用):夏普、累计收益率、基准对比,输入决定口径 */
+async function buildPerformance({ stats, snaps, initialCapital }) {
   const daily = toDailySeries(snaps);
 
   const latest = snaps[snaps.length - 1] || null;
@@ -245,4 +282,36 @@ export async function getPerformance() {
       : null,
     benchmarks,
   };
+}
+
+/**
+ * 业绩指标:夏普比率、累计收益率、最大回撤、胜率 + SPY 买入持有基准对比。
+ * 数据不足时各指标为 null(账户运行不满 3 个交易日算不出夏普),前端显示「数据不足」。
+ * 券商主账本下整套指标切到参照账户口径:初始资金 = 最早一条镜像快照净值,
+ * 净值序列/成交均为镜像数据;失败限频告警后回退内部账本。
+ */
+export async function getPerformance() {
+  if (isBrokerLedgerPrimary()) {
+    try {
+      const b = await fetchBrokerStatsInputs();
+      const stats = computeStats(b.tradeRows, b.snapRows, b.anchors);
+      const initialCapital = Number(b.baseline) > 0 ? Number(b.baseline) : null;
+      const payload = await buildPerformance({ stats, snaps: b.snapRows, initialCapital });
+      return { ...payload, ledger: 'broker' };
+    } catch (err) {
+      warnBrokerStatsFallback(err);
+    }
+  }
+  const db = supabase();
+  const [trades, snaps, anchors, stateRes] = await Promise.all([
+    fetchRecentTrades(),
+    fetchSampledSnapshots().catch(() => []),
+    fetchDayPnlAnchors().catch(() => null),
+    db.from('portfolio_state').select('initial_capital').eq('id', 1).maybeSingle(),
+  ]);
+
+  const stats = computeStats(trades, snaps, anchors);
+  const initialCapital = Number(stateRes.data?.initial_capital) || null;
+  const payload = await buildPerformance({ stats, snaps, initialCapital });
+  return { ...payload, ledger: 'internal' };
 }

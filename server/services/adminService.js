@@ -15,6 +15,7 @@ import { resetRiskControlState } from './riskControls.js';
 import { resetRegimeState } from './macroRegime.js';
 import { resetShadowState, initShadowPortfolios, drainShadowQueue } from './shadowPortfolio.js';
 import { resetBrokerMirror } from './brokerMirror.js';
+import { clearBrokerStatsCache } from './brokerStats.js';
 
 /** admin_reset_data RPC 尚未部署(未执行 005 迁移)时的判定 */
 function isMissingResetRpc(error) {
@@ -185,6 +186,7 @@ export async function resetAllData() {
     await resetBrokerMirror().catch((err) =>
       console.warn(`[admin] 券商对照账本重置失败(可忽略): ${err.message}`)
     );
+    clearBrokerStatsCache(); // 券商主账本统计的日度收盘缓存:镜像快照表已清空,缓存必须一并作废
 
     console.log('[admin] 全量数据重置完成,现金已恢复为 $' + config.initialCapital);
   } finally {
