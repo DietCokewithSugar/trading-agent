@@ -7,7 +7,8 @@
 // 无公开读策略;凭据仅在服务端换取券商请求头。表缺失(025 未迁移)→ 功能停用,
 // 管理端点 409;进程内缓存供镜像热路径同步读取,CRUD 后即时刷新。
 import { supabase } from '../db.js';
-import { getAccount } from './alpacaBroker.js';
+import { config } from '../config.js';
+import { getAccount, isBrokerEnabled } from './alpacaBroker.js';
 import { SHADOW_VARIANTS } from './shadowPortfolio.js';
 
 let accounts = [];
@@ -99,7 +100,13 @@ export function listAccountsMasked() {
   }));
 }
 
-/** 新增账户:先用凭据调一次券商账户接口校验(无效凭据 400),再落库并刷新缓存 */
+/**
+ * 新增账户:先用凭据调一次券商账户接口校验(无效凭据 400),再落库并刷新缓存。
+ * 唯一性防线:同一物理账户被多路镜像流并发写会现金混账、对账互搏 —— key_id 与
+ * env 默认账户/既有账户精确重复直接拒;再用校验回包的 account_number 与各账户
+ * 比对(同一账户可签发多把 key,key_id 不同也可能是同一账户;比对 best-effort,
+ * 单个账户读数失败只跳过该项,不阻断添加)。
+ */
 export async function addBrokerAccount({ label, keyId, secretKey, purpose = 'unassigned' }) {
   requireTable();
   if (!label || !keyId || !secretKey) {
@@ -112,12 +119,34 @@ export async function addBrokerAccount({ label, keyId, secretKey, purpose = 'una
     err.status = 400;
     throw err;
   }
+  if (keyId === config.alpacaKeyId || accounts.some((a) => a.key_id === keyId)) {
+    const err = new Error('该 key_id 已被使用(与 env 默认账户或既有账户重复):同一物理账户不可绑定多路镜像流');
+    err.status = 400;
+    throw err;
+  }
+  let newAccountNumber = null;
   try {
-    await getAccount({ keyId, secretKey });
+    const acc = await getAccount({ keyId, secretKey });
+    newAccountNumber = acc?.account_number || null;
   } catch (err) {
     const e = new Error(`券商凭据校验失败: ${err.message}`);
     e.status = 400;
     throw e;
+  }
+  if (newAccountNumber) {
+    const peers = [
+      ...(isBrokerEnabled() ? [{ label: 'env 默认账户', creds: null }] : []),
+      ...accounts.filter((a) => a.enabled).map((a) => ({ label: a.label, creds: credsOf(a) })),
+    ];
+    const numbers = await Promise.all(
+      peers.map((p) => getAccount(p.creds).then((a) => a?.account_number || null).catch(() => null))
+    );
+    const clash = peers[numbers.findIndex((n) => n && n === newAccountNumber)];
+    if (clash) {
+      const err = new Error(`该凭据指向的券商账户与「${clash.label}」是同一物理账户,不可重复绑定`);
+      err.status = 400;
+      throw err;
+    }
   }
   const { data, error } = await supabase()
     .from('broker_accounts')
@@ -138,9 +167,15 @@ export async function addBrokerAccount({ label, keyId, secretKey, purpose = 'una
   return { id: data.id };
 }
 
-/** 更新账户(label/purpose/enabled;凭据不可改,重配请删除重加) */
+/**
+ * 更新账户(label/purpose/enabled;凭据不可改,重配请删除重加)。
+ * purpose 变更时该账户的 deferred 顺延单一并作废(旧用途的顺延买卖提交出去
+ * 只会制造与新对账基准的分歧,再被对账清理平掉——白绕一圈);已提交在途单
+ * 保持轮询到终局。账户随后由对账清理向新用途的基准账本收敛。
+ */
 export async function updateBrokerAccount(id, { label, purpose, enabled } = {}) {
   requireTable();
+  const before = accountById(Number(id));
   const patch = { updated_at: new Date().toISOString() };
   if (label !== undefined) patch.label = String(label).slice(0, 100);
   if (purpose !== undefined) {
@@ -167,14 +202,38 @@ export async function updateBrokerAccount(id, { label, purpose, enabled } = {}) 
     e.status = 404;
     throw e;
   }
+  if (purpose !== undefined && before && before.purpose !== purpose) {
+    const { error: defErr } = await supabase()
+      .from('broker_mirror_orders')
+      .update({ status: 'abandoned', note: '账户用途变更,顺延单作废', updated_at: new Date().toISOString() })
+      .eq('account_id', id)
+      .eq('status', 'deferred');
+    if (defErr && !/broker_mirror|account_id/.test(defErr.message)) {
+      console.warn(`[broker] 账户 #${id} 用途变更作废顺延单失败: ${defErr.message}`);
+    }
+  }
   await loadBrokerAccounts();
   console.log(`[broker] 券商模拟账户 #${id} 已更新`);
   return { id: Number(id) };
 }
 
-/** 删除账户(历史对照单/快照保留,account_id 置空由外键 on delete set null 处理) */
+/**
+ * 删除账户:先删该账户的对照单与快照,再删账户行。
+ * 不能依赖外键 on delete set null 保留历史 —— account_id 置空后这些行会被当成
+ * env 默认账户的数据(轮询拿 env 凭据处理别人的单、deferred 单会提交进 env 账户、
+ * 净值曲线与盈亏基线被污染)。券商侧持仓/挂单不动:删除的是绑定关系,不是账户本身。
+ */
 export async function deleteBrokerAccount(id) {
   requireTable();
+  for (const table of ['broker_mirror_orders', 'broker_mirror_snapshots']) {
+    const { error } = await supabase().from(table).delete().eq('account_id', id);
+    // 021 表未建/025 列缺失 = 无可污染,忽略;其余失败中止删除,防止遗留行归并进 env 账户
+    if (error && !/account_id|not find|does not exist|schema cache/i.test(error.message)) {
+      const e = new Error(`清理账户 #${id} 的 ${table} 失败,中止删除: ${error.message}`);
+      e.status = 500;
+      throw e;
+    }
+  }
   const { error } = await supabase().from('broker_accounts').delete().eq('id', id);
   if (error) {
     const e = new Error(`账户删除失败: ${error.message}`);
@@ -182,6 +241,6 @@ export async function deleteBrokerAccount(id) {
     throw e;
   }
   await loadBrokerAccounts();
-  console.log(`[broker] 券商模拟账户 #${id} 已删除`);
+  console.log(`[broker] 券商模拟账户 #${id} 已删除(对照单/快照一并清理)`);
   return { id: Number(id) };
 }

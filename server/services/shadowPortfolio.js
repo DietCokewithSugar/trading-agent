@@ -535,15 +535,30 @@ function executeBullishSignal({ article, analysisRow, quote, profile, price }) {
 }
 
 /**
- * 带止盈腾位的影子买入(025,须在 enqueue 链内调用):先照常买;因现金/容量不足
+ * 带止盈腾位的影子买入(025,须在 enqueue 链内调用):先照常买;因现金不足
  * 被跳过(no_spend)时,卖出腾位选仓(trailing 系无止盈价 → 浮盈比例最高,
  * 其余 → 最接近止盈价的盈利持仓)后重试一次。去重键首次未成交不消耗,重试干净。
+ * 腾位只在现金是约束时才有意义:单票持仓帽/最小单额造成的 no_spend 与现金无关,
+ * 卖别的票也救不回来 —— 直接跳过,不白白清掉一个盈利持仓。
  */
 async function shadowBuyWithRotation(variant, params) {
   const result = await shadowBuy(variant, params);
   if (result?.skipped !== 'no_spend') return result;
   const valuation = await shadowValuation(variant);
   if (!valuation) return result;
+  // 现金不设限的假设值(spend 上限本就 ≤ maxBuyCash×总值)重算:仍为 0 说明约束
+  // 不是现金(持仓帽/最小单额),腾位无济于事
+  const existing = valuation.positions.find((p) => p.symbol === params.symbol);
+  const existingValue = existing
+    ? Number(valuation.priceBySymbol.get(params.symbol) ?? existing.avg_cost) * Number(existing.quantity)
+    : 0;
+  const unconstrained = computeShadowSpend({
+    fraction: params.fraction,
+    cash: valuation.totalValue,
+    totalValue: valuation.totalValue,
+    positionValue: existingValue,
+  });
+  if (!unconstrained) return result;
   const rotatable = toRotationPositions(valuation.positions, valuation.priceBySymbol);
   const pick = TRAILING_VARIANTS.has(variant)
     ? pickTopProfit(rotatable, { excludeSymbol: params.symbol })

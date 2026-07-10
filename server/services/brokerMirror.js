@@ -5,7 +5,11 @@
 // 027 起镜像单未成交不再一弃了之(否则卖单过期在券商账户滞留孤儿持仓、买单过期永不建仓,
 // 两账本永久分歧):休市顺延(status='deferred',开盘后以实时价挂单,不再用过期报价挂必死单)、
 // 到期按 mirrorPolicy.js 重挂(卖单限价重试耗尽升级市价单保证收敛;买单限时追单,漂移超限放弃)、
-// 定期对账清理滞留持仓(仅实盘镜像账户;影子变体账户需对比各变体虚拟持仓,留作后续)。
+// 定期对账清理滞留持仓(实盘镜像账户对内部账本、影子变体账户对该变体虚拟持仓;unassigned 不清理)。
+//
+// 镜像账户按现金账户语义运作:买单先过现金约束(planBuyFunding —— 足额提交/有在途卖单
+// 回款可期则顺延/否则放弃),绝不动用保证金账户的融资额度;卖出在券商暂无持仓而同票买单
+// 在途时顺延等待而非跳过 —— 两者共同保证账户的持仓与现金始终锚定被镜像的账本。
 //
 // 观测层三约定(与影子组合一致):
 //  - fire-and-forget:镜像经进程内串行队列,任何失败只告警,绝不阻塞交易主链路;
@@ -22,6 +26,8 @@ import {
   remainingQty,
   nextRetryClientOrderId,
   planMirrorFollowUp,
+  planBuyFunding,
+  committedBuyNotional,
   planReconcile,
 } from './mirrorPolicy.js';
 import {
@@ -32,6 +38,7 @@ import {
   getAccount,
   getPosition,
   getPositions,
+  cancelOrder,
   cancelOpenOrders,
   closeAllPositions,
 } from './alpacaBroker.js';
@@ -424,7 +431,79 @@ function policyConfig() {
     buyRetry: config.brokerMirrorBuyRetry,
     // 买单追价漂移上限复用内部账本的漂移放弃线(BUY_PRICE_DRIFT_ABORT_PERCENT)
     buyDriftCapPercent: config.buyPriceDriftAbortPercent,
+    // 顺延买单超龄作废时效复用实盘挂单时效(PENDING_ORDER_MAX_AGE_HOURS)
+    deferredBuyMaxAgeHours: config.pendingOrderMaxAgeHours,
   };
+}
+
+/**
+ * 该账户的在途镜像单(submitted/partially_filled/deferred),可按方向/标的过滤。
+ * 查询失败返回 null(调用方按"未知"保守处理:买单资金判定当有回款可期继续等,
+ * 无持仓卖单判定当买单在途继续顺延 —— 两者都有确定的终点兜底)。
+ */
+async function listInflightOrders(account, { side = null, symbol = null } = {}) {
+  const build = (filtered) => {
+    let query = supabase()
+      .from('broker_mirror_orders')
+      .select('symbol, side, status, qty, filled_qty, limit_price, internal_price')
+      .in('status', ['submitted', 'partially_filled', 'deferred']);
+    if (filtered) query = account ? query.eq('account_id', account.id) : query.is('account_id', null);
+    if (side) query = query.eq('side', side);
+    if (symbol) query = query.eq('symbol', symbol);
+    return query;
+  };
+  let { data, error } = await build(true);
+  // 025 未迁移(无 account_id 列):必然也没有附加账户,退回不过滤账户
+  if (error && /account_id/.test(error.message)) {
+    ({ data, error } = await build(false));
+  }
+  if (error) {
+    console.warn(`[broker] 读取在途镜像单失败: ${error.message}`);
+    return null;
+  }
+  return data || [];
+}
+
+/**
+ * 账户可用现金(禁用保证金):cash 与 non_marginable_buying_power 取更小的有限值。
+ * 注意 cash 只在成交时变动、不含挂单冻结,NMBP 语义也不可尽信 —— 挂单占用由调用方
+ * 用本地在途买单记账(committedBuyNotional)扣除;读数失败返回 null(调用方顺延重试)。
+ */
+async function fetchAvailableCash(creds) {
+  try {
+    const account = await getAccount(creds);
+    const values = [Number(account?.cash), Number(account?.non_marginable_buying_power)].filter((v) =>
+      Number.isFinite(v)
+    );
+    return values.length ? Math.min(...values) : null;
+  } catch (err) {
+    console.warn(`[broker] 读取账户现金失败: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * 镜像买单资金决策(planBuyFunding 的 IO 包装):
+ *  - 可用现金 = min(cash, NMBP) − 在途买单占用(committedBuyNotional,本地记账 ——
+ *    cash 不含挂单冻结,串行连发的买单否则会各自读到同一余额集体超买);
+ *  - 回款可期 = 存在在途卖单,但排除同票顺延卖单 —— 它在等本买单的持仓落地,
+ *    互相等待即死锁(顺延买单时效是最终兜底)。
+ * 在途单读数不可得时按 wait 处理(既不能算占用也不能判回款,宁等待不冒进)。
+ */
+async function buyFundingPlan({ account, creds, symbol, qty, limitPrice }) {
+  const cash = await fetchAvailableCash(creds);
+  if (cash === null) return { action: 'wait' };
+  const inflight = await listInflightOrders(account, {});
+  if (inflight === null) return { action: 'wait' };
+  const committed = committedBuyNotional(inflight.filter((r) => r.status !== 'deferred'));
+  const hasProceeds = inflight.some(
+    (r) => r.side === 'sell' && !(r.status === 'deferred' && r.symbol === symbol)
+  );
+  return planBuyFunding({
+    notional: Number(qty) * Number(limitPrice),
+    availableCash: cash - committed,
+    hasPendingSellProceeds: hasProceeds,
+  });
 }
 
 /**
@@ -432,7 +511,7 @@ function policyConfig() {
  * (existingRowId 为空插新行,否则 in-place 更新该 deferred 行)。
  * 幂等:422 重复 client_order_id → 取回既有订单按其状态落库(崩溃重放安全);
  * 碎股 422 → 退整数股,不足 1 股记 skipped;其余参数级 422 → 落 error 终态防死循环。
- * 网络/5xx 瞬态失败不落新行(errorRowOnFail 的首挂路径除外),调用方下轮重放。
+ * 网络/5xx 瞬态失败不落新行,调用方按 { ok:false, permanent:false } 自行顺延/重放。
  * 返回 { ok, permanent?, error? }。
  */
 async function submitAndRecord({
@@ -443,7 +522,6 @@ async function submitAndRecord({
   extendedHours = false,
   creds = null,
   existingRowId = null,
-  errorRowOnFail = false,
   logLabel = '镜像下单',
 }) {
   const { symbol, side, client_order_id: clientOrderId, internal_price: internalPrice } = base;
@@ -513,13 +591,13 @@ async function submitAndRecord({
       await recordTerminal('skipped', `碎股被券商拒绝且不足 1 股: ${err.message}`.slice(0, 200));
       return { ok: true };
     }
-    if (err.status === 422) {
-      // 参数级拒绝(标的不可交易等):落 error 终态,防止无限重试
+    if (err.status === 422 || err.status === 403) {
+      // 参数级拒绝(标的不可交易等)与 403(买力不足/账户受限 —— 资金约束在提交前
+      // 已把正常情形挡掉,走到这里的 403 重试也不会好):落 error 终态,防止无限重放
       await recordTerminal('error', String(err.message).slice(0, 200));
       return { ok: false, permanent: true, error: err };
     }
-    // 网络/5xx 瞬态:顺延/重挂路径不落行(下轮重放);首挂路径保留旧行为落 error 行
-    if (errorRowOnFail) await recordTerminal('error', String(err.message).slice(0, 200));
+    // 网络/5xx 瞬态:不落行,由调用方顺延(首挂落 deferred 行)或下轮重放(轮询路径)
     return { ok: false, permanent: false, error: err };
   }
 }
@@ -530,6 +608,8 @@ async function submitAndRecord({
  * 幂等键按账户隔离(trade-{id} / shadow-{id} + -a{accountId} 后缀)。
  * 休市时段不直接提交(当日限价单必然过期,且限价基于过期报价):落 deferred 行,
  * 开盘后由轮询以实时价挂单;卖出定量同样推迟到提交时。
+ * 买入先过现金约束(禁用保证金);卖出在券商暂无持仓而同票买单在途时顺延;
+ * 瞬态失败(持仓查询/提交)一律落 deferred 由轮询重放,绝不静默丢单。
  */
 async function doMirror(trade, account = null, sourceVariant = null) {
   const creds = credsOf(account);
@@ -559,13 +639,50 @@ async function doMirror(trade, account = null, sourceVariant = null) {
   // 卖出:以该券商账户的真实持仓为准(两边账本可能因部分成交/未成交而漂移)
   if (side === 'sell') {
     const pos = await getPosition(symbol, creds).catch(() => undefined);
-    if (pos === undefined) throw new Error(`${symbol} 查询券商持仓失败`);
+    if (pos === undefined) {
+      // 查询瞬态失败不丢单(此前直接抛错,这笔镜像卖出一去不返 → 券商滞留孤儿持仓):
+      // 落 deferred 由轮询以实时价重试
+      await insertRow({ ...base, qty, limit_price: null, status: 'deferred', note: '查询券商持仓失败,顺延重试' });
+      return;
+    }
     qty = adjustSellQty({
       internalQty: qty,
       brokerQty: Number(pos?.qty_available ?? pos?.qty ?? 0),
     });
     if (!(qty > 0)) {
+      // 券商暂无持仓:若同票买单还在途(已提交未成交/顺延待提交),买单落地后这笔卖出
+      // 必须执行,否则该持仓成为孤儿 —— 落 deferred 等买单出结果(成交 → 重定数量卖出;
+      // 放弃 → 顺延卖出自然收敛为 skipped)。确实无持仓且无在途买单才是真正的跳过
+      const inflightBuys = await listInflightOrders(account, { side: 'buy', symbol });
+      if (inflightBuys === null || inflightBuys.length) {
+        await insertRow({
+          ...base,
+          qty: Number(trade.quantity),
+          limit_price: null,
+          status: 'deferred',
+          note: '券商暂无持仓且同票买单在途,待买单落地后卖出',
+        });
+        return;
+      }
       await insertRow({ ...base, qty: 0, status: 'skipped', note: '券商账户无该持仓,跳过镜像卖出' });
+      return;
+    }
+  }
+
+  const limitPrice = mirrorLimitPrice({ side, price: internalPrice, slackPercent: config.brokerMirrorLimitSlackPercent });
+
+  // 买入:现金约束(镜像账户绝不动用保证金)。不足但有在途卖单回款可期 → 顺延;
+  // 不足且无回款可期 → 放弃(内部已成交而券商未镜像,如实计入未成交)
+  if (side === 'buy') {
+    const funding = await buyFundingPlan({ account, creds, symbol, qty, limitPrice });
+    if (funding.action === 'wait') {
+      await insertRow({ ...base, qty, limit_price: null, status: 'deferred', note: funding.note ?? '待账户现金就绪后提交' });
+      console.log(`[broker] ${label} ${side} ${symbol} ×${qty} 现金未就绪,顺延`);
+      return;
+    }
+    if (funding.action === 'abandon') {
+      await insertRow({ ...base, qty, limit_price: null, status: 'abandoned', note: funding.note });
+      console.warn(`[broker] ${label} ${side} ${symbol} ×${qty} ${funding.note}`);
       return;
     }
   }
@@ -573,12 +690,23 @@ async function doMirror(trade, account = null, sourceVariant = null) {
   const res = await submitAndRecord({
     base,
     qty,
-    limitPrice: mirrorLimitPrice({ side, price: internalPrice, slackPercent: config.brokerMirrorLimitSlackPercent }),
+    limitPrice,
     extendedHours: session !== 'regular',
     creds,
-    errorRowOnFail: true,
     logLabel: label,
   });
+  if (!res.ok && !res.permanent) {
+    // 网络/5xx 瞬态失败不再落 error 终态丢单:落 deferred 由轮询重放
+    // (幂等键保证即使订单实际已到达券商,重放也只会取回既有订单落库)
+    await insertRow({
+      ...base,
+      qty,
+      limit_price: limitPrice,
+      status: 'deferred',
+      note: `提交瞬态失败,顺延重试: ${String(res.error?.message || '').slice(0, 150)}`,
+    });
+    return;
+  }
   if (!res.ok) throw res.error;
 }
 
@@ -658,15 +786,37 @@ async function fetchLivePrice(symbol, context) {
   }
 }
 
+/**
+ * 顺延单放弃前的收编检查(崩溃窗口兜底):submitOrder 成功但落库前进程崩溃时,
+ * 行仍是 deferred 而券商侧订单已在场内 —— 直接 abandoned 会让后续成交无人跟踪。
+ * 放弃前按幂等键查一次:订单存在即按其真实状态收编落库;查询失败下轮重放。
+ */
+async function abandonDeferredRow(row, creds, note) {
+  const existing = await getOrderByClientId(row.client_order_id, creds).catch(() => undefined);
+  if (existing === undefined) return false; // 查询失败:不写终态,下轮重放
+  if (existing) {
+    return patchRow(row.id, {
+      submitted_at: new Date().toISOString(),
+      ...fillPatch(existing, { side: row.side, internalPrice: row.internal_price }),
+    });
+  }
+  return patchRow(row.id, { status: 'abandoned', note });
+}
+
 /** 顺延单(deferred)提交:开盘后以实时价挂单;返回是否写了行(计入回填数) */
-async function submitDeferredRow(row, creds) {
+async function submitDeferredRow(row, account, creds) {
   const session = getMarketSession();
+  const plan = planMirrorFollowUp({ row, session, currentPrice: null, config: policyConfig() });
+  // 超龄作废不依赖时段/报价(顺延买单时效),先于一切检查
+  if (plan.action === 'abandon') {
+    return abandonDeferredRow(row, creds, plan.note);
+  }
   if (session === 'closed') return false;
   const price = await fetchLivePrice(row.symbol, `顺延单 #${row.id}`);
-  const plan = planMirrorFollowUp({ row, session, currentPrice: price, config: policyConfig() });
-  if (plan.action === 'wait') return false;
-  if (plan.action === 'abandon') {
-    return patchRow(row.id, { status: 'abandoned', note: plan.note });
+  const livePlan = planMirrorFollowUp({ row, session, currentPrice: price, config: policyConfig() });
+  if (livePlan.action === 'wait') return false;
+  if (livePlan.action === 'abandon') {
+    return abandonDeferredRow(row, creds, livePlan.note);
   }
   // submit_deferred:卖出数量按券商当前持仓重定
   let qty = Number(row.qty);
@@ -675,17 +825,32 @@ async function submitDeferredRow(row, creds) {
     if (pos === undefined) return false; // 查持仓失败,下轮重试
     qty = adjustSellQty({ internalQty: qty, brokerQty: Number(pos?.qty_available ?? pos?.qty ?? 0) });
     if (!(qty > 0)) {
-      return patchRow(row.id, { status: 'skipped', note: '开盘时券商已无持仓,跳过顺延卖出' });
+      // 同票买单在途(已提交未成交/顺延待提交):持仓可能马上落地,继续等;
+      // 买单已放弃/成交后仍无持仓才收敛为 skipped
+      const inflightBuys = await listInflightOrders(account, { side: 'buy', symbol: row.symbol });
+      if (inflightBuys === null || inflightBuys.length) return false;
+      return patchRow(row.id, { status: 'skipped', note: '券商已无持仓且无在途买单,跳过顺延卖出' });
     }
   }
+  // 买入:提交前再过一次现金约束(顺延期间账户状态可能已变)
+  if (row.side === 'buy') {
+    const funding = await buyFundingPlan({ account, creds, symbol: row.symbol, qty, limitPrice: livePlan.limitPrice });
+    if (funding.action === 'wait') return false;
+    if (funding.action === 'abandon') {
+      return abandonDeferredRow(row, creds, funding.note);
+    }
+  }
+  // 长期无报价的顺延卖单升级市价单(market_escalate),其余按实时限价提交
+  const isMarket = livePlan.action === 'market_escalate';
   const res = await submitAndRecord({
     base: row,
     qty,
-    limitPrice: plan.limitPrice,
-    extendedHours: plan.extendedHours,
+    limitPrice: isMarket ? null : livePlan.limitPrice,
+    orderType: isMarket ? 'market' : 'limit',
+    extendedHours: isMarket ? false : livePlan.extendedHours,
     creds,
     existingRowId: row.id,
-    logLabel: '顺延单提交',
+    logLabel: isMarket ? '顺延单市价升级' : '顺延单提交',
   });
   return res.ok;
 }
@@ -696,7 +861,7 @@ async function submitDeferredRow(row, creds) {
  * 调用方本轮不写终态 patch,下轮重放整个迁移;note 追加进父行终态 patch。
  * 顺序:先提交/落子行,最后才写父行终态 —— 崩溃在任何一步都能靠幂等键安全重放。
  */
-async function handleTerminalTransition(row, patch, creds) {
+async function handleTerminalTransition(row, patch, account, creds) {
   const session = getMarketSession();
   const effectiveRow = { ...row, filled_qty: patch.filled_qty ?? row.filled_qty };
   const price = await fetchLivePrice(row.symbol, `对照单 #${row.id}`);
@@ -709,6 +874,13 @@ async function handleTerminalTransition(row, patch, creds) {
   });
   if (plan.action === 'wait') return { proceed: false };
   if (plan.action === 'none') return { proceed: true, note: plan.note };
+
+  // 买单追挂同样受现金约束(禁用保证金):回款可期则整个迁移下轮重放,否则放弃追单
+  if (row.side === 'buy' && plan.action === 'retry_limit') {
+    const funding = await buyFundingPlan({ account, creds, symbol: row.symbol, qty: plan.qty, limitPrice: plan.limitPrice });
+    if (funding.action === 'wait') return { proceed: false };
+    if (funding.action === 'abandon') return { proceed: true, note: `放弃追单:${funding.note}` };
+  }
 
   const attempt = (Number(row.attempt) > 0 ? Number(row.attempt) : 1) + 1;
   const childBase = {
@@ -799,7 +971,7 @@ export async function pollMirrorOrders() {
 
       // 休市顺延单:开盘后以实时价提交(027)
       if (row.status === 'deferred') {
-        if (await submitDeferredRow(row, creds)) updated += 1;
+        if (await submitDeferredRow(row, account, creds)) updated += 1;
         continue;
       }
 
@@ -818,9 +990,33 @@ export async function pollMirrorOrders() {
       }
       const patch = fillPatch(order, { side: row.side, internalPrice: row.internal_price });
 
+      // 陈旧在途限价单主动撤单重挂:day 限价单不成交要等收盘过期才进重挂链(最坏拖数日,
+      // 出场时效远落后于被镜像账本的 ±2% 括号)—— 超过 BROKER_MIRROR_REPRICE_MINUTES 仍
+      // 在场内工作的限价单主动撤掉,下轮观察到 canceled 终态后由既有重挂链按实时价重挂。
+      // 仅限价单(市价单排队必成交)、仅可交易时段(休市撤了也只能顺延)、重挂机制可用时才撤
+      const rowAgeMs = Date.now() - Date.parse(row.submitted_at ?? '');
+      if (
+        !retryColumnsMissing &&
+        config.brokerMirrorRepriceMinutes > 0 &&
+        ['submitted', 'partially_filled'].includes(patch.status) &&
+        row.limit_price !== null &&
+        row.limit_price !== undefined &&
+        getMarketSession() !== 'closed' &&
+        Number.isFinite(rowAgeMs) &&
+        rowAgeMs > config.brokerMirrorRepriceMinutes * 60_000
+      ) {
+        const brokerOrderId = order.id || row.broker_order_id;
+        if (brokerOrderId) {
+          await cancelOrder(brokerOrderId, creds).catch((err) =>
+            console.warn(`[broker] 对照单 #${row.id} 陈旧撤单失败(下轮重试): ${err.message}`)
+          );
+          console.log(`[broker] 对照单 #${row.id} ${row.side} ${row.symbol} 超 ${config.brokerMirrorRepriceMinutes} 分钟未成交,已撤单待重挂`);
+        }
+      }
+
       // 迁移到未成交终态:先跟进(重挂/升级/放弃),瞬态障碍则不写终态、下轮重放(027)
       if (!retryColumnsMissing && ['expired', 'canceled', 'rejected'].includes(patch.status)) {
-        const followUp = await handleTerminalTransition(row, patch, creds);
+        const followUp = await handleTerminalTransition(row, patch, account, creds);
         if (!followUp.proceed) continue;
         if (followUp.note) patch.note = followUp.note;
       }
@@ -844,28 +1040,51 @@ export async function pollMirrorOrders() {
 }
 
 /**
- * 对账清理(027):平掉"券商持有但内部账本已不持有/超额持有"的仓位 ——
+ * 对账清理(027):平掉"券商持有但对账基准账本已不持有/超额持有"的仓位 ——
  * 卖单过期滞留的孤儿持仓(重挂机制上线前的存量、市价升级也失败的极端情况)由此自愈。
- * 仅覆盖实盘镜像账户(env 默认 + mirror_actual;影子变体账户需对比各变体虚拟持仓,留作后续)。
+ * 对账基准:实盘镜像账户(env 默认 + mirror_actual)对内部账本持仓;影子变体账户对
+ * 该变体的 shadow_positions(卖出镜像被跳过/碎股残留造成的滞留持仓同样自愈);
+ * unassigned 账户不清理(闲置账户可能被人工使用,清仓属破坏性操作)。
  * 平仓单 client_order_id = reconcile-{SYM}-{ET日期}[-a{id}]:每天每票至多发起一次
  * (券商 422 + DB 唯一键双重幂等),后续收敛交给同一套重挂机制;全程 warn-and-continue。
  */
 async function reconcileSweep() {
   if (tableMissing || getMarketSession() === 'closed') return;
   const targets = [];
-  if (isBrokerEnabled()) targets.push({ account: null, label: '默认账户' });
-  for (const acc of accountsForPurpose('mirror_actual')) targets.push({ account: acc, label: acc.label });
+  if (isBrokerEnabled()) targets.push({ account: null, label: '默认账户', variant: null });
+  for (const acc of enabledAccounts()) {
+    if (acc.purpose === 'mirror_actual') targets.push({ account: acc, label: acc.label, variant: null });
+    else if (acc.purpose !== 'unassigned') targets.push({ account: acc, label: acc.label, variant: acc.purpose });
+  }
   if (!targets.length) return;
 
-  let internalPositions = [];
-  try {
-    ({ positions: internalPositions } = await getPortfolio());
-  } catch (err) {
-    console.warn(`[broker] 对账读取内部持仓失败: ${err.message}`);
-    return;
+  // 实盘对账基准(内部账本持仓)只在存在实盘镜像目标时读一次
+  let internalPositions = null;
+  if (targets.some((t) => !t.variant)) {
+    try {
+      ({ positions: internalPositions } = await getPortfolio());
+    } catch (err) {
+      console.warn(`[broker] 对账读取内部持仓失败: ${err.message}`);
+    }
   }
 
-  for (const { account, label } of targets) {
+  for (const { account, label, variant } of targets) {
+    // 每个目标的对账基准:影子变体账户 → 该变体虚拟持仓;实盘镜像账户 → 内部账本持仓
+    let refPositions;
+    if (variant) {
+      const { data, error } = await supabase()
+        .from('shadow_positions')
+        .select('symbol, quantity')
+        .eq('variant', variant);
+      if (error) {
+        console.warn(`[broker] 对账读取影子持仓失败(${label}/${variant}): ${error.message}`);
+        continue;
+      }
+      refPositions = data || [];
+    } else {
+      if (!internalPositions) continue; // 内部持仓读取失败,本轮跳过实盘镜像目标
+      refPositions = internalPositions;
+    }
     const creds = credsOf(account);
     let brokerPositions = [];
     try {
@@ -876,28 +1095,21 @@ async function reconcileSweep() {
     }
     if (!brokerPositions.length) continue;
 
-    // 有在途镜像单的 symbol 跳过(重挂机制正在收敛);缺 025 列的旧库退回不过滤账户
-    let inflightQuery = supabase()
-      .from('broker_mirror_orders')
-      .select('symbol')
-      .in('status', ['submitted', 'partially_filled', 'deferred']);
-    inflightQuery = account ? inflightQuery.eq('account_id', account.id) : inflightQuery.is('account_id', null);
-    let { data: inflight, error } = await inflightQuery;
-    if (error && /account_id/.test(error.message)) {
-      ({ data: inflight, error } = await supabase()
-        .from('broker_mirror_orders')
-        .select('symbol')
-        .in('status', ['submitted', 'partially_filled', 'deferred']));
-    }
-    if (error) {
-      console.warn(`[broker] 对账读取在途单失败(${label}): ${error.message}`);
+    // 有在途镜像单的 symbol 跳过(重挂机制正在收敛);缺 025 列的旧库退回不过滤账户。
+    // 例外:顺延中的买单(deferred buy)不算在途 —— 它没在券商侧锁任何东西,却可能
+    // 等现金等最长 96h,不能让同票孤儿持仓的清理被它长期阻塞
+    const inflight = await listInflightOrders(account, {});
+    if (inflight === null) {
+      console.warn(`[broker] 对账读取在途单失败(${label}),本轮跳过该账户`);
       continue;
     }
 
     const plans = planReconcile({
       brokerPositions,
-      internalPositions,
-      inflightSymbols: (inflight || []).map((r) => r.symbol),
+      internalPositions: refPositions,
+      inflightSymbols: inflight
+        .filter((r) => !(r.side === 'buy' && r.status === 'deferred'))
+        .map((r) => r.symbol),
     });
     for (const item of plans) {
       const price = await fetchLivePrice(item.symbol, `对账(${label})`);
@@ -913,7 +1125,8 @@ async function reconcileSweep() {
           // 对账无内部成交价,以清理时实时价为偏差基准(diff_bps 仅度量执行滑点)
           internal_price: price,
           ...(account ? { account_id: account.id } : {}),
-          note: item.reason === 'excess' ? `对账减仓:券商多持 ${item.qty} 股` : '对账平仓:内部账本无该持仓',
+          ...(variant ? { source_variant: variant } : {}),
+          note: item.reason === 'excess' ? `对账减仓:券商多持 ${item.qty} 股` : '对账平仓:对账基准账本无该持仓',
         },
         qty: item.qty,
         limitPrice: mirrorLimitPrice({ side: 'sell', price, slackPercent: config.brokerMirrorLimitSlackPercent }),

@@ -89,6 +89,11 @@ export function getPositions(creds = null) {
   return alpacaRequest('GET', '/v2/positions', null, creds);
 }
 
+/** 撤销单笔订单(陈旧在途单主动重挂用;404/已终态由调用方忽略) */
+export function cancelOrder(orderId, creds = null) {
+  return alpacaRequest('DELETE', `/v2/orders/${orderId}`, null, creds);
+}
+
 /** 撤销全部未成交订单(管理重置用) */
 export function cancelOpenOrders(creds = null) {
   return alpacaRequest('DELETE', '/v2/orders', null, creds);
