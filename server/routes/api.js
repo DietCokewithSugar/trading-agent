@@ -9,9 +9,17 @@ import { CLOSED_QUOTE_MAX_AGE_MS } from '../services/quotesPush.js';
 import { getStats, getPerformance } from '../services/statsService.js';
 import { getSignalStats } from '../services/signalStats.js';
 import { listPendingOrders } from '../services/openQueue.js';
-import { getEffectiveRegime } from '../services/macroRegime.js';
-import { listRecentMacroEvents } from '../services/macroService.js';
-import { getBlackoutState, getUpcomingEvents } from '../services/macroCalendar.js';
+import { getEffectiveRegime, aggregateRegime, getRegimeParams } from '../services/macroRegime.js';
+import {
+  listRecentMacroEvents,
+  listMacroEventsForDay,
+  getMacroHistory,
+} from '../services/macroService.js';
+import {
+  getBlackoutState,
+  getUpcomingEvents,
+  getCalendarDayEvents,
+} from '../services/macroCalendar.js';
 import { countByStatus, listPoolPreview } from '../services/candidateStore.js';
 import { getShadowOverview, getShadowTrades } from '../services/shadowPortfolio.js';
 import { getBrokerMirrorOverview } from '../services/brokerMirror.js';
@@ -23,6 +31,7 @@ import { safeTokenEqual, createAuthRateLimiter } from '../services/authGuard.js'
 import { clusterAnalyses } from '../services/newsDedup.js';
 import { getHaltState } from '../services/tradingHalts.js';
 import { etDayRangeUtc } from '../services/riskControls.js';
+import { etDayKey } from '../services/metrics.js';
 
 const router = Router();
 
@@ -130,13 +139,26 @@ router.get(
   })
 );
 
-/** 宏观环境:当前 regime 与生效参数、近期宏观事件、经济日历/黑窗(候选池见 /api/pool) */
+/**
+ * 宏观环境:当前 regime 与生效参数、近期宏观事件、经济日历/黑窗(候选池见 /api/pool)。
+ * ?date=YYYY-MM-DD(美东日,仅限过去)切历史视图:当日 regime 由 macro_events 回溯推算
+ * (与实时同一套聚合规则,无市场核验/黑窗——两者是"现在"语义,不可回溯),
+ * 事件列表与经济日历同步限定该日。缺省/非法/今日及未来一律走实时分支。
+ */
 router.get(
   '/macro',
   asyncHandler(async (req, res) => {
     if (!config.enableMacro) {
       return res.json({ available: false });
     }
+    const dateKey = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.date || ''))
+      ? String(req.query.date)
+      : null;
+    const range = dateKey && dateKey < etDayKey() ? etDayRangeUtc(dateKey) : null;
+    if (range) {
+      return res.json(await buildHistoricalMacro(dateKey, range));
+    }
+
     // 生效参数 = 新闻 regime ∩ 确定性市场核验(016):核验不同向时 risk_on 放大被钳制
     const regime = getEffectiveRegime();
     const params = regime.params;
@@ -146,6 +168,8 @@ router.get(
     const blackout = getBlackoutState();
     res.json({
       available: events !== null,
+      mode: 'live',
+      date: null,
       regime: {
         regime: regime.regime,
         risk_score: regime.risk_score,
@@ -190,6 +214,84 @@ router.get(
         })),
       },
     });
+  })
+);
+
+/** /api/macro 的历史分支:regime 回溯推算 + 当日事件 + 当日经济日历 */
+async function buildHistoricalMacro(dateKey, range) {
+  const endTs = Date.parse(range.endIso);
+  const windowStartIso = new Date(endTs - config.macroEventValidityHours * 3600_000).toISOString();
+  // 一次取 [当日结束−有效窗, 当日结束) 的事件:回溯聚合用全窗,展示列表只取当日子集
+  const windowEvents = await listMacroEventsForDay(windowStartIso, range.endIso, 500).catch(
+    () => null
+  );
+  // 数值比较而非字符串比较:PostgREST 返回的时间戳格式(+00:00)与 toISOString(Z)不可字典序混比
+  const dayStartTs = Date.parse(range.startIso);
+  const dayEvents = (windowEvents || []).filter((ev) => Date.parse(ev.created_at) >= dayStartTs);
+  const agg = aggregateRegime({
+    events: windowEvents || [],
+    now: endTs - 1,
+    prev: null,
+    cfg: {
+      validityHours: config.macroEventValidityHours,
+      shockHours: config.macroShockHours,
+      shockMinReports: config.macroShockMinReports,
+    },
+  });
+  const params = getRegimeParams(agg.regime);
+  const dayCalendar = await getCalendarDayEvents(dateKey, range).catch(() => null);
+  return {
+    available: windowEvents !== null,
+    mode: 'historical',
+    date: dateKey,
+    regime: {
+      regime: agg.regime,
+      risk_score: agg.riskScore,
+      rates_signal: agg.rates,
+      inflation_signal: agg.inflation,
+      growth_signal: agg.growth,
+      shock_until: agg.shockUntil,
+      updated_at: null,
+      derived: true, // 回溯推算标记(前端展示口径说明)
+      effective_regime: agg.regime,
+      clamped: false, // 市场核验不可回溯,历史日不做钳制
+      params: {
+        daily_buy_budget: params.dailyBuyBudget,
+        min_cash_reserve: params.minCashReserve,
+        max_gross_exposure: params.maxGrossExposure,
+        macro_multiplier: params.macroMultiplier,
+        allowed_tiers: params.allowedTiers,
+      },
+    },
+    market_check: { available: false, trend: null, spy_price: null, sma20: null, vix: null, fetched_at: null },
+    events: dayEvents,
+    calendar: {
+      available: dayCalendar !== null,
+      // 黑窗是"现在"语义,历史日恒不激活
+      blackout: { active: false, until: null, event: null },
+      upcoming: (dayCalendar || []).map((ev) => ({
+        event: ev.event,
+        date: ev.date,
+        estimate: ev.estimate ?? null,
+        previous: ev.previous ?? null,
+        actual: ev.actual ?? null,
+      })),
+    },
+  };
+}
+
+/**
+ * 宏观环境历史序列(热力图):近 N 个美东日的逐日 regime/风险分,
+ * 由 macro_events 按与实时一致的聚合规则回溯推算(服务端缓存 10 分钟)。
+ */
+router.get(
+  '/macro/history',
+  asyncHandler(async (req, res) => {
+    if (!config.enableMacro) {
+      return res.json({ available: false });
+    }
+    const days = Number(req.query.days);
+    res.json(await getMacroHistory(Number.isFinite(days) && days > 0 ? days : 120));
   })
 );
 

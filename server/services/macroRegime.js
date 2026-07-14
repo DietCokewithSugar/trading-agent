@@ -173,6 +173,33 @@ export function aggregateRegime({ events = [], now = new Date(), prev = null, cf
 }
 
 /**
+ * 按日回溯 regime 序列(纯函数,宏观页历史热力图用):对每个美东日以"当日最后一刻"
+ * 为 as-of 调 aggregateRegime,并把上一日结果作为 prev 链式传递——滞回与冲击延续
+ * 语义和实时路径一致,且确定性可重放(risk_score 本身与 prev 无关)。
+ * days: [{ date:'YYYY-MM-DD', startTs, endTs }] 升序(endTs 为次日美东零点毫秒时间戳);
+ * events: 覆盖 [首日−validityHours, 末日] 的 macro_events 行。
+ * 返回 [{ date, risk_score, regime, shock_until, events: 当日新增事件数 }]。
+ */
+export function aggregateRegimeSeries({ events = [], days = [], cfg = {} } = {}) {
+  let prev = null;
+  return (Array.isArray(days) ? days : []).map(({ date, startTs, endTs }) => {
+    const agg = aggregateRegime({ events, now: endTs - 1, prev, cfg });
+    prev = { regime: agg.regime, shockUntil: agg.shockUntil };
+    const count = (Array.isArray(events) ? events : []).filter((e) => {
+      const ts = new Date(e?.created_at || 0).getTime();
+      return Number.isFinite(ts) && ts >= startTs && ts < endTs;
+    }).length;
+    return {
+      date,
+      risk_score: agg.riskScore,
+      regime: agg.regime,
+      shock_until: agg.shockUntil,
+      events: count,
+    };
+  });
+}
+
+/**
  * 行业宏观乘数(纯函数):近期事件的 affected_sectors 命中该行业时,
  * 利好放大/利空压缩买入金额,clamp [0.6, 1.2];无命中返回 1。
  */

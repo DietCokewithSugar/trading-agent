@@ -125,6 +125,47 @@ export function getUpcomingEvents(now = new Date(), horizonHours = 72) {
     .map(({ ev }) => ev);
 }
 
+// ── 历史日历(宏观页历史视图)──
+// 历史日的发布数据不可变,按日缓存;容量有限,逐出最旧插入的键
+const dayCache = new Map(); // dayKey -> 事件数组
+const DAY_CACHE_MAX = 60;
+
+/**
+ * 某个美东日的高重要性美国经济数据(历史视图用):按需拉取该日日历并按
+ * [startIso, endIso) 截取(供应商日历的日期为 UTC,美东晚间发布会落在下一 UTC 日,
+ * 所以取 dayKey ~ dayKey+1 两个 UTC 日再按美东日界过滤)。
+ * 返回按时间升序的事件数组;端点不可用/拉取失败返回 null(=不可用,fail-open 不缓存)。
+ */
+export async function getCalendarDayEvents(dayKey, { startIso, endIso }) {
+  if (!config.enableMacro || state.unavailable || !config.fmpApiKey) return null;
+  if (dayCache.has(dayKey)) return dayCache.get(dayKey);
+  const nextKey = new Date(Date.parse(`${dayKey}T00:00:00Z`) + 24 * 3600_000)
+    .toISOString()
+    .slice(0, 10);
+  let rows;
+  try {
+    rows = await getEconomicCalendar(dayKey, nextKey);
+  } catch (err) {
+    if (isPlanError(err)) {
+      state.unavailable = true;
+      console.warn('[calendar] 当前数据套餐不含经济日历端点,黑窗保护停用(其余宏观功能不受影响)');
+    } else {
+      console.warn(`[calendar] 拉取 ${dayKey} 历史日历失败(本次按不可用处理): ${err.message}`);
+    }
+    return null;
+  }
+  const startTs = Date.parse(startIso);
+  const endTs = Date.parse(endIso);
+  const events = filterHighImportanceUs(rows)
+    .map((ev) => ({ ev, at: parseCalendarDate(ev.date) }))
+    .filter(({ at }) => at != null && at >= startTs && at < endTs)
+    .sort((a, b) => a.at - b.at)
+    .map(({ ev }) => ev);
+  if (dayCache.size >= DAY_CACHE_MAX) dayCache.delete(dayCache.keys().next().value);
+  dayCache.set(dayKey, events);
+  return events;
+}
+
 /** 给宏观事件匹配同日同类日历数据,回填数值 surprise(best-effort,匹配不到返回 null) */
 export function matchCalendarSurprise(eventType, occurredAt = new Date()) {
   if (!state.fetchedAt || state.unavailable) return null;

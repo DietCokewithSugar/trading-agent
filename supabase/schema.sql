@@ -112,15 +112,17 @@ alter table news_articles add column if not exists source_score numeric;
 alter table news_analyses add column if not exists final_confidence numeric;
 alter table news_events add column if not exists source_domains text[] not null default '{}';
 
--- 信号前瞻收益(011,评估层):每条非中性分析记录信号时点市场价,
--- 后台任务回填 1 小时 / 1 交易日 / 5 交易日前瞻收益(百分比,相对 signal_price),
--- 覆盖未实际交易的信号,用于评估分类信号本身的命中率/IC/校准(/api/signal-stats)
+-- 信号前瞻收益(011/031,评估层):每条非中性分析记录信号时点市场价,
+-- 后台任务回填 1 小时 / 1 交易日 / 2 交易日前瞻收益(百分比,相对 signal_price),
+-- 覆盖未实际交易的信号,用于评估分类信号本身的命中率/IC/校准(/api/signal-stats)。
+-- fwd_return_5d 为 031 前的历史口径:±2%/48h 策略下与实盘盈亏几乎无关,已停止回填与展示,列保留历史数据
 alter table news_analyses add column if not exists signal_price numeric;
 alter table news_analyses add column if not exists fwd_return_1h numeric;
 alter table news_analyses add column if not exists fwd_return_1d numeric;
+alter table news_analyses add column if not exists fwd_return_2d numeric;
 alter table news_analyses add column if not exists fwd_return_5d numeric;
 create index if not exists idx_analyses_fwd_pending on news_analyses (created_at)
-  where signal_price is not null and (fwd_return_1d is null or fwd_return_5d is null);
+  where signal_price is not null and (fwd_return_1d is null or fwd_return_2d is null);
 
 -- 可观测性与执行时间线(012):分析行关联运行 + LLM 调用明细,
 -- 交易行关联运行 + 决策窗口(decideTrade 调用前 → 风控官审批结束)+ 成交报价自带时间戳

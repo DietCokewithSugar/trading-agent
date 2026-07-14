@@ -49,7 +49,9 @@ export const api = {
   shadowTrades: (variant, limit = 100) =>
     get(`/shadow/${encodeURIComponent(variant)}/trades?limit=${limit}`),
   brokerMirror: () => get('/broker-mirror'),
-  macro: () => get('/macro'),
+  // date=YYYY-MM-DD(美东日,仅限过去)切历史视图;缺省为实时
+  macro: (date) => get(`/macro${date ? `?date=${date}` : ''}`),
+  macroHistory: (days = 120) => get(`/macro/history?days=${days}`),
   pool: () => get('/pool'),
   pendingOrders: () => get('/pending-orders'),
   symbol: (symbol) => get(`/symbol/${encodeURIComponent(symbol)}`),

@@ -404,7 +404,7 @@ export async function runCycle({ fullFetch = false, trigger = 'scheduler' } = {}
         });
 
         // 信号评估层:为所有非中性信号(含后面被去重/挂起而不交易的)记录信号时点市场价,
-        // 后台任务回填 1h/1d/5d 前瞻收益,用于评估分类信号本身的质量
+        // 后台任务回填 1h/1d/2d 前瞻收益,用于评估分类信号本身的质量
         if (analysisRow.sentiment !== 'neutral' && analysisRow.tier) {
           try {
             const quote = await getQuote(analysisRow.symbol);

@@ -3,11 +3,13 @@ import { Alert, Button, Card, Col, Empty, Row, Segmented, Space, Spin, Statistic
 
 import { api, fmtTime } from '../api.js';
 
-// ±2%/48h 策略下 1h/1d 是决策口径;5d 与策略盈亏几乎无关,降级为纯研究口径
+// ±2%/48h 策略下的三个决策口径:1h(即时反应)、1d(次日定型)、
+// 2d(≈48 小时,与持有上限对齐——持仓到期时信号方向是否兑现)。
+// 旧 5d 口径与策略盈亏几乎无关且成熟期太长(采样窗口内几乎无样本),031 起停用
 const HORIZONS = [
   { key: '1h', label: '1 小时' },
   { key: '1d', label: '1 个交易日' },
-  { key: '5d', label: '5 个交易日(研究)' },
+  { key: '2d', label: '2 个交易日(≈48h)' },
 ];
 
 const RANGES = [

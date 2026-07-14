@@ -10,8 +10,10 @@ import { isHalted } from './halt.js';
  * 并由后台任务回填三个口径的前瞻收益(百分比,相对 signal_price):
  *  - fwd_return_1h:信号后 1~2 小时窗口内的最新有效价(休市窗口错过则保持空,统计时剔除);
  *  - fwd_return_1d:信号日(美东)之后第 1 个交易日收盘价;
- *  - fwd_return_5d:信号日之后第 5 个交易日收盘价。
- * 列不存在(011 迁移未执行)时整体停用,主流程不受影响。
+ *  - fwd_return_2d:信号日之后第 2 个交易日收盘价(≈48 小时,与持有上限对齐的决策口径,031)。
+ * 旧的 fwd_return_5d 口径已停止回填(±2%/48h 策略下与实盘盈亏几乎无关,列保留历史数据)。
+ * 列不存在(011 迁移未执行)时整体停用,主流程不受影响;仅缺 fwd_return_2d(031 未执行)
+ * 时只停用 2d 口径,1h/1d 照常。
  */
 
 const ET_DATE_FMT = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York' });
@@ -24,6 +26,7 @@ function round4(n) {
 }
 
 let columnsMissing = false;
+let twoDayMissing = false; // 仅缺 fwd_return_2d(031 未执行):只停用 2d 口径,1h/1d 照常
 let running = false;
 
 function isMissingColumn(error) {
@@ -34,6 +37,12 @@ function warnMissingOnce(context) {
   if (columnsMissing) return;
   columnsMissing = true;
   console.warn(`[signal] news_analyses 缺少前瞻收益列,信号评估停用(请执行 011 迁移;${context})`);
+}
+
+function warnTwoDayMissingOnce() {
+  if (twoDayMissing) return;
+  twoDayMissing = true;
+  console.warn('[signal] news_analyses 缺少 fwd_return_2d 列,2 个交易日口径停用(请执行 031 迁移;1h/1d 不受影响)');
 }
 
 /** 分析完成后立即记录信号观察价,作为前瞻收益基准(失败不影响主流程) */
@@ -51,17 +60,17 @@ export async function recordSignalPrice(analysisId, price) {
 }
 
 /**
- * 纯函数:由信号日之后的日线序列计算 1/5 个交易日前瞻收益(百分比)。
+ * 纯函数:由信号日之后的日线序列计算 1/2 个交易日前瞻收益(百分比)。
  * rows 为按日期升序的 [{ date: 'YYYY-MM-DD', price }];不足 N 个交易日返回 null。
  */
 export function computeDailyForwardReturns({ rows, signalEtDate, signalPrice }) {
   const base = Number(signalPrice);
-  if (!Number.isFinite(base) || base <= 0) return { r1d: null, r5d: null };
+  if (!Number.isFinite(base) || base <= 0) return { r1d: null, r2d: null };
   const after = (rows || []).filter((r) => r.date > signalEtDate);
   const pct = (p) => round4((Number(p) / base - 1) * 100);
   return {
     r1d: after.length >= 1 ? pct(after[0].price) : null,
-    r5d: after.length >= 5 ? pct(after[4].price) : null,
+    r2d: after.length >= 2 ? pct(after[1].price) : null,
   };
 }
 
@@ -111,13 +120,13 @@ const COOLDOWN_SOFT_MS = 2 * 3600_000;
 /**
  * 取某一口径的到期未回填行:signal_price 非空、该列为空,
  * created_at ∈ [now−30d, now−minAgeMs],正序(最老优先)。
- * 1d/5d 拆成两条独立队列查询——旧实现的 .or() 会让"1d 已填但 5d 未到期"的行反复进窗空转。
+ * 1d/2d 拆成两条独立队列查询——旧实现的 .or() 会让"1d 已填但 2d 未到期"的行反复进窗空转。
  */
 async function fetchPending({ column, minAgeMs, limit }) {
   const now = Date.now();
   const { data, error } = await supabase()
     .from('news_analyses')
-    .select('id, symbol, signal_price, created_at, fwd_return_1d, fwd_return_5d')
+    .select(`id, symbol, signal_price, created_at, fwd_return_1d${twoDayMissing ? '' : ', fwd_return_2d'}`)
     .not('signal_price', 'is', null)
     .is(column, null)
     .gte('created_at', new Date(now - 30 * 24 * 3600_000).toISOString())
@@ -165,14 +174,15 @@ async function fillDailyBatch(pending, { symbolBudget = 30 } = {}) {
     }
     let symbolFilled = 0;
     for (const a of items) {
-      const { r1d, r5d } = computeDailyForwardReturns({
+      const { r1d, r2d } = computeDailyForwardReturns({
         rows: settledRows,
         signalEtDate: etDate(a.created_at),
         signalPrice: a.signal_price,
       });
       const update = {};
       if (a.fwd_return_1d === null && r1d !== null) update.fwd_return_1d = r1d;
-      if (a.fwd_return_5d === null && r5d !== null) update.fwd_return_5d = r5d;
+      // 2d 列缺失(031 未执行)时 a.fwd_return_2d 为 undefined,严格等于 null 不成立 → 不写
+      if (a.fwd_return_2d === null && r2d !== null) update.fwd_return_2d = r2d;
       if (!Object.keys(update).length) continue;
       const { error: updErr } = await supabase()
         .from('news_analyses')
@@ -189,16 +199,30 @@ async function fillDailyBatch(pending, { symbolBudget = 30 } = {}) {
 }
 
 /**
- * 1/5 个交易日口径:两条独立的到期队列。
- * 1d:信号至少 24 小时前(次日收盘可定型);5d:至少 7 天前(5 个交易日的日历下界,
- * 未成熟的行不再进窗反复扫描)。返回 { n1d, n5d }。
+ * 1/2 个交易日口径:两条独立的到期队列。
+ * 1d:信号至少 24 小时前(次日收盘可定型);2d:至少 72 小时前(工作日下 2 个交易日
+ * 收盘定型的日历下界;跨周末的行由 symbol 冷却吸收,不会反复空转)。返回 { n1d, n2d }。
  */
-async function backfillDaily() {
+async function runDailyQueues() {
   const pending1d = await fetchPending({ column: 'fwd_return_1d', minAgeMs: 24 * 3600_000, limit: 400 });
   const n1d = pending1d.length ? await fillDailyBatch(pending1d) : 0;
-  const pending5d = await fetchPending({ column: 'fwd_return_5d', minAgeMs: 7 * 24 * 3600_000, limit: 400 });
-  const n5d = pending5d.length ? await fillDailyBatch(pending5d) : 0;
-  return { n1d, n5d };
+  if (twoDayMissing) return { n1d, n2d: 0 };
+  const pending2d = await fetchPending({ column: 'fwd_return_2d', minAgeMs: 72 * 3600_000, limit: 400 });
+  const n2d = pending2d.length ? await fillDailyBatch(pending2d) : 0;
+  return { n1d, n2d };
+}
+
+/** 缺 fwd_return_2d(031 未执行)时降级为只跑 1d 队列重试一次,不触发 011 级整体停用 */
+async function backfillDaily() {
+  try {
+    return await runDailyQueues();
+  } catch (err) {
+    if (!twoDayMissing && /fwd_return_2d/.test(err?.message || '')) {
+      warnTwoDayMissingOnce();
+      return await runDailyQueues();
+    }
+    throw err;
+  }
 }
 
 /** 由调度器周期调用(每 10 分钟):回填到期的前瞻收益 */
@@ -207,9 +231,9 @@ export async function backfillForwardReturns() {
   running = true;
   try {
     const n1h = await backfill1h();
-    const { n1d, n5d } = await backfillDaily();
-    if (n1h || n1d || n5d) {
-      console.log(`[signal] 前瞻收益回填: 1小时口径 ${n1h} 条,1d 队列 ${n1d} 条,5d 队列 ${n5d} 条`);
+    const { n1d, n2d } = await backfillDaily();
+    if (n1h || n1d || n2d) {
+      console.log(`[signal] 前瞻收益回填: 1小时口径 ${n1h} 条,1d 队列 ${n1d} 条,2d 队列 ${n2d} 条`);
     }
   } catch (err) {
     if (isMissingColumn(err)) warnMissingOnce('回填');

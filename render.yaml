@@ -98,6 +98,9 @@ services:
         value: "14"
       - key: ENABLE_RISK_OFFICER
         value: "true"
+      # 信号质量统计采样上限(只计已回填的有效行;每 1000 行 = 1 次数据库分页请求)
+      - key: SIGNAL_STATS_MAX_ROWS
+        value: "20000"
       - key: ENABLE_SLIPPAGE
         value: "true"
       - key: SLIPPAGE_MAX_BPS

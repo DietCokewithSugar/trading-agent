@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   aggregateRegime,
+  aggregateRegimeSeries,
   sectorMultiplier,
   mergeMacroConfidence,
   eventWeight,
@@ -217,4 +218,55 @@ test('sectorMultiplier:利好放大/利空压缩,clamp 区间,无命中为 1', (
   assert.ok(up > 1 && up <= 1.2, `利好行业乘数 ${up} 应在 (1, 1.2]`);
   assert.equal(sectorMultiplier('Healthcare', bearish, NOW), 1, '未命中行业为 1');
   assert.equal(sectorMultiplier(null, bearish, NOW), 1, '无行业为 1');
+});
+
+// ── 按日回溯序列(宏观页历史热力图)──
+
+function seriesDays(keys) {
+  return keys.map((date) => ({
+    date,
+    startTs: Date.parse(`${date}T00:00:00Z`),
+    endTs: Date.parse(`${date}T00:00:00Z`) + 24 * 3600_000,
+  }));
+}
+
+test('aggregateRegimeSeries:空事件/空日序列 → 逐日 neutral、0 分、0 事件', () => {
+  assert.deepEqual(aggregateRegimeSeries({ events: [], days: [] }), []);
+  const series = aggregateRegimeSeries({ events: [], days: seriesDays(['2026-06-01']) });
+  assert.equal(series.length, 1);
+  assert.equal(series[0].date, '2026-06-01');
+  assert.equal(series[0].regime, 'neutral');
+  assert.equal(series[0].risk_score, 0);
+  assert.equal(series[0].events, 0);
+});
+
+test('aggregateRegimeSeries:滞回链式传递——次日衰减到进入阈以下、退出阈以上时维持原状态', () => {
+  // 事件在 6/1 深夜:当日收盘视角分数 ≈0.46(≥0.30 进入 risk_on);
+  // 次日收盘衰减到 ≈0.24 ∈ (0.20, 0.30):无状态重算会回 neutral,链式 prev 应维持 risk_on;
+  // 第三日 ≈0.10 < 0.20,退出为 neutral
+  const events = [
+    ev({ macro_direction: 'risk_on', created_at: '2026-06-01T23:00:00Z', confidence: 0.9 }),
+  ];
+  const days = seriesDays(['2026-06-01', '2026-06-02', '2026-06-03']);
+  const series = aggregateRegimeSeries({ events, days });
+  assert.equal(series[0].regime, 'risk_on');
+  assert.equal(series[0].events, 1);
+  assert.equal(series[1].regime, 'risk_on', '滞回:退出阈以上维持原状态');
+  assert.equal(series[1].events, 0, '事件数只计当日新增');
+  assert.ok(series[1].risk_score < series[0].risk_score, '风险分随时间衰减');
+  // 对照:同一时点无状态重算(prev=null)会掉回 neutral,证明链式传递生效
+  const stateless = aggregateRegime({ events, now: days[1].endTs - 1, prev: null });
+  assert.equal(stateless.regime, 'neutral');
+  assert.equal(series[2].regime, 'neutral', '衰减穿过退出阈后回中性');
+});
+
+test('aggregateRegimeSeries:shock 只锁定事件所在日,风险分与后续日不受 prev 污染', () => {
+  // 一档高置信 risk_off(存量行无佐证字段 → 单篇即触发):事件日为 macro_shock,
+  // 次日 shockUntil 已过期 → 按分数判定
+  const events = [ev({ created_at: '2026-06-01T20:00:00Z', confidence: 0.9 })];
+  const days = seriesDays(['2026-06-01', '2026-06-02']);
+  const series = aggregateRegimeSeries({ events, days });
+  assert.equal(series[0].regime, 'macro_shock');
+  assert.notEqual(series[1].regime, 'macro_shock', 'shock 到期不跨日延续');
+  assert.ok(series[1].risk_score < 0, 'risk_off 事件仍在有效期内,分数为负');
 });

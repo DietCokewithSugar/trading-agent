@@ -216,6 +216,11 @@ export const config = {
   lossStreakCount: num0(process.env.LOSS_STREAK_COUNT, 3),
   lossStreakScale: Math.min(num0(process.env.LOSS_STREAK_SCALE, 0.5), 1),
 
+  // 信号质量统计(/api/signal-stats)的采样行数上限:只计已回填的有效行,
+  // 每 1000 行 = 1 次 PostgREST 分页请求(默认 20000 ≈ 最多 20 次串行分页,
+  // 全量窗口下接口相应变慢;调大可拉长截断前的覆盖窗口)
+  signalStatsMaxRows: num(process.env.SIGNAL_STATS_MAX_ROWS, 20000),
+
   // ── 宏观信号层(014)──
   // 总开关:关闭后整体退回"纯新闻即时模式"(无宏观分析/候选池/分配器,行为同 013)
   enableMacro: process.env.ENABLE_MACRO !== 'false',

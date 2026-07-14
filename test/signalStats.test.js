@@ -18,7 +18,7 @@ function signal(overrides) {
     traded: false,
     fwd_return_1h: null,
     fwd_return_1d: null,
-    fwd_return_5d: null,
+    fwd_return_2d: null,
     ...overrides,
   };
 }
@@ -48,8 +48,8 @@ test('未回填的口径不计入样本', () => {
     .rows.find((r) => r.label === '全部');
   assert.equal(overall.n_1h, 1);
   assert.equal(overall.n_1d, 1);
-  assert.equal(overall.n_5d, 0);
-  assert.equal(overall.hit_5d, null);
+  assert.equal(overall.n_2d, 0);
+  assert.equal(overall.hit_2d, null);
 });
 
 test('按档位/已交易分桶', () => {
