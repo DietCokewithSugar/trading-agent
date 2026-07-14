@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { Alert, App as AntApp, Badge, Segmented, Tabs, Tag, Typography } from 'antd';
+import { Alert, App as AntApp, Badge, Segmented, Tabs, Tag, Tooltip, Typography } from 'antd';
 import {
   AimOutlined,
   DashboardOutlined,
@@ -239,11 +239,6 @@ function MainApp() {
             <Typography.Link href="#/strategy" style={{ fontSize: 13 }}>
               投资策略说明
             </Typography.Link>
-            {portfolio?.ledger === 'broker' && (
-              <Tag bordered style={{ marginRight: 0 }} className="label-caps">
-                券商模拟账本
-              </Tag>
-            )}
             {session && (
               <Tag bordered style={{ marginRight: 0 }} className="label-caps">
                 {SESSION_LABELS[session]}
@@ -260,8 +255,19 @@ function MainApp() {
         {portfolio && (
           <div className="hero">
             <div className="hero__primary">
-              <div className="label-caps" style={{ marginBottom: 6 }}>
+              <div
+                className="label-caps"
+                style={{ marginBottom: 6, display: 'flex', alignItems: 'center', gap: 8 }}
+              >
                 总资产
+                {/* 主账本切到券商时的克制提示:数字来自券商真实撮合的模拟账户 */}
+                {portfolio.ledger === 'broker' && (
+                  <Tooltip title="账户数据由券商模拟账户实时驱动(真实撮合);内部模拟账本继续在后台运行,可在管理页切回">
+                    <Tag bordered className="label-caps" style={{ marginRight: 0 }}>
+                      券商模拟账本
+                    </Tag>
+                  </Tooltip>
+                )}
               </div>
               <div className="display-num">{fmtMoney(portfolio.total_value)}</div>
               {dayPnl !== null && dayPnl !== undefined && (

@@ -11,14 +11,14 @@ const rows = [
   { date: '2026-06-08', price: 110 },
 ];
 
-test('信号日之后第 1/5 个交易日收盘的前瞻收益(百分比)', () => {
-  const { r1d, r5d } = computeDailyForwardReturns({
+test('信号日之后第 1/2 个交易日收盘的前瞻收益(百分比)', () => {
+  const { r1d, r2d } = computeDailyForwardReturns({
     rows,
     signalEtDate: '2026-06-01',
     signalPrice: 100,
   });
   assert.equal(r1d, 2); // 6/2 收盘 102
-  assert.equal(r5d, 10); // 第 5 个交易日 6/8 收盘 110
+  assert.equal(r2d, 1); // 第 2 个交易日 6/3 收盘 101
 });
 
 test('信号落在周末:从下一个交易日起算', () => {
@@ -32,16 +32,16 @@ test('信号落在周末:从下一个交易日起算', () => {
 });
 
 test('交易日不足时返回 null,而不是用更短窗口冒充', () => {
-  const { r1d, r5d } = computeDailyForwardReturns({
+  const { r1d, r2d } = computeDailyForwardReturns({
     rows,
-    signalEtDate: '2026-06-04',
-    signalPrice: 105,
+    signalEtDate: '2026-06-05',
+    signalPrice: 104,
   });
-  assert.equal(r1d, Math.round((104 / 105 - 1) * 100 * 10000) / 10000);
-  assert.equal(r5d, null);
+  assert.equal(r1d, Math.round((110 / 104 - 1) * 100 * 10000) / 10000);
+  assert.equal(r2d, null);
 });
 
 test('信号价非法时不产出数据', () => {
   const r = computeDailyForwardReturns({ rows, signalEtDate: '2026-06-01', signalPrice: 0 });
-  assert.deepEqual(r, { r1d: null, r5d: null });
+  assert.deepEqual(r, { r1d: null, r2d: null });
 });

@@ -27,6 +27,13 @@
   --heat-2: rgba(232, 230, 225, 0.42);
   --heat-3: rgba(232, 230, 225, 0.66);
   --heat-4: rgba(232, 230, 225, 0.92);
+  /* 宏观环境热力图:分歧色阶(好=绿 / 差=红,取 --up/--down 的透明度阶梯) */
+  --heat-up-1: rgba(61, 214, 140, 0.25);
+  --heat-up-2: rgba(61, 214, 140, 0.5);
+  --heat-up-3: rgba(61, 214, 140, 0.85);
+  --heat-down-1: rgba(255, 92, 92, 0.25);
+  --heat-down-2: rgba(255, 92, 92, 0.5);
+  --heat-down-3: rgba(255, 92, 92, 0.85);
 }
 
 :root[data-theme='light'] {
@@ -50,6 +57,12 @@
   --heat-2: rgba(33, 32, 28, 0.4);
   --heat-3: rgba(33, 32, 28, 0.64);
   --heat-4: rgba(33, 32, 28, 0.88);
+  --heat-up-1: rgba(56, 158, 13, 0.22);
+  --heat-up-2: rgba(56, 158, 13, 0.48);
+  --heat-up-3: rgba(56, 158, 13, 0.82);
+  --heat-down-1: rgba(207, 19, 34, 0.22);
+  --heat-down-2: rgba(207, 19, 34, 0.48);
+  --heat-down-3: rgba(207, 19, 34, 0.82);
 }
 
 * {
@@ -581,6 +594,14 @@ body {
 .heatmap__cell[data-level='2'] { background: var(--heat-2); }
 .heatmap__cell[data-level='3'] { background: var(--heat-3); }
 .heatmap__cell[data-level='4'] { background: var(--heat-4); }
+
+/* 宏观环境热力图的分歧色阶(tone=up 好/绿,tone=down 差/红;覆盖上面的单色阶) */
+.heatmap__cell[data-tone='up'][data-level='1'] { background: var(--heat-up-1); }
+.heatmap__cell[data-tone='up'][data-level='2'] { background: var(--heat-up-2); }
+.heatmap__cell[data-tone='up'][data-level='3'] { background: var(--heat-up-3); }
+.heatmap__cell[data-tone='down'][data-level='1'] { background: var(--heat-down-1); }
+.heatmap__cell[data-tone='down'][data-level='2'] { background: var(--heat-down-2); }
+.heatmap__cell[data-tone='down'][data-level='3'] { background: var(--heat-down-3); }
 
 .heatmap__cell.is-selected {
   outline: 2px solid var(--accent);

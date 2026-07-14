@@ -107,7 +107,7 @@ export function startScheduler() {
   // 开盘队列:休市期间挂起的信号在常规时段开盘后尽快按开盘价成交(非盘中自动跳过)
   every(Math.max(riskSec, 15) * 1000, '开盘队列处理', processPendingOrders);
 
-  // 信号前瞻收益回填(评估层):每 10 分钟一批,到期的信号补 1h/1d/5d 前瞻收益
+  // 信号前瞻收益回填(评估层):每 10 分钟一批,到期的信号补 1h/1d/2d 前瞻收益
   every(10 * 60_000, '信号前瞻收益回填', backfillForwardReturns);
 
   // 券商模拟对照账本(021):回填在途对照单的真实撮合结果。

@@ -58,7 +58,7 @@ export function withAdjustedReturns(rows) {
       ...r,
       adj_1h: adj(r.fwd_return_1h),
       adj_1d: adj(r.fwd_return_1d),
-      adj_5d: adj(r.fwd_return_5d),
+      adj_2d: adj(r.fwd_return_2d),
     };
   });
 }
@@ -135,7 +135,7 @@ export function evaluateSignalRules(rawRows, cfg, t = ADVISOR_THRESHOLDS) {
   }
 
   // 3. 档位校准:第 2 档 1d 命中率显著高于第 1 档 → 分档定义/LLM 校准需复核。
-  // 口径用 1d 而非 5d:±2%/48h 策略下 1d 是决策口径,5d 已降级为研究口径且样本最稀疏
+  // 口径用 1d:±2%/48h 策略下 1d 是最快定型的决策口径(2d 与持有上限对齐但成熟更慢)
   {
     const m1 = subsetMetrics(rows.filter((r) => r.tier === 1), '1d');
     const m2 = subsetMetrics(rows.filter((r) => r.tier === 2), '1d');

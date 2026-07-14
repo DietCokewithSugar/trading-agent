@@ -13,6 +13,7 @@ import { isHalted, setHalted } from './halt.js';
 import { resetMetrics } from './metrics.js';
 import { resetRiskControlState } from './riskControls.js';
 import { resetRegimeState } from './macroRegime.js';
+import { clearMacroHistoryCache } from './macroService.js';
 import { resetShadowState, initShadowPortfolios, drainShadowQueue } from './shadowPortfolio.js';
 import { resetBrokerMirror } from './brokerMirror.js';
 import { clearBrokerStatsCache } from './brokerStats.js';
@@ -170,6 +171,7 @@ export async function resetAllData() {
     resetMetrics();
     resetRiskControlState();
     resetRegimeState();
+    clearMacroHistoryCache(); // macro_events 已清空,逐日回溯序列缓存不得幸存
     cycleStatus.lastResult = null;
     cycleStatus.lastError = null;
     cycleStatus.lastRunAt = null;

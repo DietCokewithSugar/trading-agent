@@ -4,8 +4,9 @@ import { supabase } from '../db.js';
 import { config } from '../config.js';
 import { analyzeMacroArticle, matchMacroEvent } from './deepseek.js';
 import { matchCalendarSurprise } from './macroCalendar.js';
-import { mergeMacroConfidence } from './macroRegime.js';
-import { sanitizeProviderText } from './metrics.js';
+import { mergeMacroConfidence, aggregateRegimeSeries } from './macroRegime.js';
+import { sanitizeProviderText, etDayKey } from './metrics.js';
+import { etDayRangeUtc } from './riskControls.js';
 
 const state = {
   tableMissing: false, // macro_events 表缺失(未执行 014 迁移),一次告警后停用
@@ -163,12 +164,24 @@ async function mergeDuplicateMacroEvent(row, article) {
 export async function listRecentMacroEvents(hours, limit = 100) {
   if (state.tableMissing) return null;
   const since = new Date(Date.now() - hours * 3600_000).toISOString();
-  const { data, error } = await supabase()
+  return listEventsInRange(since, null, limit);
+}
+
+/** 指定时间区间 [startIso, endIso) 的宏观事件(历史视图/回溯推算用);表缺失返回 null */
+export async function listMacroEventsForDay(startIso, endIso, limit = 200) {
+  if (state.tableMissing) return null;
+  return listEventsInRange(startIso, endIso, limit);
+}
+
+async function listEventsInRange(startIso, endIso, limit) {
+  let query = supabase()
     .from('macro_events')
     .select('*')
-    .gte('created_at', since)
+    .gte('created_at', startIso)
     .order('created_at', { ascending: false })
     .limit(limit);
+  if (endIso) query = query.lt('created_at', endIso);
+  const { data, error } = await query;
   if (error) {
     if (isMissingTable(error)) {
       state.tableMissing = true;
@@ -178,4 +191,82 @@ export async function listRecentMacroEvents(hours, limit = 100) {
     throw new Error(`读取宏观事件失败: ${error.message}`);
   }
   return data || [];
+}
+
+// ── 宏观环境历史序列(/api/macro/history,热力图)──
+// 无 regime 历史表:按日用 aggregateRegimeSeries 从 macro_events 回溯推算。
+// 进程内缓存 10 分钟(按 days 键);管理重置清空 macro_events 后必须一并清缓存
+const historyCache = new Map(); // days -> { at, payload }
+const HISTORY_CACHE_MS = 10 * 60_000;
+const HISTORY_MAX_EVENT_ROWS = 5000;
+const HISTORY_PAGE_SIZE = 1000;
+
+export function clearMacroHistoryCache() {
+  historyCache.clear();
+}
+
+/** 近 N 个美东日的逐日 regime/风险分(回溯推算);表缺失/未启用返回 { available: false } */
+export async function getMacroHistory(days = 120) {
+  if (!config.enableMacro || state.tableMissing) return { available: false };
+  const n = Math.min(Math.max(Math.trunc(Number(days) || 120), 7), 366);
+  const cached = historyCache.get(n);
+  if (cached && Date.now() - cached.at < HISTORY_CACHE_MS) return cached.payload;
+
+  // 美东日 key 序列:纯日期字符串算术回推(DST 由 etDayRangeUtc 在换算时处理)
+  const todayKey = etDayKey();
+  const todayUtcTs = Date.parse(`${todayKey}T00:00:00Z`);
+  const dayRanges = [];
+  for (let i = n - 1; i >= 0; i--) {
+    const key = new Date(todayUtcTs - i * 86400_000).toISOString().slice(0, 10);
+    const range = etDayRangeUtc(key);
+    if (!range) continue; // 理论不可达(key 由合法日期回推)
+    dayRanges.push({ date: key, startTs: Date.parse(range.startIso), endTs: Date.parse(range.endIso) });
+  }
+  if (!dayRanges.length) return { available: false };
+
+  // 一次取整窗事件(首日额外回溯 validityHours,保证首日的聚合窗口完整);
+  // 宏观事件量级为每天几条,分页上限只是防御性兜底
+  const sinceIso = new Date(
+    dayRanges[0].startTs - config.macroEventValidityHours * 3600_000
+  ).toISOString();
+  const events = [];
+  for (let from = 0; from < HISTORY_MAX_EVENT_ROWS; from += HISTORY_PAGE_SIZE) {
+    const { data, error } = await supabase()
+      .from('macro_events')
+      .select('*')
+      .gte('created_at', sinceIso)
+      .order('created_at', { ascending: true })
+      .range(from, from + HISTORY_PAGE_SIZE - 1);
+    if (error) {
+      if (isMissingTable(error)) {
+        state.tableMissing = true;
+        console.warn('[macro] macro_events 表缺失(请执行 014 迁移),宏观分析停用');
+        return { available: false };
+      }
+      throw new Error(`读取宏观事件失败: ${error.message}`);
+    }
+    events.push(...(data || []));
+    if (!data || data.length < HISTORY_PAGE_SIZE) break;
+  }
+
+  const series = aggregateRegimeSeries({
+    events,
+    days: dayRanges,
+    cfg: {
+      validityHours: config.macroEventValidityHours,
+      shockHours: config.macroShockHours,
+      shockMinReports: config.macroShockMinReports,
+    },
+  });
+  const payload = {
+    available: true,
+    days: series.map(({ date, risk_score, regime, events: count }) => ({
+      date,
+      risk_score,
+      regime,
+      events: count,
+    })),
+  };
+  historyCache.set(n, { at: Date.now(), payload });
+  return payload;
 }

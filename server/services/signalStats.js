@@ -1,4 +1,5 @@
 import { supabase } from '../db.js';
+import { config } from '../config.js';
 import { isPressRelease } from './credibility.js';
 
 /**
@@ -15,12 +16,14 @@ import { isPressRelease } from './credibility.js';
  *    同样记录了前瞻收益——被拦信号若持续大涨说明该层过度保守,若大跌说明该层有价值。
  *
  * 时间窗口:?days= 限定统计窗口(默认全量),分页拉取突破 PostgREST 单次
- * 1000 行上限,超过 MAX_SAMPLE_ROWS 时截断并在响应里明示(window.truncated)。
+ * 1000 行上限,超过采样上限(config.signalStatsMaxRows,SIGNAL_STATS_MAX_ROWS
+ * 可调)时截断并在响应里明示(window.truncated)。
  */
 
-const HORIZONS = ['1h', '1d', '5d'];
+const HORIZONS = ['1h', '1d', '2d'];
 const PAGE_SIZE = 1000;
-const MAX_SAMPLE_ROWS = 5000;
+// 采样上限:每 PAGE_SIZE 行 = 1 次 PostgREST 请求,默认 20000 ≈ 最多 20 次串行分页
+const maxSampleRows = () => config.signalStatsMaxRows;
 
 function round(n, digits = 2) {
   const f = 10 ** digits;
@@ -95,7 +98,7 @@ function bucketRows(rows, buckets) {
  * 纯聚合(可单测):rows 为
  * { sentiment, tier, confidence, final_confidence, source_score, traded,
  *   candidate_status, macro_regime, pool_wait_minutes, pool_drift_percent,
- *   fwd_return_1h, fwd_return_1d, fwd_return_5d }
+ *   fwd_return_1h, fwd_return_1d, fwd_return_2d }
  */
 export function summarizeSignals(rows) {
   // 预计算方向调整收益
@@ -107,7 +110,7 @@ export function summarizeSignals(rows) {
       ...r,
       adj_1h: adj(r.fwd_return_1h),
       adj_1d: adj(r.fwd_return_1d),
-      adj_5d: adj(r.fwd_return_5d),
+      adj_2d: adj(r.fwd_return_2d),
     };
   });
 
@@ -385,7 +388,7 @@ export function summarizeTradeOutcomes(rows) {
  * 按 PAGE_SIZE 翻页直到取尽或达到 maxRows。返回 { rows, truncated, error }
  * (error 为首个失败页的 supabase 错误,调用方按迁移容忍逻辑处理)。
  */
-async function fetchPaged(buildQuery, maxRows = MAX_SAMPLE_ROWS) {
+async function fetchPaged(buildQuery, maxRows = maxSampleRows()) {
   const rows = [];
   for (let from = 0; from < maxRows; from += PAGE_SIZE) {
     const { data, error } = await buildQuery().range(from, from + PAGE_SIZE - 1);
@@ -396,10 +399,14 @@ async function fetchPaged(buildQuery, maxRows = MAX_SAMPLE_ROWS) {
   return { rows, truncated: true, error: null };
 }
 
+// 缺 fwd_return_2d(031 未执行)时的降级标记:告警一次,后续请求直接走无 2d 查询
+let twoDayColumnMissing = false;
+
 /**
  * 加载评估层原始行(getSignalStats 与参数建议器共用):每行一条非中性信号,
- * 带前瞻收益、成交/候选状态、排队度量与来源信息。011 未迁移时返回 null。
- * days 限定窗口(null=全量,受 MAX_SAMPLE_ROWS 截断)。
+ * 带前瞻收益、成交/候选状态、排队度量与来源信息。011 未迁移时返回 null;
+ * 仅缺 fwd_return_2d(031 未执行)时 2d 口径按 0 样本降级,其余照常。
+ * days 限定窗口(null=全量,受采样上限截断)。
  */
 export async function loadSignalRows({ days = null } = {}) {
   const db = supabase();
@@ -407,22 +414,31 @@ export async function loadSignalRows({ days = null } = {}) {
     Number.isFinite(days) && days > 0 ? new Date(Date.now() - days * 86400_000).toISOString() : null;
   const withSince = (q) => (since ? q.gte('created_at', since) : q);
 
-  // 只取"至少一个口径已回填"的有效行:未回填的新信号(1d/5d 结构性未到期)对统计是纯噪音,
-  // 却会按时间倒序把 MAX_SAMPLE_ROWS 的样本预算全部挤占——信号量涨到 ~千条/天后,
-  // 5000 条只够覆盖几天,页面上 1d/5d 样本直接归零。预算只花在有效行上,覆盖窗口自然拉长
-  const analysesFetch = await fetchPaged(() =>
+  // 只取"至少一个口径已回填"的有效行:未回填的新信号(1d/2d 结构性未到期)对统计是纯噪音,
+  // 却会按时间倒序把采样上限的样本预算全部挤占——信号量涨到 ~千条/天后,
+  // 几千条只够覆盖几天,页面上 1d/2d 样本直接归零。预算只花在有效行上,覆盖窗口自然拉长
+  const buildAnalysesQuery = (with2d) => () =>
     withSince(
       db
         .from('news_analyses')
         .select(
-          'id, symbol, sentiment, tier, confidence, final_confidence, signal_price, fwd_return_1h, fwd_return_1d, fwd_return_5d, created_at, news_articles(source_score, source, source_domain, url)'
+          `id, symbol, sentiment, tier, confidence, final_confidence, signal_price, fwd_return_1h, fwd_return_1d${with2d ? ', fwd_return_2d' : ''}, created_at, news_articles(source_score, source, source_domain, url)`
         )
         .not('signal_price', 'is', null)
-        .or('fwd_return_1h.not.is.null,fwd_return_1d.not.is.null,fwd_return_5d.not.is.null')
+        .or(
+          `fwd_return_1h.not.is.null,fwd_return_1d.not.is.null${with2d ? ',fwd_return_2d.not.is.null' : ''}`
+        )
         .in('sentiment', ['bullish', 'bearish'])
         .order('created_at', { ascending: false })
-    )
-  );
+    );
+  let analysesFetch = await fetchPaged(buildAnalysesQuery(!twoDayColumnMissing));
+  // strip-and-retry(迁移容忍):须先于下面的 011 级整体停用判断,
+  // 否则 fwd_return_2d 的缺列错误会命中 /fwd_return/ 把整个统计误判为不可用
+  if (analysesFetch.error && !twoDayColumnMissing && /fwd_return_2d/.test(analysesFetch.error.message)) {
+    twoDayColumnMissing = true;
+    console.warn('[signal] news_analyses 缺少 fwd_return_2d 列,2 个交易日口径按 0 样本降级(请执行 031 迁移)');
+    analysesFetch = await fetchPaged(buildAnalysesQuery(false));
+  }
   if (analysesFetch.error) {
     if (/signal_price|fwd_return/.test(analysesFetch.error.message)) {
       return null;
@@ -573,7 +589,9 @@ export async function loadSignalRows({ days = null } = {}) {
       pool_drift_percent: poolByAnalysis.get(a.id)?.drift ?? null,
       fwd_return_1h: a.fwd_return_1h === null ? null : Number(a.fwd_return_1h),
       fwd_return_1d: a.fwd_return_1d === null ? null : Number(a.fwd_return_1d),
-      fwd_return_5d: a.fwd_return_5d === null ? null : Number(a.fwd_return_5d),
+      // 031 未执行时未查询该列(undefined)→ 统一按 null,2d 口径 0 样本
+      fwd_return_2d:
+        a.fwd_return_2d === null || a.fwd_return_2d === undefined ? null : Number(a.fwd_return_2d),
     };
   });
 
@@ -583,7 +601,7 @@ export async function loadSignalRows({ days = null } = {}) {
     window: {
       days: since ? days : null,
       since,
-      max_rows: MAX_SAMPLE_ROWS,
+      max_rows: maxSampleRows(),
       truncated: analysesFetch.truncated,
       // 截断时实际覆盖到的最早信号时间(时间倒序,最后一行最旧;仅计已回填的有效行)
       covered_since: data.length ? data[data.length - 1].created_at : null,
@@ -593,7 +611,7 @@ export async function loadSignalRows({ days = null } = {}) {
 
 /**
  * /api/signal-stats 的数据来源;011 迁移未执行时返回 { available: false }。
- * days 限定统计窗口(美东无关,按 UTC 时间差;null=全量,但受 MAX_SAMPLE_ROWS 截断,
+ * days 限定统计窗口(美东无关,按 UTC 时间差;null=全量,但受采样上限截断,
  * 截断时 window.truncated=true 且 window.covered_since 给出实际覆盖到的最早信号时间)。
  */
 export async function getSignalStats({ days = null } = {}) {

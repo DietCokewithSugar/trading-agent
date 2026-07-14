@@ -31,7 +31,7 @@ function rows(n, overrides) {
     officer_veto: false,
     fwd_return_1h: null,
     fwd_return_1d: null,
-    fwd_return_5d: null,
+    fwd_return_2d: null,
     ...overrides,
   }));
 }
