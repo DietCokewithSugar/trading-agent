@@ -72,14 +72,33 @@ function markEquity(equity, book, bar, initialValue) {
 }
 
 /**
- * 基线策略:targets[i] 为第 i 根收盘时决定的目标仓位,在第 i+1 根收盘执行
- * (shift-1,严格因果);entryAtFirstBar=true(买入持有)在首根收盘直接建仓。
+ * 窗口起点索引:bars 允许在用户窗口前带一段"指标暖机段"(编排层预取约 40 根),
+ * 交易与净值都只从首根 date ≥ windowStart 的 K 线开始 —— 指标在暖机段完成收敛,
+ * 短窗口(如 1 个月)的技术基线从窗口首日即可给出信号。缺省 0(无暖机,向后兼容)。
  */
-export function runTargetStrategy({ bars, targets, initialValue = 10000, costBps = 0, entryAtFirstBar = false }) {
+function windowStartIndex(bars, windowStart) {
+  if (!windowStart) return 0;
+  const idx = bars.findIndex((b) => b.date >= windowStart);
+  return idx === -1 ? bars.length : idx;
+}
+
+/**
+ * 基线策略:targets[i] 为第 i 根收盘时决定的目标仓位,在第 i+1 根收盘执行
+ * (shift-1,严格因果);entryAtFirstBar=true(买入持有)在窗口首根收盘直接建仓。
+ * windowStart 见 windowStartIndex —— 暖机段只用于指标取值(targets[i-1]),不交易不计净值。
+ */
+export function runTargetStrategy({
+  bars,
+  targets,
+  initialValue = 10000,
+  costBps = 0,
+  entryAtFirstBar = false,
+  windowStart = null,
+}) {
   const book = makeBook(initialValue);
   const trades = [];
   const equity = [];
-  for (let i = 0; i < bars.length; i++) {
+  for (let i = windowStartIndex(bars, windowStart); i < bars.length; i++) {
     const desired = entryAtFirstBar ? 1 : i >= 1 ? targets[i - 1] : 0;
     if (desired === 1 && book.quantity === 0) {
       buyAll(book, { date: bars[i].date, price: bars[i].close, costBps, trigger: 'signal', trades });
@@ -111,6 +130,7 @@ export function runAiStrategy({
   takeProfitPercent = 2,
   takeProfitStepPercent = 1,
   maxHoldHours = 48,
+  windowStart = null,
 }) {
   const book = makeBook(initialValue);
   const trades = [];
@@ -130,7 +150,8 @@ export function runAiStrategy({
     entryIndex = -1;
   };
 
-  for (let i = 0; i < bars.length; i++) {
+  // AI 信号执行日本就落在用户窗口内,暖机段跳过只为与基线的净值日期轴对齐
+  for (let i = windowStartIndex(bars, windowStart); i < bars.length; i++) {
     const bar = bars[i];
 
     // ①② 括号检查:买入当根不查(成交发生在收盘,括号自次日生效)

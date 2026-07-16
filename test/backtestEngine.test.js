@@ -154,3 +154,54 @@ test('runAiStrategy:窗口结束不强平,按市值计入净值', () => {
   assert.equal(endState.holding, true);
   assert.equal(equity[1].value, 10100);
 });
+
+test('runTargetStrategy:windowStart 暖机段只供指标取值,交易与净值从窗口首日开始', () => {
+  // 暖机段 3 根 + 窗口 2 根;targets 在暖机末根(idx2)已给出满仓信号
+  const bars = [
+    flatBar('2026-01-02', 90),
+    flatBar('2026-01-05', 95),
+    flatBar('2026-01-06', 100),
+    flatBar('2026-01-07', 102), // 窗口首根:执行 targets[2]=1 → 建仓
+    flatBar('2026-01-08', 104),
+  ];
+  const { equity, trades } = runTargetStrategy({
+    bars,
+    targets: [0, 0, 1, 1, 1],
+    initialValue: 10000,
+    windowStart: '2026-01-07',
+  });
+  assert.equal(trades.length, 1);
+  assert.equal(trades[0].date, '2026-01-07');
+  assert.equal(trades[0].price, 102);
+  // 净值只含窗口内两点,首点即窗口首日
+  assert.deepEqual(equity.map((p) => p.date), ['2026-01-07', '2026-01-08']);
+  assert.equal(equity[0].pct, 0);
+});
+
+test('runTargetStrategy:windowStart 下买入持有在窗口首根建仓(而非暖机首根)', () => {
+  const bars = [flatBar('2026-01-05', 50), flatBar('2026-01-06', 100), flatBar('2026-01-07', 110)];
+  const { equity, trades } = runTargetStrategy({
+    bars,
+    targets: [1, 1, 1],
+    initialValue: 10000,
+    entryAtFirstBar: true,
+    windowStart: '2026-01-06',
+  });
+  assert.equal(trades[0].date, '2026-01-06');
+  assert.equal(trades[0].price, 100);
+  assert.deepEqual(equity.map((p) => p.pct), [0, 10]);
+});
+
+test('runAiStrategy:windowStart 下净值日期轴与基线一致', () => {
+  const bars = [flatBar('2026-01-05', 100), flatBar('2026-01-06', 100), flatBar('2026-01-07', 101)];
+  const { equity, trades } = runAiStrategy({
+    bars,
+    signals: [bullish('2026-01-06')],
+    initialValue: 10000,
+    maxHoldHours: 0,
+    windowStart: '2026-01-06',
+  });
+  assert.deepEqual(equity.map((p) => p.date), ['2026-01-06', '2026-01-07']);
+  assert.equal(trades[0].date, '2026-01-06');
+  assert.equal(equity[1].value, 10100);
+});
