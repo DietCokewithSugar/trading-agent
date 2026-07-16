@@ -7,6 +7,20 @@ async function get(path) {
   return res.json();
 }
 
+/** 公开 POST(可选附加请求头,如回测触发的 x-admin-token) */
+async function post(path, body, headers = {}) {
+  const res = await fetch(`/api${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...headers },
+    body: JSON.stringify(body || {}),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `请求失败: ${res.status}`);
+  }
+  return res.json();
+}
+
 export const api = {
   portfolio: () => get('/portfolio'),
   snapshots: (hours) => get(`/snapshots${hours ? `?hours=${hours}` : ''}`),
@@ -58,6 +72,11 @@ export const api = {
   // 单票轻量报价:个股弹窗对 SSE 未覆盖符号的兜底轮询,不拉分析/交易历史
   quote: (symbol) => get(`/quote/${encodeURIComponent(symbol)}`),
   status: () => get('/status'),
+  // 策略回测(032):列表 / 单轮全量 / 发起(服务端配置 ADMIN_TOKEN 时需带令牌)
+  backtestRuns: () => get('/backtest'),
+  backtestRun: (id) => get(`/backtest/${encodeURIComponent(id)}`),
+  startBacktest: (body, token) =>
+    post('/backtest/run', body, token ? { 'x-admin-token': token } : {}),
 };
 
 /** 管理接口:所有请求携带 x-admin-token 请求头 */
@@ -323,7 +342,38 @@ export const LLM_PURPOSE_LABELS = {
   reflection: '平仓复盘',
   'macro-analyst': '宏观分析',
   'macro-event-matcher': '宏观事件归并',
+  'backtest-analyst': '回测新闻分析',
   other: '其他',
+};
+
+/** 策略回测(032):策略键与展示名(ai 高亮主线,buy_hold 虚线基准) */
+export const BACKTEST_STRATEGY_LABELS = {
+  ai: 'AI 新闻策略',
+  buy_hold: '买入持有',
+  macd: 'MACD',
+  kdj_rsi: 'KDJ+RSI',
+  zmr: '零均值回归',
+  sma: 'SMA 双均线',
+};
+
+export const BACKTEST_STATUS_LABELS = {
+  running: '进行中',
+  completed: '已完成',
+  failed: '失败',
+  cancelled: '已取消',
+};
+
+/** 回测信号丢弃原因(与 aiSignals.js dropped 键对齐) */
+export const BACKTEST_DROP_LABELS = {
+  irrelevant: '与个股无关',
+  symbol_mismatch: '主体非查询标的',
+  neutral: '中性',
+  low_tier: '档位不足',
+  low_confidence: '置信度不足',
+  below_final_confidence: '综合置信度低于门槛',
+  no_execution_date: '无有效发布时间',
+  merged: '同日同向归并',
+  conflict: '同日多空冲突',
 };
 
 export const REJECT_LABELS = {
