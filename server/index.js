@@ -10,6 +10,7 @@ import { loadTradingHalt } from './services/tradingHalt.js';
 import { loadTradingStrategy } from './services/strategy.js';
 import { loadPrimaryLedger } from './services/primaryLedger.js';
 import { loadBrokerAccounts } from './services/brokerAccounts.js';
+import { cleanupStaleRuns } from './services/backtest/backtestService.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -45,6 +46,8 @@ app.listen(config.port, () => {
   // 主账本开关的可用性判定依赖账户缓存(管理页主对照账户,029),须先加载账户再加载开关
   loadTradingHalt().catch(() => {});
   loadTradingStrategy().catch(() => {});
+  // 上一进程遗留的 running 回测行标记为 failed(重启后无法续跑);未配库/缺表静默
+  cleanupStaleRuns().catch(() => {});
   loadBrokerAccounts()
     .catch(() => {})
     .then(() => loadPrimaryLedger())

@@ -17,6 +17,7 @@ import { clearMacroHistoryCache } from './macroService.js';
 import { resetShadowState, initShadowPortfolios, drainShadowQueue } from './shadowPortfolio.js';
 import { resetBrokerMirror } from './brokerMirror.js';
 import { clearBrokerStatsCache } from './brokerStats.js';
+import { clearBacktestState } from './backtest/backtestService.js';
 
 /** admin_reset_data RPC 尚未部署(未执行 005 迁移)时的判定 */
 function isMissingResetRpc(error) {
@@ -56,6 +57,8 @@ async function legacyReset(db) {
     { table: 'macro_events', filter: (q) => q.neq('id', 0), optional: true },
     // 决策回放(018 迁移新增,缺表时容忍);引用 trades/news,先删
     { table: 'trade_decisions', filter: (q) => q.neq('id', 0), optional: true },
+    // 回测运行记录(032 迁移新增,缺表时容忍);backtest_analyses 是外部派生的分析缓存,有意保留
+    { table: 'backtest_runs', filter: (q) => q.not('id', 'is', null), optional: true },
     // 影子组合(017 迁移新增,缺表时容忍);positions 引用 portfolios,先删
     { table: 'shadow_trades', filter: (q) => q.neq('id', 0), optional: true },
     { table: 'shadow_snapshots', filter: (q) => q.neq('id', 0), optional: true },
@@ -140,6 +143,8 @@ export async function resetAllData() {
         // 014/017 版函数已清过,这里删空表无副作用,缺表/失败仅告警
         const cleanups = [
           ['cycle_runs', (q) => q.not('run_id', 'is', null)],
+          // 032 版前的 RPC truncate 列表不含 backtest_runs(backtest_analyses 有意保留,见 032 迁移)
+          ['backtest_runs', (q) => q.not('id', 'is', null)],
           ['candidate_signals', (q) => q.neq('id', 0)],
           ['macro_events', (q) => q.neq('id', 0)],
           ['trade_decisions', (q) => q.neq('id', 0)],
@@ -172,6 +177,7 @@ export async function resetAllData() {
     resetRiskControlState();
     resetRegimeState();
     clearMacroHistoryCache(); // macro_events 已清空,逐日回溯序列缓存不得幸存
+    clearBacktestState(); // 请求中止在飞回测(运行行已被清空,继续跑只会烧 LLM 写空行)
     cycleStatus.lastResult = null;
     cycleStatus.lastError = null;
     cycleStatus.lastRunAt = null;
