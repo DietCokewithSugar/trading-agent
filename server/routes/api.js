@@ -32,6 +32,12 @@ import { clusterAnalyses } from '../services/newsDedup.js';
 import { getHaltState } from '../services/tradingHalts.js';
 import { etDayRangeUtc } from '../services/riskControls.js';
 import { etDayKey } from '../services/metrics.js';
+import {
+  startBacktest,
+  listRuns as listBacktestRuns,
+  getRun as getBacktestRun,
+  backtestStatus,
+} from '../services/backtest/backtestService.js';
 
 const router = Router();
 
@@ -687,6 +693,103 @@ router.post(
     if (!config.adminToken) lastAnonCycleAt = Date.now();
     runCycle({ fullFetch: true, trigger: 'manual' }); // 异步执行,不阻塞响应
     res.json({ started: true });
+  })
+);
+
+/** 回测运行列表(轻量,不含 result);表缺失/未配库 → { available: false } */
+router.get(
+  '/backtest',
+  asyncHandler(async (req, res) => {
+    const limit = Number(req.query.limit);
+    res.json(await listBacktestRuns(Number.isFinite(limit) && limit > 0 ? Math.min(limit, 50) : 20));
+  })
+);
+
+/** 单轮回测全量结果(含曲线/成交/信号时间线) */
+router.get(
+  '/backtest/:id',
+  asyncHandler(async (req, res) => {
+    const id = String(req.params.id || '');
+    if (!/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).json({ error: '无效的运行 ID' });
+    const run = await getBacktestRun(id);
+    if (!run) return res.status(404).json({ error: '回测运行不存在' });
+    res.json(run);
+  })
+);
+
+/**
+ * 发起一轮策略回测(与 /run-cycle 同构的守卫):设置了 ADMIN_TOKEN 时需鉴权;
+ * 未设置时对所有人开放但共享全局冷却 —— 每轮回测对未命中缓存的历史文章逐篇
+ * 调用 LLM(真实花费),冷却取 30 分钟(比 run-cycle 严),文章量另有
+ * BACKTEST_MAX_ARTICLES 护栏。
+ */
+const ANON_BACKTEST_COOLDOWN_MS = 30 * 60_000;
+let lastAnonBacktestAt = 0;
+const SYMBOL_RE = /^[A-Z][A-Z0-9.\-]{0,9}$/;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+router.post(
+  '/backtest/run',
+  createAuthRateLimiter('api'),
+  asyncHandler(async (req, res) => {
+    if (config.adminToken) {
+      if (!safeTokenEqual(req.headers['x-admin-token'], config.adminToken)) {
+        console.warn(`[api] x-admin-token 校验失败 ip=${req.ip} path=${req.path}`);
+        return res.status(403).json({ error: '需要有效的 x-admin-token' });
+      }
+    } else {
+      const wait = ANON_BACKTEST_COOLDOWN_MS - (Date.now() - lastAnonBacktestAt);
+      if (wait > 0) {
+        return res
+          .status(429)
+          .json({ error: `回测触发过于频繁,请 ${Math.ceil(wait / 60_000)} 分钟后再试` });
+      }
+    }
+    if (backtestStatus.running) {
+      return res.status(409).json({ error: '当前已有一轮回测在运行中' });
+    }
+
+    const symbols = [
+      ...new Set(
+        (Array.isArray(req.body?.symbols) ? req.body.symbols : [])
+          .map((s) => String(s || '').trim().toUpperCase())
+          .filter(Boolean)
+      ),
+    ];
+    if (!symbols.length || symbols.length > config.backtestMaxSymbols) {
+      return res.status(400).json({ error: `标的数需在 1~${config.backtestMaxSymbols} 之间` });
+    }
+    const bad = symbols.find((s) => !SYMBOL_RE.test(s));
+    if (bad) return res.status(400).json({ error: `无效的标的代码: ${bad}` });
+
+    const from = String(req.body?.from || '');
+    const to = String(req.body?.to || '');
+    if (!DATE_RE.test(from) || !DATE_RE.test(to) || from >= to) {
+      return res.status(400).json({ error: '时间窗口无效:需要 from < to(YYYY-MM-DD)' });
+    }
+    if (to > etDayKey()) return res.status(400).json({ error: '结束日期不能晚于今天(美东)' });
+    const spanDays = (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000;
+    if (spanDays > config.backtestMaxDays) {
+      return res.status(400).json({ error: `窗口跨度超过上限 ${config.backtestMaxDays} 天` });
+    }
+
+    const rawCost = req.body?.cost_bps;
+    const costBps = rawCost === undefined || rawCost === null || rawCost === ''
+      ? config.backtestCostBps
+      : Number(rawCost);
+    if (!Number.isFinite(costBps) || costBps < 0 || costBps > 100) {
+      return res.status(400).json({ error: '交易成本需在 0~100 基点之间' });
+    }
+
+    try {
+      const { runId } = await startBacktest({ symbols, from, to, costBps });
+      // 冷却只对成功发起的轮次计数:失败(缺迁移/未配库)不该烧掉匿名窗口
+      if (!config.adminToken) lastAnonBacktestAt = Date.now();
+      res.json({ started: true, run_id: runId });
+    } catch (err) {
+      // startBacktest 以 err.status 标记可预期失败(409 并发 / 503 缺迁移 / 未配库)
+      res.status(err.status || 500).json({ error: err.message });
+    }
   })
 );
 

@@ -66,7 +66,8 @@ export function parseFmpPublishedDate(value) {
   return new Date(`${datePart}T${timePart}:00-05:00`).toISOString();
 }
 
-function normalizeFmpItem(item, source) {
+// export:回测(backtestService)复用同一套归一化 —— 来源评分与 ET 时间解析必须与实盘一致
+export function normalizeFmpItem(item, source) {
   return withCredibility({
     url: item.url,
     title: item.title,

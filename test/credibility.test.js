@@ -113,3 +113,31 @@ test('computeTier:程度×范围的四档矩阵', () => {
   assert.equal(computeTier('low', 'wide'), 3);
   assert.equal(computeTier('low', 'narrow'), 4);
 });
+
+test('recencyScore:nowMs 锚定评估时刻(回测重析历史新闻钉时效 1.0)', () => {
+  const publishedAt = '2024-03-08T14:30:00Z';
+  const publishMs = new Date(publishedAt).getTime();
+  // 评估时刻 = 发布时刻:年龄 0 → 满分
+  assert.equal(recencyScore(publishedAt, publishMs), 1);
+  // 发布后 30 分钟内仍满分
+  assert.equal(recencyScore(publishedAt, publishMs + 30 * 60_000), 1);
+  // 发布后 24 小时以上衰减到地板 0.5
+  assert.equal(recencyScore(publishedAt, publishMs + 30 * 3600_000), 0.5);
+  // 不传 nowMs 时保持旧行为:两年前的文章按当前时间衰减到地板
+  assert.equal(recencyScore(publishedAt), 0.5);
+});
+
+test('computeFinalConfidence:nowMs 透传时效锚点', () => {
+  const publishedAt = '2024-03-08T14:30:00Z';
+  const nowMs = new Date(publishedAt).getTime();
+  // 0.85 × 0.8 × 1.0(时效钉满)× 0.9(二档)= 0.612
+  assert.equal(
+    computeFinalConfidence({ sourceScore: 0.85, confidence: 0.8, publishedAt, tier: 2, nowMs }),
+    0.612
+  );
+  // 同参数不传 nowMs:历史文章按当前时间衰减到 0.5 → 0.306
+  assert.equal(
+    computeFinalConfidence({ sourceScore: 0.85, confidence: 0.8, publishedAt, tier: 2 }),
+    0.306
+  );
+});

@@ -437,7 +437,8 @@ begin
     shadow_portfolios,
     shadow_trades,
     shadow_snapshots,
-    trade_decisions
+    trade_decisions,
+    backtest_runs
   restart identity cascade;
 
   -- 宏观状态复位(单行表不 truncate,避免丢失行)
@@ -786,3 +787,52 @@ alter table symbol_reference enable row level security;
 create policy "public read symbol_reference" on symbol_reference for select using (true);
 create index if not exists idx_news_symbols_gin on news_articles using gin (symbols);
 create index if not exists idx_analyses_sentiment_tier on news_analyses (sentiment, tier);
+
+-- 策略回测(032):LLM 重析历史新闻 vs 经典量化基线(参照 TradingAgents 论文验证方法)。
+-- backtest_runs 随管理重置清空;backtest_analyses 为逐文章 LLM 分析缓存,重置保留
+-- (昂贵外部派生数据,沿 symbol_reference 先例);error 已脱敏,两表公开可读。
+create table if not exists backtest_runs (
+  id uuid primary key,                       -- 服务端 randomUUID 生成(沿 cycle_runs.run_id 先例)
+  status text not null default 'running'
+    check (status in ('running', 'completed', 'failed', 'cancelled')),
+  params jsonb not null,                     -- {symbols, from, to, cost_bps, thresholds, strategy_params}
+  progress jsonb,                            -- {phase, symbol, analyzed, total}
+  result jsonb,                              -- 完成后:逐标的 {signals, strategies:{ai|buy_hold|macd|kdj_rsi|zmr|sma}}
+  error text,                                -- 失败原因(已脱敏)
+  llm_calls integer not null default 0,
+  llm_prompt_tokens bigint not null default 0,
+  llm_completion_tokens bigint not null default 0,
+  llm_cost_usd numeric,
+  created_at timestamptz not null default now(),
+  completed_at timestamptz
+);
+create index if not exists idx_backtest_runs_created on backtest_runs (created_at desc);
+alter table backtest_runs enable row level security;
+create policy "public read backtest_runs" on backtest_runs for select using (true);
+
+create table if not exists backtest_analyses (
+  id bigint generated always as identity primary key,
+  url text not null,
+  symbol text not null,                      -- 查询标的(prompt 输入的一部分,与 analysis_symbol 可能不同)
+  prompt_version smallint not null,          -- deepseek.js#PROMPT_VERSIONS.analyst,prompt 变更时 bump 使旧缓存失效
+  published_at timestamptz,
+  title text,
+  source text,                               -- 归一来源渠道(fmp-stock 等)
+  source_domain text,
+  source_score numeric,
+  publisher text,
+  relevant boolean,
+  analysis_symbol text,                      -- 分析师认定的新闻主体代码(可能≠查询标的,回放时不一致即丢弃)
+  sentiment text,
+  tier smallint,
+  confidence numeric,
+  reasoning text,
+  llm_prompt_tokens integer,
+  llm_completion_tokens integer,
+  llm_latency_ms integer,
+  created_at timestamptz not null default now(),
+  unique (url, symbol, prompt_version)       -- 缓存命中键
+);
+create index if not exists idx_backtest_analyses_lookup on backtest_analyses (symbol, published_at);
+alter table backtest_analyses enable row level security;
+create policy "public read backtest_analyses" on backtest_analyses for select using (true);

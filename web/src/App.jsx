@@ -6,6 +6,7 @@ import {
   ExperimentOutlined,
   FallOutlined,
   GlobalOutlined,
+  HistoryOutlined,
   MoonOutlined,
   ReadOutlined,
   RiseOutlined,
@@ -21,6 +22,7 @@ import TradesPage from './components/TradesPage.jsx';
 import MacroPage from './components/MacroPage.jsx';
 import SignalStatsPage from './components/SignalStatsPage.jsx';
 import AblationPage from './components/AblationPage.jsx';
+import BacktestPage from './components/BacktestPage.jsx';
 import SymbolModal from './components/SymbolModal.jsx';
 import AdminPage from './components/AdminPage.jsx';
 import StrategyPage from './components/StrategyPage.jsx';
@@ -32,6 +34,7 @@ const TABS = [
   { key: 'macro', label: '宏观', icon: <GlobalOutlined /> },
   { key: 'signals', label: '信号质量', icon: <AimOutlined /> },
   { key: 'ablation', label: '消融实验', icon: <ExperimentOutlined /> },
+  { key: 'backtest', label: '策略回测', icon: <HistoryOutlined /> },
 ];
 
 // 深浅主题切换控件(图标,无 emoji)
@@ -65,6 +68,8 @@ function MainApp() {
   const [newsVersion, setNewsVersion] = useState(0);
   // 宏观页同理:SSE macro 事件只递增版本号,页面自行拉取
   const [macroVersion, setMacroVersion] = useState(0);
+  // 回测页:SSE backtest 事件携带进度,直接透传给页面(版本号 + 最近一次进度载荷)
+  const [backtestEvent, setBacktestEvent] = useState(null);
   const [stats, setStats] = useState(null);
   const [performance, setPerformance] = useState(null);
   const [error, setError] = useState(null);
@@ -196,6 +201,12 @@ function MainApp() {
         }
       } catch { /* 忽略畸形数据 */ }
     });
+    // 回测进度/完成:载荷直接给回测页(进度条实时化;完成/失败触发列表重拉)
+    es.addEventListener('backtest', (e) => {
+      try {
+        setBacktestEvent(JSON.parse(e.data));
+      } catch { /* 忽略畸形数据 */ }
+    });
     // 管理后台切换了展示主账本:净值/指标/交易记录整体换源,一次全量刷新原子切换
     // (否则 stats/trades 要等下一次成交事件才换,且净值图会新旧账本点混线)
     es.addEventListener('ledger', () => refresh());
@@ -317,6 +328,7 @@ function MainApp() {
         {tab === 'macro' && <MacroPage version={macroVersion} />}
         {tab === 'signals' && <SignalStatsPage />}
         {tab === 'ablation' && <AblationPage version={macroVersion} onSymbolClick={setActiveSymbol} />}
+        {tab === 'backtest' && <BacktestPage event={backtestEvent} onSymbolClick={setActiveSymbol} />}
       </main>
 
       <footer className="footer">模拟交易,不构成投资建议</footer>
