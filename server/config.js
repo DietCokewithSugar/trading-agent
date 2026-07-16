@@ -285,6 +285,30 @@ export const config = {
   // 影子净值快照最小间隔(分钟,搭车主快照循环并自行限频)
   shadowSnapshotMinutes: 10,
 
+  // ── 策略回测(032)──
+  // 参照 TradingAgents 论文验证方法:LLM 重析历史新闻得到 AI 策略曲线,
+  // 与经典基线(买入持有/MACD/KDJ+RSI/ZMR/SMA)同窗对比;纯观测层,表缺失自动停用。
+  // 触发经 POST /api/backtest/run(配置 ADMIN_TOKEN 时需鉴权,否则匿名共享全局冷却)
+  // 单轮回测的标的数与窗口跨度上限
+  backtestMaxSymbols: num(process.env.BACKTEST_MAX_SYMBOLS, 5),
+  backtestMaxDays: num(process.env.BACKTEST_MAX_DAYS, 366),
+  // 单轮历史新闻总量上限(成本护栏:超限直接判失败并提示缩小窗口/减少标的;
+  // 未命中缓存的文章每篇一次 LLM 调用)
+  backtestMaxArticles: num(process.env.BACKTEST_MAX_ARTICLES, 2000),
+  // 历史新闻 LLM 重析的并发数
+  backtestLlmConcurrency: num(process.env.BACKTEST_LLM_CONCURRENCY, 3),
+  // 每笔双边固定交易成本(基点,对所有策略一致;默认 0 与论文口径对齐)
+  backtestCostBps: num0(process.env.BACKTEST_COST_BPS, 0),
+  // 经典基线参数(代码常量,沿 marketCheckParams 先例不逐项开 env)。
+  // KDJ+RSI 组合规则论文未给出精确定义,取常用超卖进/超买出口径,可在此调整
+  backtestParams: {
+    macd: { fast: 12, slow: 26, signal: 9 },
+    kdj: { period: 9, k: 3, d: 3, oversold: 20, overbought: 80 },
+    rsi: { period: 14, oversold: 30, overbought: 70 },
+    zmr: { period: 20, entryZ: -1, exitZ: 0 },
+    sma: { fast: 10, slow: 30 },
+  },
+
   // 关注列表(用于 Yahoo RSS 抓取),持仓股票会自动加入
   watchlist: (process.env.WATCHLIST || 'AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA')
     .split(',')

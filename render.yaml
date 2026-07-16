@@ -193,6 +193,17 @@ services:
         value: "true"
       - key: HALT_POLL_SECONDS
         value: "60"
+      # 策略回测(032):LLM 重析历史新闻 vs 经典量化基线,触发需 ADMIN_TOKEN(未配置时匿名共享全局冷却)
+      - key: BACKTEST_MAX_SYMBOLS
+        value: "5"
+      - key: BACKTEST_MAX_DAYS
+        value: "366"
+      - key: BACKTEST_MAX_ARTICLES
+        value: "2000"
+      - key: BACKTEST_LLM_CONCURRENCY
+        value: "3"
+      - key: BACKTEST_COST_BPS
+        value: "0"
       - key: TRUST_PROXY
         value: "1" # Render 单层反向代理;直连部署须设 0
       - key: ADMIN_TOKEN

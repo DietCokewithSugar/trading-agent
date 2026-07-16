@@ -241,6 +241,47 @@ export async function getHistoricalPricesAdjusted(symbol, from, to, maxAgeMs = 3
   return result;
 }
 
+/**
+ * 历史日线 OHLC(full 端点,回测用):KDJ 需要 high/low,缺口感知的止损/止盈
+ * 成交判定需要 open/high/low。行级过滤 OHLC 均为有限正数,按日期升序返回
+ * [{ date, open, high, low, close, volume }]。注意该端点为拆股调整、非股息调整口径。
+ */
+export async function getHistoricalPricesFull(symbol, from, to, maxAgeMs = 3600_000) {
+  const key = `${symbol.toUpperCase()}:${from}:${to}:full`;
+  const cached = historyCache.get(key);
+  if (cached && Date.now() - cached.at < maxAgeMs) return cached.rows;
+
+  const data = await fmpGet('/historical-price-eod/full', {
+    symbol: symbol.toUpperCase(),
+    from,
+    to,
+  });
+  const ok = (v) => typeof v === 'number' && Number.isFinite(v) && v > 0;
+  const rows = (Array.isArray(data) ? data : [])
+    .filter((r) => r && r.date && ok(r.open) && ok(r.high) && ok(r.low) && ok(r.close))
+    .map((r) => ({ date: r.date, open: r.open, high: r.high, low: r.low, close: r.close, volume: r.volume }))
+    .sort((a, b) => (a.date < b.date ? -1 : 1));
+  historyCache.set(key, { rows, at: Date.now() });
+  return rows;
+}
+
+/**
+ * 历史个股新闻(带时间窗分页,回测专用;现役轮询仍走 news/stock-latest)。
+ * 返回 FMP 原始数组(空数组兜底),归一化由调用方走 newsService#normalizeFmpItem,
+ * 与实盘同一套来源评分/时间解析。不做进程内缓存 —— 逐文章的分析缓存落
+ * backtest_analyses 表,页级缓存无意义。部分低档套餐无该端点(402/403),由调用方降级。
+ */
+export async function getHistoricalStockNews(symbol, from, to, { page = 0, limit = 100 } = {}) {
+  const data = await fmpGet('/news/stock', {
+    symbols: symbol.toUpperCase(),
+    from,
+    to,
+    page,
+    limit,
+  });
+  return Array.isArray(data) ? data : [];
+}
+
 /** 清空进程内缓存(管理后台数据重置时调用,确保重置后拿到的都是新数据) */
 export function clearCaches() {
   quoteCache.clear();

@@ -189,10 +189,14 @@ export function isSelfIssued(article) {
   return isPressRelease(article) || article?.source === 'sec-filings';
 }
 
-/** 时效分:1 小时内 1.0,随后线性衰减,24 小时以上 0.5;无发布时间按 0.7 */
-export function recencyScore(publishedAt) {
+/**
+ * 时效分:1 小时内 1.0,随后线性衰减,24 小时以上 0.5;无发布时间按 0.7。
+ * nowMs 为"评估时刻"(默认当前时间):回测重析历史新闻时传发布时刻,
+ * 把时效钉在 1.0(分析在名义上发生于发布当时),否则历史文章会全部衰减到 0.5
+ */
+export function recencyScore(publishedAt, nowMs = Date.now()) {
   if (!publishedAt) return 0.7;
-  const ageHours = (Date.now() - new Date(publishedAt).getTime()) / 3600_000;
+  const ageHours = (nowMs - new Date(publishedAt).getTime()) / 3600_000;
   if (!Number.isFinite(ageHours) || ageHours < 0) return 0.7;
   if (ageHours <= 1) return 1;
   return Math.max(0.5, 1 - (0.5 * (ageHours - 1)) / 23);
@@ -204,11 +208,12 @@ const TIER_MATERIALITY = { 1: 1, 2: 0.9, 3: 0.75, 4: 0.6 };
 /**
  * 综合置信度 = 来源可信度 × 分析置信度 × 时效分 × 事件档位分(0~1,保留三位)。
  * 分析置信度缺失时按 0.7 处理(与仓位缩放链的缺省一致)。
+ * nowMs 透传给时效分(回测重析历史新闻时传发布时刻,时效=1.0)。
  */
-export function computeFinalConfidence({ sourceScore, confidence, publishedAt, tier }) {
+export function computeFinalConfidence({ sourceScore, confidence, publishedAt, tier, nowMs }) {
   const src = Number.isFinite(Number(sourceScore)) ? Number(sourceScore) : UNKNOWN_WITH_URL_SCORE;
   const conf = Number.isFinite(Number(confidence)) ? Number(confidence) : 0.7;
   const materiality = TIER_MATERIALITY[tier] ?? 0.6;
-  const value = src * conf * recencyScore(publishedAt) * materiality;
+  const value = src * conf * recencyScore(publishedAt, nowMs ?? Date.now()) * materiality;
   return Math.round(Math.min(Math.max(value, 0), 1) * 1000) / 1000;
 }
