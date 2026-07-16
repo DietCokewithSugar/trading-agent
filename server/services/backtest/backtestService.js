@@ -134,6 +134,31 @@ async function saveCachedAnalysis(row) {
   }
 }
 
+/** 'YYYY-MM-DD' + n 天(纯日历运算,暖机回退用;与 aiSignals.js 私有实现同式) */
+function shiftDate(dateStr, days) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  return new Date(Date.UTC(y, m - 1, d) + days * 86_400_000).toISOString().slice(0, 10);
+}
+
+/**
+ * 指标暖机根数:取各基线中最长的收敛需求(MACD 慢线+信号线 / SMA 慢线 / ZMR 窗口 /
+ * RSI 首值 / KDJ 窗口)加 5 根余量(默认参数下 = 40)。日线预取从窗口起点向前回退
+ * 约 warmupBars×1.6+10 个日历日(交易日→日历日换算 + 假日余量)——否则短窗口
+ * (如 1 个月 21 根)会被暖机期整段吃掉,MACD/SMA 全程无信号。
+ */
+function warmupBarCount(params) {
+  const { macd = {}, sma = {}, zmr = {}, rsi = {}, kdj = {} } = params || {};
+  return (
+    Math.max(
+      (macd.slow ?? 26) + (macd.signal ?? 9),
+      sma.slow ?? 30,
+      zmr.period ?? 20,
+      (rsi.period ?? 14) + 1,
+      kdj.period ?? 9
+    ) + 5
+  );
+}
+
 /** 抓取一个标的在窗口内的全部历史新闻(分页至短页),按 url 去重 */
 async function fetchSymbolNews(symbol, from, to, budget) {
   const byUrl = new Map();
@@ -214,14 +239,19 @@ async function runBacktest(runId, { symbols, from, to, costBps }, abort) {
   const startedAt = Date.now();
   const llm = { calls: 0, promptTokens: 0, completionTokens: 0, cost: 0 };
   try {
-    // ── 阶段 1:OHLC 日线 ──
+    // ── 阶段 1:OHLC 日线(带指标暖机预取)──
     const barsBySymbol = new Map();
     const symbolErrors = new Map();
+    const warmupBars = warmupBarCount(config.backtestParams);
+    const warmupFrom = shiftDate(from, -(Math.ceil(warmupBars * 1.6) + 10));
     for (const symbol of symbols) {
       broadcastProgress(runId, 'running', { phase: 'bars', symbol }, { force: true });
       try {
-        const bars = await getHistoricalPricesFull(symbol, from, to);
-        if (bars.length < 2) throw new Error('历史日线不足 2 根(窗口过短或标的无数据)');
+        const bars = await getHistoricalPricesFull(symbol, warmupFrom, to);
+        // 有效性按窗口内 K 线判定(暖机段是新上市标的允许缺失的加分项,不是硬门槛)
+        if (bars.filter((b) => b.date >= from).length < 2) {
+          throw new Error('窗口内历史日线不足 2 根(窗口过短或标的无数据)');
+        }
         barsBySymbol.set(symbol, bars);
       } catch (err) {
         console.warn(`[backtest] ${symbol} 日线获取失败: ${err.message}`);
@@ -340,6 +370,7 @@ async function runBacktest(runId, { symbols, from, to, costBps }, abort) {
           takeProfitPercent: config.takeProfitPercent,
           takeProfitStepPercent: config.takeProfitStepPercent,
           maxHoldHours: config.maxHoldHours,
+          windowStart: from,
         })
       );
       for (const [key, gen] of Object.entries(BASELINE_STRATEGIES)) {
@@ -351,13 +382,17 @@ async function runBacktest(runId, { symbols, from, to, costBps }, abort) {
             initialValue: INITIAL_VALUE,
             costBps,
             entryAtFirstBar: key === 'buy_hold',
+            windowStart: from,
           })
         );
       }
+      // 元数据按窗口内 K 线计(暖机段只服务指标收敛,不进展示口径)
+      const windowBars = bars.filter((b) => b.date >= from);
       resultSymbols[symbol] = {
-        bars_count: bars.length,
-        first_date: bars[0].date,
-        last_date: bars[bars.length - 1].date,
+        bars_count: windowBars.length,
+        first_date: windowBars[0]?.date ?? null,
+        last_date: windowBars[windowBars.length - 1]?.date ?? null,
+        warmup_bars: bars.length - windowBars.length,
         articles: (articlesBySymbol.get(symbol) || []).length,
         signals: { count: signals.length, dropped, timeline: signals.slice(0, 200) },
         strategies,
