@@ -75,7 +75,7 @@ async function updateRun(runId, patch) {
 }
 
 /** 简单并发池:并发 worker 消费同一游标;fatal/中止置位后不再取新任务(在飞的自然收尾) */
-async function runPool(items, concurrency, worker, abort) {
+async function runPool(items, concurrency, worker, abort = { aborted: false }) {
   let cursor = 0;
   let fatal = null;
   const lanes = Array.from({ length: Math.max(1, Math.min(concurrency, items.length)) }, async () => {
@@ -306,7 +306,7 @@ async function runBacktest(runId, { symbols, from, to, costBps }, abort) {
         await saveCachedAnalysis(row);
         analyzed += 1;
         broadcastProgress(runId, 'running', { phase: 'analyze', symbol, analyzed, total: budget.used });
-      });
+      }, abort);
       analysesBySymbol.set(symbol, rows);
       llm.cost = estimateLlmCost({ promptTokens: llm.promptTokens, completionTokens: llm.completionTokens });
       await updateRun(runId, {
