@@ -9,19 +9,25 @@ import { recordLlmCall, recordProviderError } from './metrics.js';
 async function chatJSONWithMeta(messages, { temperature = 0.2, maxTokens = 1200, purpose = 'other' } = {}) {
   const startedAt = Date.now();
   try {
+    const body = {
+      model: config.deepseekModel,
+      messages,
+      temperature,
+      max_tokens: maxTokens,
+      response_format: { type: 'json_object' },
+    };
+    // V4 起不传 thinking 默认开启思考模式(忽略 temperature,时延/输出成本大增),
+    // 默认显式关闭以保持旧 deepseek-chat 的非思考行为;auto=不传,交给接口默认
+    if (config.deepseekThinking !== 'auto') {
+      body.thinking = { type: config.deepseekThinking };
+    }
     const res = await fetch(`${config.deepseekBaseUrl}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${config.deepseekApiKey}`,
       },
-      body: JSON.stringify({
-        model: config.deepseekModel,
-        messages,
-        temperature,
-        max_tokens: maxTokens,
-        response_format: { type: 'json_object' },
-      }),
+      body: JSON.stringify(body),
       signal: AbortSignal.timeout(90000),
     });
     if (!res.ok) {

@@ -325,9 +325,10 @@ cd web && npm run dev      # 终端 2:启动 Vite :5173(已配置 /api 代理)
 | `FMP_API_KEY` | — | FMP API Key(必填) |
 | `DEEPSEEK_API_KEY` | — | DeepSeek API Key(必填) |
 | `SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` | — | Supabase 连接信息(必填) |
-| `DEEPSEEK_MODEL` | `deepseek-chat` | 模型 ID,按 DeepSeek 官方文档可换成更新的模型 |
+| `DEEPSEEK_MODEL` | `deepseek-v4-flash` | 模型 ID,按 DeepSeek 官方文档可换成更新的模型;旧别名 `deepseek-chat`/`deepseek-reasoner` 已于 2026-07-24 停用 |
 | `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | DeepSeek 接口地址(代理/兼容网关时覆盖) |
-| `DEEPSEEK_COST_PER_1M_INPUT` / `DEEPSEEK_COST_PER_1M_OUTPUT` | `0.56` / `1.68` | LLM 成本估算单价(美元/百万 token),仅用于管理页运行指标的成本展示;默认为 deepseek-chat 牌价的缓存未命中口径(估算上限) |
+| `DEEPSEEK_THINKING` | `disabled` | V4 思考模式:`disabled` 非思考(等价旧 `deepseek-chat`;V4 不传该字段默认开思考,思考模式会忽略 temperature 且时延/成本大增)/ `enabled` 思考 / `auto` 请求不携带该字段(仅供不识别它的第三方兼容网关) |
+| `DEEPSEEK_COST_PER_1M_INPUT` / `DEEPSEEK_COST_PER_1M_OUTPUT` | `0.14` / `0.28` | LLM 成本估算单价(美元/百万 token),仅用于管理页运行指标的成本展示;默认为 deepseek-v4-flash 牌价的缓存未命中口径(估算上限) |
 | `NEWS_POLL_SECONDS` | `20` | 个股新闻轮询间隔(秒),已去重的新闻不会重复分析 |
 | `QUOTE_PUSH_SECONDS` | `5` | 实时报价 SSE 推送间隔(秒),仅有访客在线时拉取 |
 | `SNAPSHOT_SECONDS` | `60` | 净值快照间隔(秒),决定盈亏折线图粒度;休市时段自动降频到每 30 分钟一条 |

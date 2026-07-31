@@ -17,6 +17,13 @@ function parseTrustProxy(value) {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 1;
 }
 
+// DeepSeek V4 思考模式解析:disabled/enabled=显式随请求下发,auto=请求不携带 thinking 字段
+// (交给接口默认值;仅供不识别该字段的第三方兼容网关使用)。非法值回退 disabled
+function parseThinking(value) {
+  const s = String(value ?? '').trim().toLowerCase();
+  return ['disabled', 'enabled', 'auto'].includes(s) ? s : 'disabled';
+}
+
 // 固定止盈/止损百分比(相对加权平均成本;代码强制,覆盖 LLM 的止损建议)。
 // 提为模块级常量:shadowDefaultStops 需要在对象字面量内引用同一组值
 const stopLossPercent = num(process.env.STOP_LOSS_PERCENT, 2);
@@ -34,13 +41,19 @@ export const config = {
   // DeepSeek — OpenAI 兼容接口
   deepseekApiKey: process.env.DEEPSEEK_API_KEY || '',
   deepseekBaseUrl: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
-  // 模型 ID 可配置,例如 deepseek-chat / deepseek-reasoner,或官方文档中最新的模型名
-  deepseekModel: process.env.DEEPSEEK_MODEL || 'deepseek-chat',
+  // 模型 ID 可配置,默认 V4 Flash 正式版(2026-07-31 上线)。旧别名 deepseek-chat /
+  // deepseek-reasoner 已于 2026-07-24 停用(请求直接报错);V4 起同一模型内
+  // 思考/非思考由请求参数 thinking 切换(见 deepseekThinking),不再按模型名区分
+  deepseekModel: process.env.DEEPSEEK_MODEL || 'deepseek-v4-flash',
+  // 思考模式:disabled(默认)=非思考,等价旧 deepseek-chat 行为——本项目全部调用都在
+  // 定时热路径上且靠 temperature 控制输出,而 V4 不传该字段默认"开启思考",思考模式
+  // 会忽略 temperature/top_p 且时延与输出 token 大增;enabled=思考;auto=不传该字段
+  deepseekThinking: parseThinking(process.env.DEEPSEEK_THINKING),
   // LLM 成本估算单价(美元/百万 token),仅用于管理页运行指标展示。
-  // 默认值为 deepseek-chat 牌价的缓存未命中口径(估算上限,命中缓存的输入实际更便宜),
+  // 默认值为 deepseek-v4-flash 牌价的缓存未命中口径(估算上限,命中缓存的输入实际更便宜),
   // 牌价调整或更换模型时通过环境变量覆盖
-  deepseekCostPer1MInput: num0(process.env.DEEPSEEK_COST_PER_1M_INPUT, 0.56),
-  deepseekCostPer1MOutput: num0(process.env.DEEPSEEK_COST_PER_1M_OUTPUT, 1.68),
+  deepseekCostPer1MInput: num0(process.env.DEEPSEEK_COST_PER_1M_INPUT, 0.14),
+  deepseekCostPer1MOutput: num0(process.env.DEEPSEEK_COST_PER_1M_OUTPUT, 0.28),
 
   // Supabase(服务端使用 service_role key,绕过 RLS)
   supabaseUrl: process.env.SUPABASE_URL || '',

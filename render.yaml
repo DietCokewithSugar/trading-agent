@@ -41,14 +41,18 @@ services:
       # 券商净值对照快照间隔(秒,下限 10;休市自动降回 10 分钟一条)
       - key: BROKER_SNAPSHOT_SECONDS
         value: "30"
+      # V4 Flash 正式版;旧别名 deepseek-chat/deepseek-reasoner 已于 2026-07-24 停用
       - key: DEEPSEEK_MODEL
-        value: deepseek-chat
+        value: deepseek-v4-flash
       - key: DEEPSEEK_BASE_URL
         value: "https://api.deepseek.com"
+      # V4 思考模式开关:disabled=非思考(等价旧 deepseek-chat,不传则 V4 默认开思考)
+      - key: DEEPSEEK_THINKING
+        value: "disabled"
       - key: DEEPSEEK_COST_PER_1M_INPUT
-        value: "0.56"
+        value: "0.14"
       - key: DEEPSEEK_COST_PER_1M_OUTPUT
-        value: "1.68"
+        value: "0.28"
       # 提速档(评估后调优):发现延迟减半;LLM 成本由新闻量决定,轮询更快只是更快清积压
       - key: NEWS_POLL_SECONDS
         value: "10"
