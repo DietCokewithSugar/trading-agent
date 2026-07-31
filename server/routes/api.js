@@ -38,6 +38,7 @@ import {
   getRun as getBacktestRun,
   backtestStatus,
 } from '../services/backtest/backtestService.js';
+import { getBoard as getValuationBoard } from '../services/valuationBoard.js';
 
 const router = Router();
 
@@ -298,6 +299,19 @@ router.get(
     }
     const days = Number(req.query.days);
     res.json(await getMacroHistory(Number.isFinite(days) && days > 0 ? days : 120));
+  })
+);
+
+/**
+ * 估值看板(033,「估值看板」页签):纳指/标普/VIX 指标、六张极端买入信号卡
+ * (触发/接近/未触发)、五档定投倍数建议、今日市场结论与月度 VIX/PE 分位序列。
+ * 纯观察层:进程内缓存 + 每日收盘后调度强刷;任一数据源失败仅对应卡片降级,
+ * 接口恒 200;载荷按约定不含供应商名。未启用返回 available:false。
+ */
+router.get(
+  '/valuation',
+  asyncHandler(async (req, res) => {
+    res.json(await getValuationBoard());
   })
 );
 
@@ -658,6 +672,8 @@ router.get('/status', (req, res) => {
     halts: config.enableHaltGuard
       ? { active: haltState.activeCount, updated_at: haltState.fetchedAt }
       : null,
+    // 估值看板(033)开关状态
+    valuationBoard: config.enableValuationBoard,
   });
 });
 

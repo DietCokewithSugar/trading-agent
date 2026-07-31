@@ -5,6 +5,7 @@ import {
   DashboardOutlined,
   ExperimentOutlined,
   FallOutlined,
+  FundOutlined,
   GlobalOutlined,
   HistoryOutlined,
   MoonOutlined,
@@ -26,12 +27,14 @@ import BacktestPage from './components/BacktestPage.jsx';
 import SymbolModal from './components/SymbolModal.jsx';
 import AdminPage from './components/AdminPage.jsx';
 import StrategyPage from './components/StrategyPage.jsx';
+import ValuationPage from './components/ValuationPage.jsx';
 
 const TABS = [
   { key: 'dashboard', label: '仪表盘', icon: <DashboardOutlined /> },
   { key: 'news', label: '新闻分析', icon: <ReadOutlined /> },
   { key: 'trades', label: '交易记录', icon: <SwapOutlined /> },
   { key: 'macro', label: '宏观', icon: <GlobalOutlined /> },
+  { key: 'valuation', label: '估值看板', icon: <FundOutlined /> },
   { key: 'signals', label: '信号质量', icon: <AimOutlined /> },
   { key: 'ablation', label: '消融实验', icon: <ExperimentOutlined /> },
   { key: 'backtest', label: '策略回测', icon: <HistoryOutlined /> },
@@ -326,6 +329,7 @@ function MainApp() {
           <TradesPage trades={trades} macroVersion={macroVersion} onSymbolClick={setActiveSymbol} />
         )}
         {tab === 'macro' && <MacroPage version={macroVersion} />}
+        {tab === 'valuation' && <ValuationPage />}
         {tab === 'signals' && <SignalStatsPage />}
         {tab === 'ablation' && <AblationPage version={macroVersion} onSymbolClick={setActiveSymbol} />}
         {tab === 'backtest' && <BacktestPage event={backtestEvent} onSymbolClick={setActiveSymbol} />}

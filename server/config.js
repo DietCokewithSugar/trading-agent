@@ -322,6 +322,40 @@ export const config = {
     sma: { fast: 10, slow: 30 },
   },
 
+  // ── 估值看板(033)──
+  // 美股估值与情绪监控看板(独立页签):VIX/情绪/RSI/PE 分位/回撤/急跌六信号 +
+  // 定投倍数建议。纯展示观察层:不参与交易路径,任一数据源失败仅对应卡片降级。
+  enableValuationBoard: process.env.ENABLE_VALUATION_BOARD !== 'false',
+  // 每日自动刷新触发时间(美东 24 小时制,收盘后;调度器每 10 分钟探测,当日一次并落快照)
+  valuationRefreshEtHour: num0(process.env.VALUATION_REFRESH_ET_HOUR, 16),
+  // 看板载荷的进程内缓存时长(分钟):页面访问时超龄即重算,盘中数据保持基本新鲜
+  valuationCacheMinutes: num(process.env.VALUATION_CACHE_MINUTES, 30),
+  // 外部公开数据源(非官方、免密钥,fail-open:失败仅对应卡片「暂无数据」)。
+  // 接口变更时可用环境变量整体替换,返回 JSON 结构需兼容(见对应模块的解析注释)
+  fearGreedUrl:
+    process.env.FEAR_GREED_URL ||
+    'https://production.dataviz.cnn.io/index/fearandgreed/graphdata',
+  indexValuationUrl:
+    process.env.INDEX_VALUATION_URL || 'https://danjuanfunds.com/djapi/index_eva/dj',
+  // 信号阈值(代码常量,沿 marketCheckParams 先例不逐项开 env)。
+  // near 档统一为触发阈值的 75% 逼近带(nearRatio);方向见 valuationLogic.js#classifySignal
+  valuationBoard: {
+    vixTrigger: 30,          // VIX > 30 触发(恐慌)
+    fearGreedTrigger: 25,    // 情绪指数 < 25 触发(极度恐惧)
+    fearGreedCaution: 45,    // 情绪 < 45 视为偏谨慎(定投 1.5× 的辅助条件)
+    rsiTrigger: 22,          // RSI(6) < 22 触发(超卖)
+    rsiPeriod: 6,
+    pePctTrigger: 20,        // PE 历史分位 < 20% 触发(显著低估)
+    peHighPct: 70,           // PE 分位 ≥ 70% 估值偏高(定投 0.5×)
+    peExtremePct: 85,        // PE 分位 ≥ 85% 估值极高(定投 0.25×)
+    drawdownTrigger: -20,    // 52 周回撤 ≤ -20% 触发
+    crashTrigger: -12,       // 25 日急跌 ≤ -12% 触发
+    crashWindowDays: 25,     // 急跌观察窗(交易日)
+    nearRatio: 0.75,         // 接近档 = 触发阈值的 75% 逼近带
+    vixHistoryYears: 5,      // VIX 分位的回看窗口(年)
+    chartMonths: 6,          // 月度图窗口
+  },
+
   // 关注列表(用于 Yahoo RSS 抓取),持仓股票会自动加入
   watchlist: (process.env.WATCHLIST || 'AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA')
     .split(',')

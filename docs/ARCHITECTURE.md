@@ -64,7 +64,7 @@ Supabase 客户端单例(service_role key,绕过 RLS);未配置时抛中文错�
 前端永远不直连 Supabase,一切经 `/api/*`。
 
 ### `server/scheduler.js`
-十四个循环的装配点,全部经 `singleton.js#makeSingleton` 包装(防重入 + 卡死告警)。
+十五个循环的装配点,全部经 `singleton.js#makeSingleton` 包装(防重入 + 卡死告警)。
 循环与节奏:
 
 | 循环 | 间隔 | 时段条件 |
@@ -85,6 +85,7 @@ Supabase 客户端单例(service_role key,绕过 RLS);未配置时抛中文错�
 | 停牌监控 `pollTradingHalts` | `HALT_POLL_SECONDS`(60s,≥30s) | 休市跳过(`ENABLE_HALT_GUARD`;数据陈旧超约 3 倍间隔时 `isSymbolHalted` 自动 fail-open) |
 | 券商对照轮询 `pollMirrorOrders` | 60s | 回填对照单撮合结果(env key 与附加账户都缺席时函数内直接跳过) |
 | 券商净值快照 `takeBrokerSnapshots` | `BROKER_SNAPSHOT_SECONDS`(默认 30s,下限 10s) | env 账户 + 各附加账户逐个落 equity vs 内部净值快照;限频在函数内,休市自动降回 10 分钟,与对照轮询双入口先到先写 |
+| 估值看板刷新 `maybeDailyValuationRefresh` | 10 分钟探测 | 美东 ≥`VALUATION_REFRESH_ET_HOUR`(16 点,收盘后)每日一次:强刷载荷并 upsert 当日 `valuation_snapshots`;启动 15s 后预热一次载荷(`ENABLE_VALUATION_BOARD`) |
 
 ### `server/routes/api.js`
 全部公开只读接口 + 一个受控触发:`/health`、`/status`(脱敏的最近一轮摘要 + 停牌监控概览)、`/portfolio`
@@ -98,7 +99,8 @@ Supabase 客户端单例(service_role key,绕过 RLS);未配置时抛中文错�
 `/backtest`(回测运行列表,轻量无 result)、`/backtest/:id`(单轮全量结果)、
 `POST /backtest/run`(发起回测,032:与 run-cycle 同构守卫但匿名冷却 30 分钟且只对成功发起计数 ——
 每轮对未命中缓存的历史文章逐篇调 LLM;标的 ≤`BACKTEST_MAX_SYMBOLS`、窗口 ≤`BACKTEST_MAX_DAYS`、
-成本 0–100bps 服务端钳制,`backtestStatus.running` 单飞 409)。
+成本 0–100bps 服务端钳制,`backtestStatus.running` 单飞 409)、
+`/valuation`(估值看板,033:进程内缓存的完整看板载荷,任一子源失败仅对应字段 null、恒 200)。
 公开响应一律不暴露上游供应商名称(经 `metrics.js#sanitizeProviderText` 脱敏)。
 
 ### `server/routes/admin.js`
@@ -236,6 +238,20 @@ isPrimary 指定主对照账户(029,仅 mirror_actual 用途、至多一个,优�
 跳空按开盘价近似);LLM 非确定性(未命中缓存的重析可漂移,temp 0.2 + 缓存缓解);日线为拆股调整
 未含股息(六策略同口径内部可比,buy_hold 少计股息与论文价格回报口径一致)。
 
+### 4.9 估值看板(033)
+
+「估值看板」页签的服务层(log 前缀 `[valuation]`,`ENABLE_VALUATION_BOARD`):美股估值与情绪
+监控 —— 纳指/标普/VIX 指标、六项**极端买入信号**三态(触发/接近/未触发;接近 = 触发阈值的
+`nearRatio`(75%)逼近带)、五档定投倍数建议(纯代码规则,零 LLM)与今日市场结论。纯展示观察层:
+不参与交易链路,任一数据源失败仅对应卡片 `state:'na'`(接口恒 200);公开载荷不含供应商名。
+
+| 文件 | 职责与核心逻辑 |
+|---|---|
+| `valuationLogic.js` | 纯函数层(零 IO,全部单测):`classifySignal`(方向感知三态:above=VIX 高触发,below=RSI/情绪/PE 低触发、回撤/急跌负阈值含等号)、`buildSignals`(六卡组装,双指数指标取更极端一侧为主值)、`decideDcaTier`(任一绿→2×;任一黄或情绪<45→1.5×;PE 分位≥85%/≥70%→0.25×/0.5×,PE 缺失静默跳过;默认 1×)、`buildConclusion`(估值/情绪/趋势/操作建议四行文案,逐行降级)、`smaLast`/`dropFromRecentHigh`(25 日急跌)/`percentileRank`/`monthlyAverages`/`vixMonthlySeries`(月均+分位);阈值集中在 `config.valuationBoard`(代码常量) |
+| `fearGreed.js` | 恐惧贪婪情绪指数外部源(公开免密钥 JSON,浏览器 UA):6h 新鲜缓存 + in-flight 共享;失败限频告警并回退 48h 内旧值,超龄返回 null(卡片「暂无数据」);`FEAR_GREED_URL` 可整体替换接口 |
+| `indexValuation.js` | 指数估值外部源(标普500/纳指100 的 TTM PE 与历史分位):代码精确匹配 + 名称包含兜底,分位 0–1 自动归一为百分数,两指数独立降级;缓存/回退语义与情绪源一致;`INDEX_VALUATION_URL` 可替换 |
+| `valuationBoard.js` | 编排层:`getBoard()` 进程内缓存(`VALUATION_CACHE_MINUTES`,默认 30 分钟)超龄现算 —— `Promise.allSettled` 并发取 ^IXIC/^GSPC/^VIX 报价 + 380 天日线(RSI(6)/25日急跌/SMA200 兜底/52周兜底;报价的 priceAvg200/yearHigh/yearLow 优先)+ ^VIX 5 年日线(月均序列与现值 5 年分位,吃 fmp.js 1h 缓存)+ 两外部源 + 快照月度序列,绝不整体抛错;`maybeDailyValuationRefresh()` 调度探针:美东 ≥`VALUATION_REFRESH_ET_HOUR` 每日一次强刷并 upsert 当日 `valuation_snapshots`(核心数据全缺不记日戳,下轮重试;缺表一次告警后停用历史积累) |
+
 ## 5. 数据库(`supabase/`)
 
 ### `schema.sql`
@@ -261,6 +277,7 @@ isPrimary 指定主对照账户(029,仅 mirror_actual 用途、至多一个,优�
 | `broker_mirror_orders` / `broker_mirror_snapshots` | 券商模拟对照账本(021):逐笔镜像单与撮合回填(diff_bps 偏差)、账户净值对照快照;027 加 attempt/retry_of(重挂链记账)并把在途部分索引扩到 deferred,状态新增 deferred(休市顺延)/abandoned(追单放弃) |
 | `backtest_runs` | 策略回测运行(032):params/progress/result 全 jsonb,LLM 用量与估算成本,error 已脱敏;公开可读,管理重置清空 |
 | `backtest_analyses` | 回测逐文章分析缓存(032):`unique(url, symbol, prompt_version)` 命中键;公开可读,管理重置**不**清(昂贵外部派生缓存,沿 symbol_reference 先例;analyst prompt 变更须 bump `PROMPT_VERSIONS.analyst` 使旧缓存自然失效) |
+| `valuation_snapshots` | 估值看板日快照(033):每美东日一行(snap_date 唯一)的纳指100/标普500 PE 及分位、情绪指数、VIX——PE/情绪历史积累,喂月度图 PE 线;公开可读,管理重置**不**清(外部市场数据,沿 symbol_reference 先例);缺表只停历史积累 |
 | RPC | `execute_trade`(004,原子买卖:行锁、均价重算、按百分比重设止损止盈、现金增减)、`admin_reset_data`(005)、两个快照采样函数 |
 
 RLS 约定:全表启用,公开只读(除 `cycle_runs`/`trade_decisions`);服务端 service_role 全权。
@@ -285,7 +302,8 @@ broker_mirror_orders/snapshots 加 account_id/source_variant)→
 028 标的名录 + 新闻筛选索引(symbol_reference 表、GIN(symbols)、analyses(sentiment,tier))→
 029 券商主对照账户(broker_accounts.is_primary,至多一个)→
 031 前瞻收益 2d 口径(news_analyses.fwd_return_2d,回填待办索引改按 1d/2d;030 空缺)→
-032 策略回测(backtest_runs + backtest_analyses 两表,admin_reset_data 加 backtest_runs)。
+032 策略回测(backtest_runs + backtest_analyses 两表,admin_reset_data 加 backtest_runs)→
+033 估值看板(valuation_snapshots 日快照表;管理重置不清,不入 admin_reset_data)。
 
 ## 6. 前端(`web/`)
 
@@ -319,6 +337,7 @@ TradingView 开源的 lightweight-charts,其余图表 recharts;PnL 沿用美股�
 | `components/MacroHeatmap.jsx` | 宏观环境日历热力图:`/api/macro/history` 逐日序列 → 周列网格,分歧色阶(绿=risk_on/正分、红=risk_off·shock/负分、灰=中性,深浅按 |risk_score| 对齐聚合阈值),点选联动整页;`cellEncoding` 纯函数 |
 | `components/AblationPage.jsx` | 「消融实验」页:各变体净值曲线(窗口归一,ComparisonChart × 2——普通组 = 实盘+基础变体+SPY/现金,腾位组 = 实盘参照+全部止盈腾位孪生)、汇总对比、行展开(说明/胜率/持仓/成交)、券商模拟对照账本卡(021);页面可见时每 60s 静默刷新估值(影子符号不进 quotes 事件,量大不值盘外双倍配额) |
 | `components/BacktestPage.jsx` | 「策略回测」页(032):发起卡(标的 tags ≤5 / 窗口 RangePicker / 成本 bps / 管理令牌,预填 sessionStorage 会话令牌)、运行历史表(SSE `backtest` 进度实时化 + running 时 5s 兜底轮询)、逐标的 ComparisonChart(AI 主线品牌色高亮、买入持有虚线)+ 指标表(CR/年化/夏普/回撤/次数/胜率±CI)+ 可展开成交明细 + 信号漏斗(丢弃原因计数),页脚口径与免责说明 |
+| `components/ValuationPage.jsx` | 「估值看板」页(033):Segmented 三子视图——指数指标(纳指/标普/VIX 汇总卡 + 指标矩阵表)、情绪与说明(六张信号卡 `.sig-card*`:触发绿 `--up`/接近琥珀 `--alert`/未触发中性 + recharts ComposedChart 月度 VIX 月均柱与 VIX/PE 分位线)、策略与纪律(五档倍数 `.dca-tier*` 当前档绿框 + 今日结论 + 静态纪律清单);挂载时拉取 `/api/valuation` 一次(日频数据,无 SSE),外部源降级时顶部黄条提示,页脚免责声明 |
 | `components/FlashOnChange.jsx` | 数值变动闪烁通用组件:数值升/降时数字染 `--up`/`--down` 后 ~0.8s 渐回原色(key 重挂载保证连续变动重播;首挂载与 null 进出不闪)。只用于中性色数字(现价/总资产等),常驻红绿的盈亏文本豁免 |
 | `components/SessionBadge.jsx` | 非常规时段徽标(盘前/盘后 ±%):持仓表与候选池共用,保证两处显示口径一致;无盘外价或盘中不渲染 |
 | `components/AdminPage.jsx` | `#/admin`:令牌登录、运行指标、参数建议、决策回放、kill switch、手动触发、数据重置 |
@@ -359,10 +378,11 @@ TradingView 开源的 lightweight-charts,其余图表 recharts;PnL 沿用美股�
 | `backtestMetrics.test.js` | 回测绩效(夏普/回撤/年化/汇总与 Wilson CI) |
 | `backtestSignals.test.js` | 信号推导:实盘门镜像、执行日映射(DST/半日市/周末顺延)、自述折价、归并与冲突 |
 | `backtestEngine.test.js` | 撮合引擎:shift-1 因果、同根先止损、跳空开盘价、max_hold、020 刷新、成本 bps、数据缺口顺延 |
+| `valuationLogic.test.js` | 估值看板纯函数(033):三态分类(方向/逼近带/负阈值含等号)、六卡截图实值夹具、双指数取极端、定投档全优先级分支(PE 缺失静默跳过)、结论文案降级、月均/分位/急跌序列统计 |
 
 ## 8. 关键横切约定(改代码前必读)
 
-1. **日志前缀**按模块:`[cycle] [trader] [risk] [fmp] [event] [api] [scheduler] [admin] [memory] [review] [riskofficer] [queue] [signal] [metrics] [macro] [calendar] [pool] [allocator] [market] [shadow] [decision] [advisor] [quotes] [sec] [symref] [halts] [backtest]`;注释/日志/UI 文案一律简体中文,标识符英文。
+1. **日志前缀**按模块:`[cycle] [trader] [risk] [fmp] [event] [api] [scheduler] [admin] [memory] [review] [riskofficer] [queue] [signal] [metrics] [macro] [calendar] [pool] [allocator] [market] [shadow] [decision] [advisor] [quotes] [sec] [symref] [halts] [backtest] [valuation]`;注释/日志/UI 文案一律简体中文,标识符英文。
 2. **迁移容忍**:任何 schema 变更必须让旧库优雅降级(strip-and-retry 或警告一次后停用),新增迁移同时折入 schema.sql 并更新 README 部署清单。
 3. **公开面不暴露供应商**:FMP/DeepSeek/Yahoo/模型名只出现在文档与 token 门控的管理面。
 4. **新增纯逻辑先抽模块加测试**(sizing/eligibility/holding/rotation 先例);LLM 调用必须走 deepseek.js 并带 purpose,新 prompt 引用文章文本必须沿用 sanitizeUntrusted + UNTRUSTED_NOTE 框架;改交易员/风控官 prompt 文本要给 `PROMPT_VERSIONS` +1。
