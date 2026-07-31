@@ -72,6 +72,8 @@ export const api = {
   // 单票轻量报价:个股弹窗对 SSE 未覆盖符号的兜底轮询,不拉分析/交易历史
   quote: (symbol) => get(`/quote/${encodeURIComponent(symbol)}`),
   status: () => get('/status'),
+  // 估值看板(033):指数指标 / 极端买入信号 / 定投倍数建议
+  valuation: () => get('/valuation'),
   // 策略回测(032):列表 / 单轮全量 / 发起(服务端配置 ADMIN_TOKEN 时需带令牌)
   backtestRuns: () => get('/backtest'),
   backtestRun: (id) => get(`/backtest/${encodeURIComponent(id)}`),
@@ -309,6 +311,15 @@ export const SHADOW_VARIANT_DESCRIPTIONS = {
   trailing_only_rotation: `「仅移动止损」的腾位孪生(无止盈价,腾位按浮盈比例最高选仓):${ROTATION_TWIN_NOTE}`,
   vol_bracket_rotation: `「波动敞口」的腾位孪生:${ROTATION_TWIN_NOTE}`,
   equal_weight_rotation: `「信号等权买入」的腾位孪生:${ROTATION_TWIN_NOTE}`,
+};
+
+// ===== 估值看板(033)的标签映射 =====
+
+export const VALUATION_STATE_LABELS = {
+  triggered: '触发',
+  near: '接近',
+  idle: '未触发',
+  na: '暂无数据',
 };
 
 export const MACRO_EVENT_TYPE_LABELS = {

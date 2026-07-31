@@ -628,6 +628,139 @@ body {
   border-radius: 3px;
 }
 
+/* ---- 估值看板(033):极端买入信号卡 ----
+   状态色语义:触发=绿(--up,买入机会与涨色同源)、接近=琥珀(--alert,警示色,
+   永不占用盈亏红)、未触发/暂无=中性边框。方向无关(VIX 高与 RSI 低同属买入机会)。 */
+.sig-card {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 14px 16px;
+  border: 1px solid var(--border-visible);
+  border-radius: 12px;
+  background: var(--surface);
+}
+
+.sig-card--triggered {
+  border-color: color-mix(in srgb, var(--up) 60%, var(--border-visible));
+  background: color-mix(in srgb, var(--up) 6%, var(--surface));
+}
+
+.sig-card--near {
+  border-color: color-mix(in srgb, var(--alert) 60%, var(--border-visible));
+  background: color-mix(in srgb, var(--alert) 6%, var(--surface));
+}
+
+.sig-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sig-card__name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.sig-card__value {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+  font-weight: 680;
+  font-size: 28px;
+  line-height: 1.05;
+  letter-spacing: -0.01em;
+  color: var(--text-display);
+}
+
+.sig-card--triggered .sig-card__value { color: var(--up); }
+.sig-card--near .sig-card__value { color: var(--alert); }
+
+.sig-card__row {
+  font-size: 12.5px;
+  color: var(--text-secondary);
+}
+
+.sig-card__row .num { font-size: 12px; }
+
+.sig-card__meta {
+  margin-top: auto;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-disabled);
+}
+
+/* 状态小胶囊(触发/接近/未触发/暂无数据) */
+.sig-state {
+  flex: none;
+  font-size: 11.5px;
+  line-height: 1.6;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-visible);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.sig-state--triggered {
+  color: var(--up);
+  border-color: color-mix(in srgb, var(--up) 55%, transparent);
+  background: color-mix(in srgb, var(--up) 12%, transparent);
+}
+
+.sig-state--near {
+  color: var(--alert);
+  border-color: color-mix(in srgb, var(--alert) 55%, transparent);
+  background: color-mix(in srgb, var(--alert) 12%, transparent);
+}
+
+/* ---- 估值看板:五档定投倍数 ---- */
+.dca-tiers {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 10px;
+}
+
+@media (max-width: 640px) {
+  .dca-tiers { grid-template-columns: repeat(auto-fit, minmax(104px, 1fr)); }
+}
+
+.dca-tier {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: center;
+  text-align: center;
+  padding: 12px 8px 10px;
+  border: 1px solid var(--border-visible);
+  border-radius: 12px;
+  background: var(--surface-raised);
+}
+
+.dca-tier--active {
+  border-color: var(--up);
+  background: color-mix(in srgb, var(--up) 7%, var(--surface-raised));
+}
+
+.dca-tier__mult {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+  font-size: 21px;
+  font-weight: 680;
+  line-height: 1.1;
+  color: var(--text-display);
+}
+
+.dca-tier--active .dca-tier__mult { color: var(--up); }
+
+.dca-tier__label {
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
 /* 价格变动闪烁:涨绿/跌红后 ~0.8s 渐回原色(FlashOnChange.jsx 消费)。
    只写 from 帧 → 结束态即元素自然色,纯颜色无位移;颜色只用 --up/--down
    (theme.js 权威,双主题/中途切换自动正确);下方 reduced-motion 的全局

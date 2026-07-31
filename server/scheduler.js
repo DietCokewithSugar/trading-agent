@@ -22,6 +22,7 @@ import { pollMirrorOrders, takeBrokerSnapshots, getLatestBrokerSnapshot } from '
 import { getPrimaryValuation, isBrokerLedgerPrimary } from './services/primaryLedger.js';
 import { refreshSymbolReference, warmSymbolReference } from './services/symbolReference.js';
 import { pollTradingHalts } from './services/tradingHalts.js';
+import { getBoard, maybeDailyValuationRefresh } from './services/valuationBoard.js';
 
 // 休市时段净值几乎不变,快照降频到每 30 分钟一条(保持折线图连续),
 // 同时避免对持仓报价的无谓 FMP 请求
@@ -127,6 +128,15 @@ export function startScheduler() {
   // 停牌监控(028):官方 Trading Halts feed 盘中轮询(休市在模块内自动跳过)
   if (config.enableHaltGuard) {
     every(Math.max(config.haltPollSeconds, 30) * 1000, '停牌监控', pollTradingHalts);
+  }
+
+  // 估值看板(033):每日美东收盘后强刷一次并落当日快照(每 10 分钟探测触发条件);
+  // 启动后预热一次载荷,首个访客不用等现算。纯观察层,失败不影响任何交易链路
+  if (config.enableValuationBoard) {
+    every(10 * 60_000, '估值看板刷新', maybeDailyValuationRefresh);
+    setTimeout(() => {
+      getBoard().catch(() => {});
+    }, 15_000);
   }
 
   // 名录/停牌启动预热:名录先从 DB 镜像暖表再抓最新(交易开始前就位)

@@ -204,6 +204,13 @@ services:
         value: "3"
       - key: BACKTEST_COST_BPS
         value: "0"
+      # 估值看板(033):估值/情绪监控页签(纯展示观察层;外部公开源失败仅卡片降级)
+      - key: ENABLE_VALUATION_BOARD
+        value: "true"
+      - key: VALUATION_REFRESH_ET_HOUR
+        value: "16"
+      - key: VALUATION_CACHE_MINUTES
+        value: "30"
       - key: TRUST_PROXY
         value: "1" # Render 单层反向代理;直连部署须设 0
       - key: ADMIN_TOKEN
