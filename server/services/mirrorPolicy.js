@@ -104,20 +104,21 @@ export function planMirrorFollowUp({ row, brokerStatus = null, session = null, c
   const driftCap = Number.isFinite(Number(config.buyDriftCapPercent)) ? Number(config.buyDriftCapPercent) : 5;
   const attempt = Number(row?.attempt) > 0 ? Number(row.attempt) : 1;
   const price = Number(currentPrice) > 0 ? Number(currentPrice) : null;
+  // 单据年龄(顺延作废与超龄买单不追挂共用;时效沿用实盘挂单 PENDING_ORDER_MAX_AGE_HOURS)
+  const maxAgeMs = Number(config.deferredBuyMaxAgeHours) > 0 ? Number(config.deferredBuyMaxAgeHours) * 3600_000 : null;
+  const age = now - Date.parse(row?.submitted_at ?? '');
+  const overAge = Boolean(maxAgeMs) && Number.isFinite(age) && age > maxAgeMs;
 
   // ── 休市顺延单:开盘后以实时价提交 ──
   if (row?.status === 'deferred') {
-    // 顺延买单超龄作废(时效沿用实盘挂单 PENDING_ORDER_MAX_AGE_HOURS):现金等待没有
-    // 天然终点,超龄一刀切防止顺延单无限占据轮询工作集;卖单不设时效 —— 卖出必须收敛,
-    // 它的等待(休市/同票买单在途)都有确定的终点
-    const maxAgeMs = Number(config.deferredBuyMaxAgeHours) > 0 ? Number(config.deferredBuyMaxAgeHours) * 3600_000 : null;
-    const age = now - Date.parse(row.submitted_at ?? '');
-    if (side === 'buy' && maxAgeMs && Number.isFinite(age) && age > maxAgeMs) {
+    // 顺延买单超龄作废:现金等待没有天然终点,超龄一刀切防止顺延单无限占据轮询工作集;
+    // 卖单不设时效 —— 卖出必须收敛,它的等待(休市/同票买单在途)都有确定的终点
+    if (side === 'buy' && overAge) {
       return { action: 'abandon', note: `顺延买单超过 ${config.deferredBuyMaxAgeHours} 小时未能提交,作废` };
     }
     // 报价长期不可得的顺延卖单(退市/长期停牌票):升级市价单交由券商裁决(成交或
     // 参数级拒绝终态)—— 否则毒行永久占据轮询工作集,并作为在途单阻塞同票对账清理
-    if (side === 'sell' && !price && session && session !== 'closed' && maxAgeMs && Number.isFinite(age) && age > maxAgeMs) {
+    if (side === 'sell' && !price && session && session !== 'closed' && overAge) {
       return {
         action: 'market_escalate',
         qty: remainingQty({ qty: row?.qty, filledQty: row?.filled_qty }),
@@ -171,6 +172,12 @@ export function planMirrorFollowUp({ row, brokerStatus = null, session = null, c
   // 买单:券商拒单(买力/标的状态)通常非瞬态,不追;追单可整体关闭
   if (brokerStatus === 'rejected') return { action: 'none', note: '券商拒单,买单不重挂' };
   if (config.buyRetry === 'off') return { action: 'none' };
+  // 超龄买单不再追挂:内部持仓上限(MAX_HOLD_HOURS,默认 48h)远短于本时效,原仓位
+  // 必已平掉,此时追挂等于在券商侧凭空开出无对应内部持仓的孤儿仓位。积压的在途单被
+  // 长期漏轮询后集中回填时,这道闸尤其关键 —— 否则数周前的买单会被一次性追挂建仓
+  if (overAge) {
+    return { action: 'none', note: `买单挂出已超过 ${config.deferredBuyMaxAgeHours} 小时,不再追挂` };
+  }
   if (attempt > maxRetries) return { action: 'none', note: '重挂次数用尽,放弃追单' };
   if (session === 'closed') {
     return { action: 'retry_defer', qty: remainder, note: `已顺延追单第 ${attempt + 1} 次` };
@@ -189,6 +196,39 @@ export function planMirrorFollowUp({ row, brokerStatus = null, session = null, c
     extendedHours: session !== 'regular',
     note: `已追单第 ${attempt + 1} 次`,
   };
+}
+
+/**
+ * 轮询工作集的账户间轮转(纯函数)。rows 为按 submitted_at 升序取回的候选行。
+ * 按 account_id 分组后轮转取样裁到 limit:单个账户积压再多也只占 1/账户数 的预算,
+ * 参照账户(实盘镜像)的成交回填不会被影子变体账户的积压饿死 —— 025 起一个进程
+ * 同时喂七八个券商账户,共用一个全局窗口时最活跃的那个会独吞整个预算。
+ * 组内保持先进先出;account_id 为 null/缺失(env 默认账户、025 前的旧库)归为一组。
+ */
+export function selectPollBatch(rows, { limit }) {
+  const cap = Number(limit);
+  const list = rows || [];
+  if (!(cap > 0)) return [];
+  if (list.length <= cap) return [...list];
+  const groups = new Map();
+  for (const row of list) {
+    const key = row?.account_id ?? 'env';
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(row);
+  }
+  const queues = [...groups.values()];
+  const out = [];
+  for (let i = 0; out.length < cap; i++) {
+    let progressed = false;
+    for (const queue of queues) {
+      if (i >= queue.length) continue;
+      out.push(queue[i]);
+      progressed = true;
+      if (out.length >= cap) break;
+    }
+    if (!progressed) break; // 全部队列耗尽
+  }
+  return out;
 }
 
 /**

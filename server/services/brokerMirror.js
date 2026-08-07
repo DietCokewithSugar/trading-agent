@@ -29,6 +29,7 @@ import {
   planBuyFunding,
   committedBuyNotional,
   planReconcile,
+  selectPollBatch,
 } from './mirrorPolicy.js';
 import {
   isBrokerEnabled,
@@ -980,6 +981,26 @@ async function handleTerminalTransition(row, patch, account, creds) {
 let pollTicks = 0;
 const RECONCILE_EVERY_TICKS = 30;
 
+// 轮询工作集预算:在途单与顺延单必须分栏取,绝不能共用一个窗口。
+// 两类单据的生命周期差了两个数量级 —— 在途单(submitted/partially_filled)是当日
+// 限价单,当天必然出终态,且**账本的成交回填完全依赖它**;顺延单(deferred)可以滞留
+// 数日(买单等现金最长 PENDING_ORDER_MAX_AGE_HOURS=96h)。021 只轮询在途单时窗口
+// 每天自然排空,027 把 deferred 并进同一个"按 submitted_at 升序取 50 行"的窗口后,
+// 堆积的顺延单会从最老那头把预算占满,在途单永远排不进来:券商侧照常成交,而
+// broker_mirror_orders 再也没有一行被回填 filled_qty —— 账本从那天起彻底冻结。
+const POLL_INFLIGHT_LIMIT = 100;
+const POLL_DEFERRED_LIMIT = 50;
+// 账户轮转的过取倍数:先多取几倍候选再按账户轮转裁到预算内(selectPollBatch)
+const POLL_OVERFETCH = 4;
+
+// 积压告警(限频 10 分钟):工作集持续顶到上限说明回填在滞后,曾经是静默冻结的
+let lastBacklogWarnAt = 0;
+function warnBacklog(label, count) {
+  if (Date.now() - lastBacklogWarnAt < 10 * 60_000) return;
+  lastBacklogWarnAt = Date.now();
+  console.warn(`[broker] ${label}镜像单积压已达轮询上限(${count} 行),回填/提交存在滞后`);
+}
+
 /** 由调度器周期调用(60s):回填在途对照单的撮合结果、提交顺延单、跟进未成交终态,
  *  并限频写净值对照快照;每 RECONCILE_EVERY_TICKS 轮入队一次对账清理 */
 export async function pollMirrorOrders() {
@@ -989,29 +1010,50 @@ export async function pollMirrorOrders() {
   polling = true;
   try {
     // 三级列回退:全列(025+027)→ 剥 attempt/retry_of(027 未迁移,重挂降级)→ 剥 account_id/source_variant(025 未迁移)
-    const BASE_COLUMNS = 'id, trade_id, symbol, side, qty, filled_qty, internal_price, broker_order_id, client_order_id, status, submitted_at';
-    const runSelect = (columns) =>
+    // limit_price 必须在列表里:陈旧限价单主动撤单重挂要判它,漏选则该分支永不触发
+    const BASE_COLUMNS = 'id, trade_id, symbol, side, qty, filled_qty, limit_price, internal_price, broker_order_id, client_order_id, status, submitted_at';
+    const runSelect = (columns, statuses, limit) =>
       supabase()
         .from('broker_mirror_orders')
         .select(columns)
-        .in('status', ['submitted', 'partially_filled', 'deferred'])
+        .in('status', statuses)
         .order('submitted_at', { ascending: true })
-        .limit(50);
-    let { data: rows, error } = await runSelect(`${BASE_COLUMNS}, account_id, source_variant, attempt, retry_of`);
-    if (error && /attempt|retry_of/.test(error.message)) {
-      warnRetryColumnsOnce();
-      ({ data: rows, error } = await runSelect(`${BASE_COLUMNS}, account_id, source_variant`));
-    }
-    if (error && /account_id|source_variant/.test(error.message)) {
-      ({ data: rows, error } = await runSelect(BASE_COLUMNS));
-    }
+        .limit(limit);
+    const loadQueue = async (statuses, budget) => {
+      const take = budget * POLL_OVERFETCH;
+      let res = await runSelect(`${BASE_COLUMNS}, account_id, source_variant, attempt, retry_of`, statuses, take);
+      if (res.error && /attempt|retry_of/.test(res.error.message)) {
+        warnRetryColumnsOnce();
+        res = await runSelect(`${BASE_COLUMNS}, account_id, source_variant`, statuses, take);
+      }
+      if (res.error && /account_id|source_variant/.test(res.error.message)) {
+        res = await runSelect(BASE_COLUMNS, statuses, take);
+      }
+      return res;
+    };
+
+    // 在途单与顺延单各自独立取数:顺延积压再多也挤不掉成交回填
+    const [inflightRes, deferredRes] = await Promise.all([
+      loadQueue(['submitted', 'partially_filled'], POLL_INFLIGHT_LIMIT),
+      loadQueue(['deferred'], POLL_DEFERRED_LIMIT),
+    ]);
+    const error = inflightRes.error || deferredRes.error;
     if (error) {
       if (isMissingTable(error)) warnMissingOnce();
       else console.warn(`[broker] 读取在途对照单失败: ${error.message}`);
       return;
     }
+    const inflight = inflightRes.data || [];
+    const deferred = deferredRes.data || [];
+    if (inflight.length >= POLL_INFLIGHT_LIMIT * POLL_OVERFETCH) warnBacklog('在途', inflight.length);
+    else if (deferred.length >= POLL_DEFERRED_LIMIT * POLL_OVERFETCH) warnBacklog('顺延', deferred.length);
+    // 每栏内再按账户轮转裁到预算:单账户积压不会饿死其它账户(尤其是参照账户)
+    const rows = [
+      ...selectPollBatch(inflight, { limit: POLL_INFLIGHT_LIMIT }),
+      ...selectPollBatch(deferred, { limit: POLL_DEFERRED_LIMIT }),
+    ];
     let updated = 0;
-    for (const row of rows || []) {
+    for (const row of rows) {
       // 归属账户已删除:凭据不可得,标记后不再轮询(绝不能误用 env 凭据查别人的单)
       const account = row.account_id ? accountById(row.account_id) : null;
       if (row.account_id && !account) {

@@ -9,6 +9,7 @@ import {
   planBuyFunding,
   committedBuyNotional,
   planReconcile,
+  selectPollBatch,
 } from '../server/services/mirrorPolicy.js';
 
 // 默认策略参数(与 config 默认一致):slack 1%,重挂上限 3,买单追单,漂移上限 5%,
@@ -248,4 +249,98 @@ test('mirrorLimitPrice 迁移到 mirrorPolicy 后行为不变', () => {
   assert.equal(mirrorLimitPrice({ side: 'buy', price: 100, slackPercent: 1 }), 101);
   assert.equal(mirrorLimitPrice({ side: 'sell', price: 100, slackPercent: 1 }), 99);
   assert.equal(mirrorLimitPrice({ side: 'buy', price: 0, slackPercent: 1 }), null);
+});
+
+// ── selectPollBatch:轮询工作集的账户间轮转(镜像账本冻结事故的回归防线)──
+
+const pollRow = (id, accountId) => ({ id, account_id: accountId, submitted_at: `2026-07-${String(id).padStart(2, '0')}` });
+
+test('selectPollBatch:行数不超预算时原样返回', () => {
+  const rows = [pollRow(1, null), pollRow(2, 5)];
+  assert.deepEqual(selectPollBatch(rows, { limit: 10 }), rows);
+});
+
+test('selectPollBatch:单账户积压不再独吞预算,参照账户必被取到', () => {
+  // 事故复现:影子变体账户(5)积压 60 行、参照账户(env,account_id=null)只有 2 行
+  // 且更晚提交 —— 升序单窗口会被账户 5 全部占满,参照账户的成交永远回填不到
+  const rows = [...Array.from({ length: 60 }, (_, i) => pollRow(i + 1, 5)), pollRow(90, null), pollRow(91, null)];
+  const batch = selectPollBatch(rows, { limit: 10 });
+  assert.equal(batch.length, 10);
+  const envRows = batch.filter((r) => r.account_id === null);
+  assert.equal(envRows.length, 2, '参照账户的两行都应入选');
+  // 组内保持先进先出
+  assert.deepEqual(
+    batch.filter((r) => r.account_id === 5).map((r) => r.id),
+    [1, 2, 3, 4, 5, 6, 7, 8]
+  );
+});
+
+test('selectPollBatch:多账户按轮转均分预算', () => {
+  const rows = [
+    ...Array.from({ length: 10 }, (_, i) => pollRow(i + 1, 1)),
+    ...Array.from({ length: 10 }, (_, i) => pollRow(i + 11, 2)),
+    ...Array.from({ length: 10 }, (_, i) => pollRow(i + 21, 3)),
+  ];
+  const batch = selectPollBatch(rows, { limit: 6 });
+  assert.equal(batch.length, 6);
+  for (const acc of [1, 2, 3]) {
+    assert.equal(batch.filter((r) => r.account_id === acc).length, 2);
+  }
+});
+
+test('selectPollBatch:某账户先耗尽后,剩余预算全给其它账户', () => {
+  const rows = [pollRow(1, 1), ...Array.from({ length: 10 }, (_, i) => pollRow(i + 2, 2))];
+  const batch = selectPollBatch(rows, { limit: 5 });
+  assert.equal(batch.length, 5);
+  assert.equal(batch.filter((r) => r.account_id === 1).length, 1);
+  assert.equal(batch.filter((r) => r.account_id === 2).length, 4);
+});
+
+test('selectPollBatch:空入参/非法预算安全', () => {
+  assert.deepEqual(selectPollBatch(null, { limit: 10 }), []);
+  assert.deepEqual(selectPollBatch([pollRow(1, null)], { limit: 0 }), []);
+  assert.deepEqual(selectPollBatch([pollRow(1, null)], { limit: null }), []);
+});
+
+// ── 超龄买单不再追挂(积压集中回填时不凭空建仓)──
+
+test('planMirrorFollowUp:超龄买单过期后不追挂(内部持仓早已平掉)', () => {
+  const row = {
+    side: 'buy',
+    qty: 10,
+    filled_qty: 0,
+    internal_price: 100,
+    attempt: 1,
+    submitted_at: new Date(Date.now() - 200 * 3600_000).toISOString(), // 200h 前,远超 96h
+  };
+  const plan = planMirrorFollowUp({ row, brokerStatus: 'expired', session: 'regular', currentPrice: 100, config: CFG });
+  assert.equal(plan.action, 'none');
+  assert.match(plan.note, /不再追挂/);
+});
+
+test('planMirrorFollowUp:未超龄买单照常追挂', () => {
+  const row = {
+    side: 'buy',
+    qty: 10,
+    filled_qty: 0,
+    internal_price: 100,
+    attempt: 1,
+    submitted_at: new Date(Date.now() - 2 * 3600_000).toISOString(),
+  };
+  const plan = planMirrorFollowUp({ row, brokerStatus: 'expired', session: 'regular', currentPrice: 100, config: CFG });
+  assert.equal(plan.action, 'retry_limit');
+  assert.equal(plan.limitPrice, 101);
+});
+
+test('planMirrorFollowUp:超龄卖单仍必须收敛(重挂/升级不受年龄闸影响)', () => {
+  const row = {
+    side: 'sell',
+    qty: 10,
+    filled_qty: 0,
+    internal_price: 100,
+    attempt: 1,
+    submitted_at: new Date(Date.now() - 200 * 3600_000).toISOString(),
+  };
+  const plan = planMirrorFollowUp({ row, brokerStatus: 'expired', session: 'regular', currentPrice: 100, config: CFG });
+  assert.equal(plan.action, 'retry_limit');
 });
