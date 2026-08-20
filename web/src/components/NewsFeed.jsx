@@ -7,10 +7,13 @@ import {
   fmtTime,
   TIER_LABELS,
   CREDIBILITY_BANDS,
+  SECTOR_LABELS,
+  SECTOR_KEYS,
   credibilityBandOf,
   etDayOf,
   etToday,
 } from '../api.js';
+import SectorBoard from './SectorBoard.jsx';
 
 const PAGE_SIZE = 60;
 // SSE 自动刷新合并时本地最多保留的条数,防止长期挂机内存无限增长
@@ -33,6 +36,12 @@ const TIER_FILTERS = [
 const BAND_FILTERS = [
   { value: 'all', label: '全部来源' },
   ...Object.entries(CREDIBILITY_BANDS).map(([value, b]) => ({ value, label: b.label })),
+];
+
+// 板块筛选(SPDR 行业 ETF 口径);OTHER=服务端未分类兜底桶,不作为筛选项
+const SECTOR_FILTERS = [
+  { value: 'all', label: '全部板块' },
+  ...SECTOR_KEYS.map((key) => ({ value: key, label: `${key} ${SECTOR_LABELS[key]}` })),
 ];
 
 // 单词且形如股票代码 → 走服务端 symbol 精确筛选(分析主体口径,只命中已分析文章);
@@ -92,7 +101,10 @@ export default function NewsFeed({ version, onSymbolClick }) {
   const [sentimentFilter, setSentimentFilter] = useState('analyzed');
   const [tierFilter, setTierFilter] = useState('all');
   const [bandFilter, setBandFilter] = useState('all');
+  const [sectorFilter, setSectorFilter] = useState('all');
   const [selectedDate, setSelectedDate] = useState(null); // null = 自动(今天/最近有数据日)
+  const [board, setBoard] = useState(null);
+  const [boardLoading, setBoardLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
   const [items, setItems] = useState([]);
@@ -128,6 +140,7 @@ export default function NewsFeed({ version, onSymbolClick }) {
     filter: sentimentFilter,
     ...(tierFilter !== 'all' ? { tier: tierFilter } : {}),
     ...(bandFilter !== 'all' ? { band: bandFilter } : {}),
+    ...(sectorFilter !== 'all' ? { sector: sectorFilter } : {}),
     ...(searching
       ? isSymbolQuery
         ? { symbol: query.toUpperCase() }
@@ -138,7 +151,14 @@ export default function NewsFeed({ version, onSymbolClick }) {
   });
 
   useEffect(() => {
-    const key = [selectedDayKey ?? '', sentimentFilter, tierFilter, bandFilter, query].join('|');
+    const key = [
+      selectedDayKey ?? '',
+      sentimentFilter,
+      tierFilter,
+      bandFilter,
+      sectorFilter,
+      query,
+    ].join('|');
     const isNewQuery = key !== queryKeyRef.current;
     let cancelled = false;
     if (isNewQuery) setLoading(true);
@@ -173,7 +193,37 @@ export default function NewsFeed({ version, onSymbolClick }) {
     return () => {
       cancelled = true;
     };
-  }, [sentimentFilter, tierFilter, bandFilter, selectedDayKey, query, version]);
+  }, [sentimentFilter, tierFilter, bandFilter, sectorFilter, selectedDayKey, query, version]);
+
+  // 板块情绪看板:跟随当前活跃日(搜索态跨日期,退回最近 24 小时窗口);
+  // 服务端有 60 秒缓存,SSE 频繁 bump version 也不会打穿数据库
+  const boardDayKey = searching ? null : activeDayKey;
+  useEffect(() => {
+    let cancelled = false;
+    setBoardLoading(true);
+    api
+      .sectorBoard(boardDayKey ? { date: boardDayKey } : { hours: 24 })
+      .then((data) => {
+        if (cancelled) return;
+        setBoard(data);
+        // 034 未执行:板块筛选在服务端会被忽略,顺手把筛选器复位,避免"筛了没生效"
+        if (data?.available === false) setSectorFilter('all');
+      })
+      .catch(() => {
+        if (!cancelled) setBoard(null);
+      })
+      .finally(() => {
+        if (!cancelled) setBoardLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [boardDayKey, version]);
+
+  // 034 迁移未执行时服务端返回 available:false —— 隐藏板块看板与筛选器
+  const sectorAvailable = board?.available !== false;
+  const toggleSector = (key) =>
+    setSectorFilter((prev) => (prev === key ? 'all' : key === 'OTHER' ? prev : key));
 
   const loadMore = async () => {
     setLoadingMore(true);
@@ -258,6 +308,15 @@ export default function NewsFeed({ version, onSymbolClick }) {
           value={bandFilter}
           onChange={setBandFilter}
         />
+        {sectorAvailable && (
+          <Select
+            size="small"
+            style={{ width: 150 }}
+            options={SECTOR_FILTERS}
+            value={sectorFilter}
+            onChange={setSectorFilter}
+          />
+        )}
         <Input.Search
           allowClear
           size="small"
@@ -272,6 +331,20 @@ export default function NewsFeed({ version, onSymbolClick }) {
         <Typography.Paragraph type="secondary" style={{ fontSize: 12.5, marginTop: 0, marginBottom: 12 }}>
           今日暂无符合条件的新闻,已显示最近有新闻的一天;用日期选择器可查看任意一天。
         </Typography.Paragraph>
+      )}
+
+      {sectorAvailable && (
+        <SectorBoard
+          board={board}
+          loading={boardLoading}
+          selected={sectorFilter === 'all' ? null : sectorFilter}
+          onSelect={toggleSector}
+          extra={
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              {searching ? '最近 24 小时' : activeDayKey || '最近 24 小时'}
+            </Typography.Text>
+          }
+        />
       )}
 
       {loading && !displayItems.length ? (
@@ -329,6 +402,14 @@ export default function NewsFeed({ version, onSymbolClick }) {
                 <div key={a.id} style={{ marginTop: 8 }}>
                   <Space size={8} wrap>
                     <AnalysisBadge analysis={a} onSymbolClick={onSymbolClick} />
+                    {a.sector_key && SECTOR_LABELS[a.sector_key] && (
+                      <Tag
+                        style={{ marginRight: 0, cursor: 'pointer', fontSize: 12 }}
+                        onClick={() => toggleSector(a.sector_key)}
+                      >
+                        {a.sector_key} {SECTOR_LABELS[a.sector_key]}
+                      </Tag>
+                    )}
                     {typeof a.confidence === 'number' && (
                       <Typography.Text type="secondary" style={{ fontSize: 12.5 }}>
                         置信度 {(a.confidence * 100).toFixed(0)}%

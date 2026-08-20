@@ -92,7 +92,8 @@ Supabase 客户端单例(service_role key,绕过 RLS);未配置时抛中文错�
 (估值+持仓,持仓行含进程内 `halted` 停牌标记)、`/trades`(券商主账本下返回参照账户的镜像成交,
 映射为同一行形状 + `bm-` id 命名空间 + `ledger` 标记,失败限频告警回退内部账本,030)、`/news`(服务端过滤/搜索/分页:
 `sentiment`(含 neutral)/`tier`/`symbol`(分析主体精确)/`band`(来源可信度分层 0.85/0.65)/
-`date`(美东日历日,单日视图)/`q`/`before` 游标,028)、`/snapshots`(RPC 采样,缺 RPC 回退)、
+`date`(美东日历日,单日视图)/`sector`(板块,034)/`q`/`before` 游标,028)、
+`/news/sectors`(板块情绪看板:`?date=` 单个美东日或 `?hours=` 滚动窗口,034)、`/snapshots`(RPC 采样,缺 RPC 回退)、
 `/stats`、`/performance`(vs SPY;二者在券商主账本下由 statsService 切到参照账户口径 —— 净值指标来自镜像快照日度序列、已实现盈亏/胜率来自镜像成交加权均价重放,失败限频回退内部,030)、`/signal-stats`(信号质量)、`/macro`(regime/日历/宏观事件;`?date=` 历史日回溯分支)、`/macro/history`(逐日回溯 regime 序列,热力图数据源)、
 `/shadow`(消融实验)、`/symbol/:symbol`(个股抽屉聚合)、`/quote/:symbol`(单票轻量报价,弹窗兜底轮询用,只走报价缓存不查库)、`/stream`(SSE)、`/pending-orders`、
 `/pool`(候选池概览:预览行富化现价 + 时段/盘外价字段(`fmp.js#quoteDisplayFields`,首屏徽标用)+ 系统离场口径百分比,供"若现在买入"参考与入池价反事实区间;报价容忍度非休市 30s/休市 5 分钟——它也是 SSE 断线兜底路径,不应每次强制新 FMP 请求);`POST /run-cycle`(外部 cron 用,匿名共享 120 秒冷却,设 `ADMIN_TOKEN` 后要求请求头);
@@ -141,8 +142,10 @@ isPrimary 指定主对照账户(029,仅 mirror_actual 用途、至多一个,优�
 
 | 文件 | 职责与核心逻辑 |
 |---|---|
-| `newsService.js` | **一轮交易循环的编排者 `runCycle()`**(全系统阅读入口)。① 抓取:快轮只拉个股新闻,约每 5 分钟全源(综合+公告+Yahoo+SEC 8-K);按 URL upsert 去重,只有真正新增的行进入后续(可选列 009/026 逐列剥离降级重试)。② 分析:候选来自"近 24h 未分析"积压查询(非仅本轮新增),每轮上限 `MAX_ANALYZE_PER_CYCLE`(8);无个股指向的综合新闻分流给宏观管线;分析后立即打 `analyzed_at`(失败下轮重试)。③ 信号门槛:非中性 + 档位 ≤ `TRADE_TIER_THRESHOLD`(2)+ 置信度 ≥0.5 才可交易;每条非中性分析记录信号时点价(评估层)。④ 事件去重/交叉确认(见 eventService)→ `handleSignal`。⑤ 结果记账:`pooled`(入池)/`refreshed`(同票利好刷新)/`queued`(挂单)/trade(成交)分别计数并消费事件;`finally` 里 `saveCycleRun` 落运行指标 |
+| `newsService.js` | **一轮交易循环的编排者 `runCycle()`**(全系统阅读入口)。① 抓取:快轮只拉个股新闻,约每 5 分钟全源(综合+公告+Yahoo+SEC 8-K);按 URL upsert 去重,只有真正新增的行进入后续(可选列 009/026 逐列剥离降级重试)。② 分析:候选来自"近 24h 未分析"积压查询(非仅本轮新增),每轮上限 `MAX_ANALYZE_PER_CYCLE`(8);无个股指向的综合新闻分流给宏观管线;入库时按分析主体的公司档案写板块归属(034);分析后立即打 `analyzed_at`(失败下轮重试)。③ 信号门槛:非中性 + 档位 ≤ `TRADE_TIER_THRESHOLD`(2)+ 置信度 ≥0.5 才可交易;每条非中性分析记录信号时点价(评估层)。④ 事件去重/交叉确认(见 eventService)→ `handleSignal`。⑤ 结果记账:`pooled`(入池)/`refreshed`(同票利好刷新)/`queued`(挂单)/trade(成交)分别计数并消费事件;`finally` 里 `saveCycleRun` 落运行指标 |
 | `credibility.js` | 来源可信度评分(0~1):按**文章原文域名**分层(通讯社/监管 0.95 → 新闻稿渠道 0.90 → 主流媒体 0.85 → 观点平台 0.65 → 低信 0.50 → 未知 0.40 → 无链接 0.25),FMP 转发再扣 0.03;`sec-filings` 渠道直抓的监管文件强制 1.00「监管披露」档(按渠道选中,媒体转发的 sec.gov 链接仍走 0.95 域名档)。`computeFinalConfidence` = 来源分 × LLM 置信度 × 时效分(1h 内 1.0 → 24h+ 0.5)× 档位分。`isPressRelease` 判定公告渠道(统计口径);`isSelfIssued` = 公告 ∪ 监管披露(公司自述类,利好共享 `PRESS_BULLISH_PENALTY` 门槛折价,利空不折价) |
+| `sectors.js` | 板块分类纯函数(034):11 个 SPDR 行业 ETF 口径(XLK/XLV/XLF/XLY/XLC/XLI/XLP/XLE/XLU/XLRE/XLB),`normalizeSector` 把数据源行业名/GICS 别名/中文名/ETF 代码折叠归一(忽略大小写与空格连字符)→ ETF key,`sectorProviderNames` 反查库内原始行业名(数据库端 `.in()` 过滤用);`summarizeSectorSentiment` 按板块聚合利好/利空(单条权重 = 综合置信度 × 档位分,与候选池打分同口径 `conflictResolver.signalStrength`;中性只计数不进分母),输出固定 11 行 + 未分类桶 + 全局合计,`netSentimentScore` ∈ [-1,1] |
+| `sectorService.js` | 板块取数层(034,日志 `[sector]`):`resolveSectorForSymbol`(公司档案 24h 缓存取行业原文,写库口径)、`backfillAnalysisSectors`(历史行回填,单飞;按标的粒度——一次档案请求补该标的全部缺失行;档案无行业的标的进 12h 冷却,整窗全冷却时扫描偏移下移防毒行钉死队列;搭 fullFetch 节奏由 runCycle 不阻塞触发)、`getSectorBoard`(按**文章发布时间**划窗聚合,分页上限 `SECTOR_BOARD_MAX_ROWS`,叠加 `macroRegime.sectorMultiplier` 的板块乘数,进程内缓存 60s)。全程 fail-open;034 未执行(列缺失)整体降级 `available:false`,前端隐藏板块 UI |
 | `newsDedup.js` | 近似重复判定纯函数:归一化分词(去停用词)→ Jaccard 相似度;`findDuplicateEvent` 同向且标题/事件概要相似度 ≥`EVENT_NEAR_DUP_SIMILARITY`(0.8)即确定性归并(LLM 归并的兜底);`clusterAnalyses` 供个股抽屉展示聚合 |
 | `eventService.js` | 事件溯源与去重:`resolveEvent` 取同票近 `EVENT_DEDUP_HOURS`(72h)事件 → 先确定性近似判重,未命中再 LLM `matchEvent` → 重复报道只 `article_count+1` 并累计独立信源域名;未交易事件收到**新独立域名**报道 → 返回 `confirmable`(交叉确认:按新报道置信度 × 每源 +10%、上限 ×1.2 重评);新事件放行前还要过同票同向 30 分钟交易冷却(`checkCooldown`,也查 pending_orders)。**去重出错 fail-closed 跳过交易**。`markEventTraded` 消费事件,`checkTradeCooldown` 供分配器复查 |
 
@@ -264,7 +267,7 @@ isPrimary 指定主对照账户(029,仅 mirror_actual 用途、至多一个,优�
 | `trades` | 全部成交:方向/数量/价格/理由/`trigger`(news/stop_loss/take_profit/review/max_hold/rotation)/`realized_pnl`/滑点与决策时间线/`macro_regime` 快照/`pool_*` 排队成本/每笔 bracket 宽度与 20 日波动快照(023) |
 | `news_articles` | 新闻原文(URL 唯一):来源域名与可信度分(009);监管文件元数据 source_type/filing_form/filing_items(026);筛选索引 GIN(symbols) + analyses(sentiment,tier)(028) |
 | `symbol_reference` | 标的名录(028):官方符号目录镜像(交易所/ETF/测试标的/财务状态),进程内 Map 的重启暖表与审计来源;管理重置**不**清(外部市场数据) |
-| `news_analyses` | LLM 分析:方向/强弱/范围/档位/置信度/事件概要/`event_id`/`final_confidence`/`signal_price` 与前瞻收益 1h/1d/2d(011/031;5d 为已停用的历史口径,列保留)/run_id 与 LLM 用量(012) |
+| `news_analyses` | LLM 分析:方向/强弱/范围/档位/置信度/事件概要/`event_id`/`final_confidence`/`signal_price` 与前瞻收益 1h/1d/2d(011/031;5d 为已停用的历史口径,列保留)/run_id 与 LLM 用量(012)/`sector` 板块归属(034,存数据源原始行业名) |
 | `news_events` | 事件归并(去重主体):概要/报道数/独立信源域名数组/是否已触发交易 |
 | `macro_events` / `macro_state` | 宏观事件分类结果(含来源分/佐证域名,016)与单行 regime 状态 |
 | `candidate_signals` | 买入候选池(014):分数/状态机/宏观快照/入池价(016)/同票合并计数与时效锚点(022,同票活跃唯一索引) |
@@ -303,7 +306,8 @@ broker_mirror_orders/snapshots 加 account_id/source_variant)→
 029 券商主对照账户(broker_accounts.is_primary,至多一个)→
 031 前瞻收益 2d 口径(news_analyses.fwd_return_2d,回填待办索引改按 1d/2d;030 空缺)→
 032 策略回测(backtest_runs + backtest_analyses 两表,admin_reset_data 加 backtest_runs)→
-033 估值看板(valuation_snapshots 日快照表;管理重置不清,不入 admin_reset_data)。
+033 估值看板(valuation_snapshots 日快照表;管理重置不清,不入 admin_reset_data)→
+034 新闻板块归属(news_analyses.sector + 板块索引 + 回填待办部分索引)。
 
 ## 6. 前端(`web/`)
 
@@ -328,7 +332,8 @@ TradingView 开源的 lightweight-charts,其余图表 recharts;PnL 沿用美股�
 | `components/ComparisonChart.jsx` | 多组合对比图(lightweight-charts,消融页两张卡共用):各组合一条相对收益 % 曲线,图例芯片数值随十字光标跟随、点击隐藏/显示该组合,0% 参考线 |
 | `components/chartTime.js` | lightweight-charts 时间工具(本地时区平移/刻度与钟点格式化),NetWorthChart 与 ComparisonChart 共用 |
 | `components/CandidatePool.jsx` | 候选池实时预览(状态/分数)+ 两层止盈止损参考:「若现在买入」锚定**现价** ±系统口径(朋友照此设单才正确,非常规时段带 盘前/盘后 ±% 徽标);「入池价反事实区间」进度条显示现价落在 [入池价−止损%, 入池价+止盈%] 何处,越界即标注"若入池即买已止盈/止损"(016 排队成本的可视化)。现价/时段经 SSE `quotes` 事件实时合并(`useLiveQuotes`,`/api/pool` 拉取值兜底),漂移随之实时重算 |
-| `components/NewsFeed.jsx` | 新闻+分析流(服务端过滤/搜索/分页,SSE 触发刷新) |
+| `components/NewsFeed.jsx` | 新闻+分析流(服务端过滤/搜索/分页,SSE 触发刷新);板块筛选下拉 + 顶部板块情绪看板,每条分析带板块标签(034) |
+| `components/SectorBoard.jsx` | 板块情绪看板(034):每行一个板块 —— 中轴发散条(右=利好权重/左=利空权重,长度按全板块最大权重归一)+ 净情绪分 + 利好/利空/中性条数 + 宏观乘数与热门个股;点击行按该板块筛选新闻(未分类行为静态行) |
 | `components/NewsHeatmap.jsx` | 按票聚合的信号热力格 |
 | `components/TradesPage.jsx` | 交易页:候选池/待开盘挂单 + 成交记录表。默认**单日视图**(今天,无成交回落到最近有成交的一天),DatePicker + 前后一天步进(选中早于已加载范围的日期按游标补拉一页);代码搜索为跨日期全量检索;另有方向/触发筛选,行展开显示决策依据与触发新闻 |
 | `components/SymbolModal.jsx` | 个股抽屉:报价(含盘外)/持仓/事件聚类的分析历史/交易历史。报价取「live 或一次性拉取」的完整快照之一(不逐字段混用——live 盘外字段为 null 是有效信息),SSE 覆盖的持仓/池内票实时跳动;未覆盖符号打开期间每 15s 轮询轻量 `/api/quote/:symbol`(只换 quote 字段,带切换符号作废守卫,热力图选中日期不被打断) |
@@ -378,6 +383,7 @@ TradingView 开源的 lightweight-charts,其余图表 recharts;PnL 沿用美股�
 | `backtestMetrics.test.js` | 回测绩效(夏普/回撤/年化/汇总与 Wilson CI) |
 | `backtestSignals.test.js` | 信号推导:实盘门镜像、执行日映射(DST/半日市/周末顺延)、自述折价、归并与冲突 |
 | `backtestEngine.test.js` | 撮合引擎:shift-1 因果、同根先止损、跳空开盘价、max_hold、020 刷新、成本 bps、数据缺口顺延 |
+| `sectors.test.js` | 板块分类纯函数(034):11 板块口径齐全、数据源/GICS/中文名/ETF 代码归一、未知与空值落未分类、别名清单自洽(与 `.in()` 过滤口径一致)、净情绪分方向与边界、聚合的计数/权重/个股明细/空样本稳定行数 |
 | `valuationLogic.test.js` | 估值看板纯函数(033):三态分类(方向/逼近带/负阈值含等号)、六卡截图实值夹具、双指数取极端、定投档全优先级分支(PE 缺失静默跳过)、结论文案降级、月均/分位/急跌序列统计 |
 
 ## 8. 关键横切约定(改代码前必读)

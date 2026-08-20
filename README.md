@@ -250,6 +250,24 @@ LLM 风控官不能替代硬规则——以下风控全部由服务端代码强�
 
 成本与守卫:逐篇分析结果按 `(url, 标的, prompt 版本)` 缓存在 `backtest_analyses` 表——重跑或重叠窗口几乎零 LLM 成本;单轮文章总量受 `BACKTEST_MAX_ARTICLES`(默认 2000)护栏约束,超限直接失败并提示缩窗;发起接口与 `/api/run-cycle` 同构(配置 `ADMIN_TOKEN` 后必须携带令牌,未配置时匿名共享 30 分钟全局冷却)——**公网部署务必配置 `ADMIN_TOKEN`**,否则任何访客都能花你的 LLM 余额。已知近似(页面同步披露):跨源确认/事件链不重放(同日同向归并、同日多空搁置)、成交按日线粒度近似(跳空按开盘价、同根 K 线先止损)、LLM 重析存在非确定性、日线未含股息。需执行 032 迁移,缺表时功能自动停用。
 
+### 板块划分与板块情绪(034)
+
+新闻分析在入库时会记录**分析主体所属板块**,口径直接对齐美股 SPDR 行业 ETF(共 11 个):
+
+| 板块 | ETF | 板块 | ETF | 板块 | ETF |
+|---|---|---|---|---|---|
+| 科技 | `XLK` | 医疗保健 | `XLV` | 金融 | `XLF` |
+| 可选消费 | `XLY` | 通信服务 | `XLC` | 工业 | `XLI` |
+| 必需消费 | `XLP` | 能源 | `XLE` | 公用事业 | `XLU` |
+| 房地产 | `XLRE` | 原材料 | `XLB` | | |
+
+「新闻分析」页因此多了两样东西:
+
+- **板块情绪看板**:每个板块一行,中轴发散条向右是利好权重、向左是利空权重(长度按当前窗口内权重最大的板块归一),右侧给净情绪分(−1 ~ +1)、利好/利空/中性条数、热门个股,以及宏观层对该板块的乘数(>1 顺风 / <1 逆风,来自宏观事件的受影响行业)。**权重不是简单计数**:每条信号按「综合置信度 × 档位分」加权(与候选池打分同一口径),一条第 1 档高置信利好不会被一堆第 4 档噪声淹没;中性信号只计数、不参与多空比。看板跟随页面当前所选的**美东日**(搜索态下退回最近 24 小时);
+- **按板块筛选**:筛选栏的板块下拉,或直接点看板里的某一行(再点取消);每条分析、个股弹窗标题也都带板块标签。
+
+实现要点:库里存的是行情源给的原始行业名(与候选池 `sector` 同口径),归一到 ETF 板块在代码里完成(`server/services/sectors.js`,纯函数带单测),行情源改名只需改别名表、历史数据不用迁移。存量历史数据由后台任务按标的粒度回填(一次公司档案请求补齐该标的全部历史行,约 5 分钟一批,`SECTOR_BACKFILL_SYMBOLS` 可调);ETF/基金等本就没有行业的标的进入 12 小时冷却并归入「未分类」。纯展示/筛选层,零 LLM 成本,不参与任何交易决策;未执行 034 迁移时该功能整体隐藏,其余页面不受影响。
+
 ### 估值看板(033)
 
 「估值看板」标签页是一块**独立于交易链路的观察面板**:美股估值与情绪监控,给用户自己的指数定投节奏做参考(确定性规则计算,零 LLM 成本,不参与本站模拟交易的任何决策)。三个子视图:
@@ -290,7 +308,7 @@ LLM 风控官不能替代硬规则——以下风控全部由服务端代码强�
 ### 1. 初始化 Supabase
 
 1. 在 [supabase.com](https://supabase.com) 创建项目;
-2. 打开 **SQL Editor**,执行仓库中的 [`supabase/schema.sql`](supabase/schema.sql);**已有部署升级时**,改为执行 `supabase/migrations/` 下的增量脚本(如 [`002_stops_and_stats.sql`](supabase/migrations/002_stops_and_stats.sql)、[`003_news_events.sql`](supabase/migrations/003_news_events.sql)、[`004_atomic_trade.sql`](supabase/migrations/004_atomic_trade.sql)、[`005_admin_reset.sql`](supabase/migrations/005_admin_reset.sql)、[`006_trade_reflections.sql`](supabase/migrations/006_trade_reflections.sql)、[`007_position_management.sql`](supabase/migrations/007_position_management.sql)、[`008_fill_realism.sql`](supabase/migrations/008_fill_realism.sql)、[`009_source_credibility.sql`](supabase/migrations/009_source_credibility.sql)、[`010_open_queue.sql`](supabase/migrations/010_open_queue.sql)、[`011_signal_forward_returns.sql`](supabase/migrations/011_signal_forward_returns.sql)、[`012_observability.sql`](supabase/migrations/012_observability.sql)、[`013_risk_controls.sql`](supabase/migrations/013_risk_controls.sql)、[`014_macro_portfolio.sql`](supabase/migrations/014_macro_portfolio.sql)、[`015_macro_event_dedup.sql`](supabase/migrations/015_macro_event_dedup.sql)、[`016_execution_quality_and_market_check.sql`](supabase/migrations/016_execution_quality_and_market_check.sql)、[`017_shadow_portfolios.sql`](supabase/migrations/017_shadow_portfolios.sql)、[`018_decision_replay.sql`](supabase/migrations/018_decision_replay.sql)、[`019_shadow_dedup_unique.sql`](supabase/migrations/019_shadow_dedup_unique.sql)、[`020_hold_limits.sql`](supabase/migrations/020_hold_limits.sql)、[`021_broker_mirror.sql`](supabase/migrations/021_broker_mirror.sql)、……、[`031_signal_forward_2d.sql`](supabase/migrations/031_signal_forward_2d.sql)、[`032_backtest.sql`](supabase/migrations/032_backtest.sql));
+2. 打开 **SQL Editor**,执行仓库中的 [`supabase/schema.sql`](supabase/schema.sql);**已有部署升级时**,改为执行 `supabase/migrations/` 下的增量脚本(如 [`002_stops_and_stats.sql`](supabase/migrations/002_stops_and_stats.sql)、[`003_news_events.sql`](supabase/migrations/003_news_events.sql)、[`004_atomic_trade.sql`](supabase/migrations/004_atomic_trade.sql)、[`005_admin_reset.sql`](supabase/migrations/005_admin_reset.sql)、[`006_trade_reflections.sql`](supabase/migrations/006_trade_reflections.sql)、[`007_position_management.sql`](supabase/migrations/007_position_management.sql)、[`008_fill_realism.sql`](supabase/migrations/008_fill_realism.sql)、[`009_source_credibility.sql`](supabase/migrations/009_source_credibility.sql)、[`010_open_queue.sql`](supabase/migrations/010_open_queue.sql)、[`011_signal_forward_returns.sql`](supabase/migrations/011_signal_forward_returns.sql)、[`012_observability.sql`](supabase/migrations/012_observability.sql)、[`013_risk_controls.sql`](supabase/migrations/013_risk_controls.sql)、[`014_macro_portfolio.sql`](supabase/migrations/014_macro_portfolio.sql)、[`015_macro_event_dedup.sql`](supabase/migrations/015_macro_event_dedup.sql)、[`016_execution_quality_and_market_check.sql`](supabase/migrations/016_execution_quality_and_market_check.sql)、[`017_shadow_portfolios.sql`](supabase/migrations/017_shadow_portfolios.sql)、[`018_decision_replay.sql`](supabase/migrations/018_decision_replay.sql)、[`019_shadow_dedup_unique.sql`](supabase/migrations/019_shadow_dedup_unique.sql)、[`020_hold_limits.sql`](supabase/migrations/020_hold_limits.sql)、[`021_broker_mirror.sql`](supabase/migrations/021_broker_mirror.sql)、……、[`031_signal_forward_2d.sql`](supabase/migrations/031_signal_forward_2d.sql)、[`032_backtest.sql`](supabase/migrations/032_backtest.sql)、[`033_valuation_board.sql`](supabase/migrations/033_valuation_board.sql)、[`034_news_sector.sql`](supabase/migrations/034_news_sector.sql));
 3. 在 **Project Settings → API** 记下 `Project URL` 和 `service_role` key。
 
 ### 2. 部署到 Render
@@ -378,6 +396,8 @@ cd web && npm run dev      # 终端 2:启动 Vite :5173(已配置 /api 代理)
 | `ENABLE_POSITION_REVIEW` | `true` | 每日持仓复查:论点失效的持仓主动卖出/收紧止损 |
 | `POSITION_REVIEW_HOUR` | `14` | 持仓复查触发时间(美东 24 小时制,盘中) |
 | `ENABLE_RISK_OFFICER` | `true` | 风控官:买入前组合级复核(放行/缩仓/否决),失败放弃买入 |
+| `SECTOR_BACKFILL_SYMBOLS` | `12` | 每轮全量抓取回填多少个「缺板块标的」的历史分析行(每标的 1 次公司档案请求) |
+| `SECTOR_BOARD_MAX_ROWS` | `5000` | 板块情绪看板单次聚合的分析行上限(每 1000 行 = 1 次数据库分页请求) |
 | `SIGNAL_STATS_MAX_ROWS` | `20000` | 信号质量统计采样上限(只计已回填的有效行;每 1000 行 = 1 次数据库分页请求,调大拉长覆盖窗口、接口相应变慢) |
 | `ENABLE_SLIPPAGE` | `true` | 模拟成交滑点:按市值/时段/波动/订单冲击对成交价施加不利偏移 |
 | `SLIPPAGE_MAX_BPS` | `150` | 单笔滑点上限(基点) |
@@ -431,7 +451,8 @@ cd web && npm run dev      # 终端 2:启动 Vite :5173(已配置 /api 代理)
 | `GET /api/portfolio` | 组合概览(现金、总值、盈亏、持仓+实时报价) |
 | `GET /api/snapshots` | 净值快照序列(盈亏折线图数据) |
 | `GET /api/trades` | 交易记录(含买卖原因、关联新闻;券商主账本开启时返回参照账户的镜像成交) |
-| `GET /api/news` | 新闻流(含 DeepSeek 分析结果) |
+| `GET /api/news` | 新闻流(含 DeepSeek 分析结果;`?sentiment=`/`?tier=`/`?band=`/`?sector=`/`?symbol=`/`?date=`/`?q=` 服务端筛选) |
+| `GET /api/news/sectors` | 板块情绪看板(11 个 SPDR 行业板块的利好/利空构成、净情绪分、热门个股、宏观乘数;`?date=YYYY-MM-DD` 单日或 `?hours=` 滚动窗口) |
 | `GET /api/stream` | SSE 实时推送流(news / analysis / trade / portfolio / snapshot / cycle / reset / macro / quotes) |
 | `GET /api/stats` | 组合统计(今日盈亏、已实现盈亏、胜率、最大回撤;随主账本切换数据源) |
 | `GET /api/performance` | 业绩指标(夏普比率、累计收益率、SPY 基准对比与超额收益;随主账本切换数据源) |

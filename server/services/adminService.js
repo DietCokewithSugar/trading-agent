@@ -14,6 +14,7 @@ import { resetMetrics } from './metrics.js';
 import { resetRiskControlState } from './riskControls.js';
 import { resetRegimeState } from './macroRegime.js';
 import { clearMacroHistoryCache } from './macroService.js';
+import { clearSectorState } from './sectorService.js';
 import { resetShadowState, initShadowPortfolios, drainShadowQueue } from './shadowPortfolio.js';
 import { resetBrokerMirror } from './brokerMirror.js';
 import { clearBrokerStatsCache } from './brokerStats.js';
@@ -177,6 +178,7 @@ export async function resetAllData() {
     resetRiskControlState();
     resetRegimeState();
     clearMacroHistoryCache(); // macro_events 已清空,逐日回溯序列缓存不得幸存
+    clearSectorState(); // 板块看板缓存与回填冷却表:分析行已清空,缓存不得幸存
     clearBacktestState(); // 请求中止在飞回测(运行行已被清空,继续跑只会烧 LLM 写空行)
     cycleStatus.lastResult = null;
     cycleStatus.lastError = null;

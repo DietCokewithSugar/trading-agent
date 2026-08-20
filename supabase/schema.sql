@@ -855,3 +855,13 @@ create table if not exists valuation_snapshots (
 create index if not exists idx_valuation_snapshots_date on valuation_snapshots (snap_date desc);
 alter table valuation_snapshots enable row level security;
 create policy "public read valuation_snapshots" on valuation_snapshots for select using (true);
+
+-- ── 新闻板块归属(034)──
+-- 分析主体所属板块(SPDR 行业 ETF 口径:XLK/XLV/XLF/XLY/XLC/XLI/XLP/XLE/XLU/XLRE/XLB)。
+-- 列里存数据源原始行业名(与 candidate_signals.sector 同口径),归一到 ETF 板块在代码里完成
+-- (server/services/sectors.js);支持新闻按板块筛选与「板块整体利好/利空」聚合。
+alter table news_analyses add column if not exists sector text;
+create index if not exists idx_analyses_sector on news_analyses (sector, created_at desc)
+  where sector is not null;
+create index if not exists idx_analyses_sector_pending on news_analyses (created_at desc)
+  where sector is null;

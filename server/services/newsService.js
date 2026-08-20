@@ -10,6 +10,7 @@ import { isMacroCandidate, processMacroArticle } from './macroService.js';
 import { recomputeRegime } from './macroRegime.js';
 import { scoreSource, computeFinalConfidence, isSelfIssued } from './credibility.js';
 import { recordSignalPrice } from './signalReturns.js';
+import { resolveSectorForSymbol, backfillAnalysisSectors } from './sectorService.js';
 import { handleSignal } from './trader.js';
 import { getPortfolio } from './portfolio.js';
 import { broadcast } from './bus.js';
@@ -277,10 +278,15 @@ async function analyzeAndStore(article) {
       })
     : null;
 
+  // 板块归属(034):按分析主体的公司档案取行业原文(档案 24 小时进程内缓存,
+  // 交易路径本来也要取同一份);取不到留空,由回填任务补
+  const sector = await resolveSectorForSymbol(analysis.symbol);
+
   const row = {
     news_id: article.id,
     symbol: analysis.symbol,
     company_name: analysis.company_name || null,
+    sector,
     sentiment: analysis.sentiment,
     tier: analysis.tier,
     impact_strength: analysis.impact_strength || null,
@@ -296,8 +302,9 @@ async function analyzeAndStore(article) {
     llm_prompt_tokens: analysis.llm?.promptTokens ?? null,
     llm_completion_tokens: analysis.llm?.completionTokens ?? null,
   };
-  // 兼容旧库:逐个剥离尚未迁移的可选列重试(003/009/012 各自新增的列)
+  // 兼容旧库:逐个剥离尚未迁移的可选列重试(003/009/012/034 各自新增的列)
   const optionalColumns = [
+    'sector',
     'event_summary',
     'final_confidence',
     'run_id',
@@ -361,6 +368,10 @@ export async function runCycle({ fullFetch = false, trigger = 'scheduler' } = {}
       console.log(`[cycle] 新增新闻 ${inserted.length} 条`);
       broadcast('news', { count: inserted.length });
     }
+
+    // 历史分析行的板块回填(034):搭车 fullFetch 节奏(约 5 分钟一轮),
+    // 不阻塞本轮 —— 纯展示层,失败/超时都不该拖慢新闻分析与交易
+    if (fullFetch) backfillAnalysisSectors().catch(() => {});
 
     // 从积压队列取待分析文章(不局限于本轮新增,超上限的文章逐轮消化)
     let toAnalyze;
