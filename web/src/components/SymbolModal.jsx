@@ -12,6 +12,7 @@ import {
   TIER_LABELS,
   SESSION_LABELS,
   TRIGGER_LABELS,
+  SECTOR_LABELS,
 } from '../api.js';
 
 /** 股票详情弹层:报价(含盘前盘后)、持仓、相关新闻分析、交易历史 */
@@ -98,6 +99,12 @@ export default function SymbolModal({ symbol, open, onClose }) {
             <Typography.Text type="secondary" style={{ fontWeight: 400 }}>
               {quote.name}
             </Typography.Text>
+          )}
+          {/* 所属板块(034,SPDR 行业 ETF 口径) */}
+          {data?.sector && SECTOR_LABELS[data.sector] && (
+            <Tag style={{ marginRight: 0, fontWeight: 400 }}>
+              {data.sector} {SECTOR_LABELS[data.sector]}
+            </Tag>
           )}
         </Space>
       }

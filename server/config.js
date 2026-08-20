@@ -234,6 +234,14 @@ export const config = {
   // 全量窗口下接口相应变慢;调大可拉长截断前的覆盖窗口)
   signalStatsMaxRows: num(process.env.SIGNAL_STATS_MAX_ROWS, 20000),
 
+  // ── 板块划分(034)──
+  // 新闻分析按 SPDR 行业 ETF 口径(XLK/XLV/XLF/…)归属板块,支持按板块筛选新闻
+  // 与「板块整体利好/利空」看板。纯展示/筛选层,不参与交易决策。
+  // 每轮全量抓取后回填多少个"缺板块标的"(每标的 1 次公司档案请求,补齐其全部历史行)
+  sectorBackfillSymbols: num(process.env.SECTOR_BACKFILL_SYMBOLS, 12),
+  // 板块看板单次聚合的分析行上限(每 1000 行 = 1 次 PostgREST 分页请求)
+  sectorBoardMaxRows: num(process.env.SECTOR_BOARD_MAX_ROWS, 5000),
+
   // ── 宏观信号层(014)──
   // 总开关:关闭后整体退回"纯新闻即时模式"(无宏观分析/候选池/分配器,行为同 013)
   enableMacro: process.env.ENABLE_MACRO !== 'false',

@@ -32,7 +32,8 @@ export const api = {
     return get(`/trades?${params.toString()}`);
   },
   // 新闻流:筛选/搜索在服务端完成,前端不再为过滤拉全量数据。
-  // date=美东日历日(单日视图),symbol=分析主体精确筛选,tier=档位,band=来源可信度分层
+  // date=美东日历日(单日视图),symbol=分析主体精确筛选,tier=档位,band=来源可信度分层,
+  // sector=板块(SPDR 行业 ETF 代码)
   news: ({
     limit = 60,
     offset = 0,
@@ -42,6 +43,7 @@ export const api = {
     symbol = '',
     tier = null,
     band = null,
+    sector = null,
     date = null,
   } = {}) => {
     const params = new URLSearchParams({ limit });
@@ -51,10 +53,19 @@ export const api = {
     if (['bullish', 'bearish', 'neutral'].includes(filter)) params.set('sentiment', filter);
     if (tier) params.set('tier', tier);
     if (band) params.set('band', band);
+    if (sector) params.set('sector', sector);
     if (symbol) params.set('symbol', symbol);
     if (date) params.set('date', date);
     if (q) params.set('q', q);
     return get(`/news?${params.toString()}`);
+  },
+  // 板块情绪看板(034):date=美东日(与新闻单日视图同口径),缺省取最近 hours 小时
+  sectorBoard: ({ date = null, hours = null } = {}) => {
+    const params = new URLSearchParams();
+    if (date) params.set('date', date);
+    if (hours) params.set('hours', hours);
+    const qs = params.toString();
+    return get(`/news/sectors${qs ? `?${qs}` : ''}`);
   },
   stats: () => get('/stats'),
   performance: () => get('/performance'),
@@ -194,6 +205,39 @@ export function etDayOf(iso) {
 /** 今天的美东日历日 'YYYY-MM-DD' */
 export function etToday() {
   return ET_DAY_FMT.format(new Date());
+}
+
+/**
+ * 板块中文名(SPDR 行业 ETF 口径,顺序即看板展示顺序)。
+ * 归一(数据源行业名 → ETF 代码)在服务端 server/services/sectors.js 完成,
+ * 这里只管展示文案;OTHER 为服务端的未分类兜底桶。
+ */
+export const SECTOR_LABELS = {
+  XLK: '科技',
+  XLV: '医疗保健',
+  XLF: '金融',
+  XLY: '可选消费',
+  XLC: '通信服务',
+  XLI: '工业',
+  XLP: '必需消费',
+  XLE: '能源',
+  XLU: '公用事业',
+  XLRE: '房地产',
+  XLB: '原材料',
+  OTHER: '未分类',
+};
+
+export const SECTOR_KEYS = Object.keys(SECTOR_LABELS).filter((k) => k !== 'OTHER');
+
+/** 板块净情绪分 → 文案(整体利好/利空的强弱档) */
+export function sectorToneLabel(score) {
+  if (score === null || score === undefined || !Number.isFinite(Number(score))) return '无信号';
+  const v = Number(score);
+  if (v >= 0.5) return '强利好';
+  if (v >= 0.15) return '偏利好';
+  if (v > -0.15) return '中性';
+  if (v > -0.5) return '偏利空';
+  return '强利空';
 }
 
 export const TIER_LABELS = {

@@ -535,6 +535,176 @@ body {
 .segbar--up .segbar__seg.is-filled { background: var(--up); }
 .segbar--down .segbar__seg.is-filled { background: var(--down); }
 
+/* ---- 板块情绪看板(新闻页):每行一个板块 + 中轴发散条 ---- */
+.secboard__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding-bottom: 8px;
+  border-bottom: 1px dashed var(--border);
+}
+
+.secboard {
+  display: flex;
+  flex-direction: column;
+}
+
+.secrow {
+  display: grid;
+  grid-template-columns: 132px minmax(120px, 1fr) 92px 84px minmax(0, 190px);
+  align-items: center;
+  gap: 12px;
+  padding: 7px 6px;
+  margin: 0 -6px;
+  border-bottom: 1px dashed var(--border);
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background 150ms var(--ease);
+}
+
+.secrow:last-child {
+  border-bottom: none;
+}
+
+.secrow:hover {
+  background: var(--surface-raised);
+}
+
+.secrow.is-selected {
+  background: var(--surface-raised);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.secrow.is-empty {
+  opacity: 0.45;
+}
+
+.secrow.is-static {
+  cursor: default;
+}
+
+.secrow.is-static:hover {
+  background: transparent;
+}
+
+.secrow__name {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.secrow__etf {
+  font-size: 12px;
+  color: var(--text-secondary);
+  letter-spacing: 0.02em;
+}
+
+.secrow__label {
+  font-size: 13px;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.secrow__score {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 6px;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.secrow__tone {
+  font-size: 11px;
+  color: var(--text-disabled);
+  font-family: inherit;
+}
+
+.secrow__counts {
+  display: flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 3px;
+  font-size: 12px;
+}
+
+.secrow__sep,
+.secrow__neutral {
+  color: var(--text-disabled);
+}
+
+.secrow__meta {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.secrow__sym {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+/* 中轴发散条:向右=利好权重,向左=利空权重,长度按全板块最大权重归一 */
+.secbar {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 8px;
+}
+
+.secbar__side {
+  flex: 1 1 0;
+  display: flex;
+  height: 100%;
+  min-width: 0;
+}
+
+.secbar__side--down {
+  justify-content: flex-end;
+}
+
+.secbar__fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 250ms var(--ease);
+}
+
+.secbar__side--up .secbar__fill {
+  background: var(--up);
+}
+
+.secbar__side--down .secbar__fill {
+  background: var(--down);
+}
+
+.secbar__axis {
+  width: 1px;
+  height: 10px;
+  background: var(--border-visible);
+  flex: 0 0 auto;
+}
+
+@media (max-width: 720px) {
+  .secrow {
+    grid-template-columns: 108px minmax(80px, 1fr) 76px 72px;
+  }
+
+  .secrow__meta {
+    display: none;
+  }
+
+  .secrow__tone {
+    display: none;
+  }
+}
+
 /* ---- 新闻日期热力图(GitHub 风格周列网格)---- */
 .heatmap {
   display: flex;

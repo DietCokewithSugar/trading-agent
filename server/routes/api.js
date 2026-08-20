@@ -29,6 +29,8 @@ import { getBrokerSnapshots } from '../services/brokerMirror.js';
 import { listBrokerTrades } from '../services/brokerStats.js';
 import { safeTokenEqual, createAuthRateLimiter } from '../services/authGuard.js';
 import { clusterAnalyses } from '../services/newsDedup.js';
+import { getSectorBoard, isSectorAvailable } from '../services/sectorService.js';
+import { normalizeSector, sectorProviderNames } from '../services/sectors.js';
 import { getHaltState } from '../services/tradingHalts.js';
 import { etDayRangeUtc } from '../services/riskControls.js';
 import { etDayKey } from '../services/metrics.js';
@@ -146,6 +148,21 @@ router.get(
   })
 );
 
+/** 宏观事件的受影响行业补上归一后的板块 key(034,前端据此显示板块中文名) */
+function withSectorKeys(events) {
+  return (events || []).map((ev) =>
+    Array.isArray(ev?.affected_sectors)
+      ? {
+          ...ev,
+          affected_sectors: ev.affected_sectors.map((s) => ({
+            ...s,
+            sector_key: normalizeSector(s?.sector),
+          })),
+        }
+      : ev
+  );
+}
+
 /**
  * 宏观环境:当前 regime 与生效参数、近期宏观事件、经济日历/黑窗(候选池见 /api/pool)。
  * ?date=YYYY-MM-DD(美东日,仅限过去)切历史视图:当日 regime 由 macro_events 回溯推算
@@ -204,7 +221,7 @@ router.get(
         vix: regime.market_check?.vix ?? null,
         fetched_at: regime.market_check?.fetchedAt ?? null,
       },
-      events: events || [],
+      events: withSectorKeys(events),
       calendar: {
         available: blackout.available,
         blackout: {
@@ -271,7 +288,7 @@ async function buildHistoricalMacro(dateKey, range) {
       },
     },
     market_check: { available: false, trend: null, spy_price: null, sma20: null, vix: null, fetched_at: null },
-    events: dayEvents,
+    events: withSectorKeys(dayEvents),
     calendar: {
       available: dayCalendar !== null,
       // 黑窗是"现在"语义,历史日恒不激活
@@ -507,10 +524,13 @@ router.get(
       sources,
       members,
     }));
+    // 该标的所属板块(034):分析行按时间倒序,取最近一条有行业记录的
+    const sectorRaw = (analysesRes.data || []).find((a) => a?.sector)?.sector || null;
     res.json({
       symbol,
       quote,
       position: posRes.data || null,
+      sector: normalizeSector(sectorRaw),
       analyses,
       trades: tradesRes.data || [],
     });
@@ -571,6 +591,8 @@ const NEWS_BAND_RANGES = {
  * ?analyzed=true 只看已分析;?sentiment=bullish|bearish|neutral 按方向过滤
  * (bullish/bearish 隐含有档位;neutral 的 tier 本为 null,不附加档位条件);
  * ?tier=1..4 按档位过滤;?symbol=XXX 按分析主体代码精确过滤(权威口径,只命中已分析文章);
+ * ?sector=XLK|XLV|... 按板块过滤(SPDR 行业 ETF 口径,库里存的是数据源原始行业名,
+ * 按该板块的全部别名 in 匹配;034 未执行时忽略该条件);
  * ?band=high|mid|low 按来源可信度分层过滤;?date=YYYY-MM-DD 按美东日历日过滤(单日视图);
  * ?q=xxx 按标题/原始股票标签模糊搜索;?before=<ISO> 游标分页(发布时间早于该时刻,
  * 防 SSE 推送让 offset 漂移漏行)。非法参数值一律按未传处理(fail-soft)。
@@ -591,6 +613,9 @@ router.get(
     const symbolRaw = String(req.query.symbol || '').trim().toUpperCase();
     const symbol = /^[A-Z0-9.\-]{1,10}$/.test(symbolRaw) ? symbolRaw : null;
     const band = NEWS_BAND_RANGES[req.query.band] ? req.query.band : null;
+    // 板块筛选:参数接受 ETF 代码(XLK/XLV/…),库里存的是数据源原始行业名
+    const sectorKey = req.query.sector ? normalizeSector(String(req.query.sector)) : null;
+    const sectorNames = sectorKey && isSectorAvailable() ? sectorProviderNames(sectorKey) : [];
     const dateKey = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.date || ''))
       ? String(req.query.date)
       : null;
@@ -601,10 +626,10 @@ router.get(
       .slice(0, 40)
       .replace(/[%,()."'\\{}]/g, '');
 
-    const buildQuery = (cols, { withBand = true } = {}) => {
+    const buildQuery = (cols, { withBand = true, withSector = true } = {}) => {
       // 子表(news_analyses)字段上的过滤需要 inner join,
       // 否则嵌套过滤只清空子数组、不过滤父行
-      const needsInner = Boolean(sentiment || tier || symbol);
+      const needsInner = Boolean(sentiment || tier || symbol || sectorNames.length);
       let query = supabase()
         .from('news_articles')
         .select(`${cols}, ${needsInner ? 'news_analyses!inner(*)' : 'news_analyses(*)'}`)
@@ -625,6 +650,7 @@ router.get(
       }
       if (tier) query = query.eq('news_analyses.tier', tier);
       if (symbol) query = query.eq('news_analyses.symbol', symbol);
+      if (withSector && sectorNames.length) query = query.in('news_analyses.sector', sectorNames);
       if (!needsInner && onlyAnalyzed) {
         query = query.not('news_analyses', 'is', null);
       }
@@ -639,9 +665,14 @@ router.get(
       return query;
     };
 
-    let { data, error } = await buildQuery(
-      'id, url, title, source, publisher, source_domain, source_score, symbols, published_at, fetched_at'
-    );
+    const FULL_COLS =
+      'id, url, title, source, publisher, source_domain, source_score, symbols, published_at, fetched_at';
+    let { data, error } = await buildQuery(FULL_COLS);
+    // 兼容尚未执行 034 迁移的数据库:去掉板块筛选条件重试(其余筛选照常)
+    if (error && sectorNames.length && /sector/i.test(error.message)) {
+      console.warn('[api] news_analyses.sector 列不可用,板块筛选已忽略(请执行 034 迁移)');
+      ({ data, error } = await buildQuery(FULL_COLS, { withSector: false }));
+    }
     // 兼容尚未执行 009 迁移的数据库:去掉来源可信度列(以及基于它的分层过滤)重试
     if (error && /source_domain|source_score/.test(error.message)) {
       if (band) console.warn('[api] source_score 列不可用,来源可信度筛选已忽略(请执行 009 迁移)');
@@ -651,7 +682,33 @@ router.get(
       ));
     }
     if (error) throw new Error(error.message);
-    res.json(data || []);
+    // 板块归一(034)只在服务端做:前端拿 sector_key(ETF 代码)直接查中文名
+    res.json(
+      (data || []).map((row) => ({
+        ...row,
+        news_analyses: Array.isArray(row.news_analyses)
+          ? row.news_analyses.map((a) => ({ ...a, sector_key: normalizeSector(a?.sector) }))
+          : row.news_analyses,
+      }))
+    );
+  })
+);
+
+/**
+ * 板块情绪看板(034):按 SPDR 行业 ETF 口径(XLK/XLV/XLF/…)汇总某一天或某窗口内
+ * 各板块的利好/利空构成与净情绪分(权重 = 综合置信度 × 档位分),
+ * 并附宏观层对该板块的乘数(0.6–1.2)。
+ * ?date=YYYY-MM-DD 单个美东日(与新闻页单日视图同口径);缺省为最近 ?hours=(默认 24)小时。
+ * 未执行 034 迁移时返回 { available: false },前端据此隐藏板块筛选与看板。
+ */
+router.get(
+  '/news/sectors',
+  asyncHandler(async (req, res) => {
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(String(req.query.date || ''))
+      ? String(req.query.date)
+      : null;
+    const hours = Number(req.query.hours) || 24;
+    res.json(await getSectorBoard({ date, hours }));
   })
 );
 

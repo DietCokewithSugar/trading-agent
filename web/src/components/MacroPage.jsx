@@ -25,6 +25,7 @@ import {
   REGIME_LABELS,
   REGIME_TAG_COLORS,
   MACRO_EVENT_TYPE_LABELS,
+  SECTOR_LABELS,
 } from '../api.js';
 import SegmentedBar from './SegmentedBar.jsx';
 import MacroHeatmap from './MacroHeatmap.jsx';
@@ -272,7 +273,10 @@ function MacroEventsTable({ events, historical, date }) {
                   <Space size={6} wrap style={{ marginTop: r.summary ? 8 : 0 }}>
                     {r.affected_sectors.map((s) => (
                       <Tag key={s.sector} color={SECTOR_DIR_COLORS[s.direction]} style={{ marginRight: 0 }}>
-                        {s.sector}
+                        {/* 板块中文名(034);服务端未归一出 key 时退回原始行业名 */}
+                        {s.sector_key && SECTOR_LABELS[s.sector_key]
+                          ? `${s.sector_key} ${SECTOR_LABELS[s.sector_key]}`
+                          : s.sector}
                       </Tag>
                     ))}
                   </Space>
